@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<LanguageData>
+
+  <!-- ==================== 模组设置 ==================== -->
+  <UESDdebuger.SettingsCategory>UESDdebuger 调试工具链</UESDdebuger.SettingsCategory>
+  <UESDdebuger.SettingsHeader>项目配置（MCP/config.json）与工具开关（MCP/toolConfig.json）。关闭本窗口即保存；MCP 服务端需重启生效。</UESDdebuger.SettingsHeader>
+  <UESDdebuger.ButtonRedetectConfig>重新探测并重置 config.json</UESDdebuger.ButtonRedetectConfig>
+  <UESDdebuger.ButtonShowAnnouncements>再次弹配置公告窗（不修改配置）</UESDdebuger.ButtonShowAnnouncements>
+  <UESDdebuger.ToolSectionHeader>工具开关（toolConfig.json tools）——取消勾选即禁用；agg_call_tool 仍可调用被禁用的工具</UESDdebuger.ToolSectionHeader>
+  <UESDdebuger.ResetComplete>重置完成：{0}</UESDdebuger.ResetComplete>
+  <UESDdebuger.ResetFailed>重置失败：{0}</UESDdebuger.ResetFailed>
+
+  <!-- ==================== 公告弹窗 ==================== -->
+  <UESDdebuger.DialogFirstRunTitle>UESDdebuger 首次启动配置公告</UESDdebuger.DialogFirstRunTitle>
+  <UESDdebuger.DialogCodeLabel>MCP 配置代码：</UESDdebuger.DialogCodeLabel>
+  <UESDdebuger.DialogCopyButton>将选定IDE配置复制到剪贴板</UESDdebuger.DialogCopyButton>
+  <UESDdebuger.DialogCopied>MCP 配置已复制到剪贴板。</UESDdebuger.DialogCopied>
+  <UESDdebuger.DialogOk>确定</UESDdebuger.DialogOk>
+  <UESDdebuger.DialogNoIdeSelected>（未选择 IDE）</UESDdebuger.DialogNoIdeSelected>
+  <UESDdebuger.DialogChangelogTitle>UESDdebuger 更新公告</UESDdebuger.DialogChangelogTitle>
+  <UESDdebuger.DialogChangelogEmpty>（当前版本暂无更新说明）</UESDdebuger.DialogChangelogEmpty>
+  <UESDdebuger.Version>版本 {0}</UESDdebuger.Version>
+
+  <!-- ==================== 工具说明（键由工具名派生） ==================== -->
+  <UESDdebuger.ToolDesc.agg_list_tools>聚合元工具：列出全部工具及[启用]/[禁用]状态，即使压缩模式下被压缩隐藏的工具也能看到</UESDdebuger.ToolDesc.agg_list_tools>
+  <UESDdebuger.ToolDesc.agg_call_tool>聚合元工具：按工具名直接调用任意工具——包括本列表中被禁用（取消勾选）的工具；仅需 agg_call_tool 自身启用</UESDdebuger.ToolDesc.agg_call_tool>
+  <UESDdebuger.ToolDesc.mcp_help>查询任意工具的用法说明（参数/前置条件/示例）</UESDdebuger.ToolDesc.mcp_help>
+  <UESDdebuger.ToolDesc.start_game>启动 RimWorld 并等待主菜单就绪</UESDdebuger.ToolDesc.start_game>
+  <UESDdebuger.ToolDesc.stop_game>停止 RimWorld 游戏进程</UESDdebuger.ToolDesc.stop_game>
+  <UESDdebuger.ToolDesc.get_game_status>获取游戏运行状态与阶段</UESDdebuger.ToolDesc.get_game_status>
+  <UESDdebuger.ToolDesc.read_log>读取游戏日志</UESDdebuger.ToolDesc.read_log>
+  <UESDdebuger.ToolDesc.tail_log>获取最新日志内容</UESDdebuger.ToolDesc.tail_log>
+  <UESDdebuger.ToolDesc.get_config>获取当前项目配置</UESDdebuger.ToolDesc.get_config>
+  <UESDdebuger.ToolDesc.start_quick_test>触发快速进图测试并等待地图加载完成</UESDdebuger.ToolDesc.start_quick_test>
+  <UESDdebuger.ToolDesc.inspect_type>[UE] 在 UE 检视器中打开指定类型</UESDdebuger.ToolDesc.inspect_type>
+  <UESDdebuger.ToolDesc.get_unityexplorer_status>[UE] 获取 UE 界面与面板就绪状态</UESDdebuger.ToolDesc.get_unityexplorer_status>
+  <UESDdebuger.ToolDesc.clear_unityexplorer_logs>[UE] 清空 UE 日志面板</UESDdebuger.ToolDesc.clear_unityexplorer_logs>
+  <UESDdebuger.ToolDesc.get_unityexplorer_logs>[UE] 读取 UE 日志面板内容</UESDdebuger.ToolDesc.get_unityexplorer_logs>
+  <UESDdebuger.ToolDesc.create_hook>[UE] 创建方法 Hook 拦截调用以查看参数/返回值</UESDdebuger.ToolDesc.create_hook>
+  <UESDdebuger.ToolDesc.toggle_hook>[UE] 启用或停用已创建的 Hook</UESDdebuger.ToolDesc.toggle_hook>
+  <UESDdebuger.ToolDesc.delete_hook>[UE] 删除已创建的 Hook</UESDdebuger.ToolDesc.delete_hook>
+  <UESDdebuger.ToolDesc.list_hooks>[UE] 列出全部已创建的 Hook</UESDdebuger.ToolDesc.list_hooks>
+  <UESDdebuger.ToolDesc.execute_csharp_code>[UE] 在 UE C# 控制台执行代码</UESDdebuger.ToolDesc.execute_csharp_code>
+  <UESDdebuger.ToolDesc.reset_csharp_console>[UE] 重置 UE C# 控制台状态</UESDdebuger.ToolDesc.reset_csharp_console>
+  <UESDdebuger.ToolDesc.add_using_directive>[UE] 为 C# 控制台添加 using 指令</UESDdebuger.ToolDesc.add_using_directive>
+  <UESDdebuger.ToolDesc.post_camera_change_zoom>[RIMAPI] 调整游戏相机缩放</UESDdebuger.ToolDesc.post_camera_change_zoom>
+  <UESDdebuger.ToolDesc.post_camera_change_position>[RIMAPI] 移动游戏相机到指定坐标</UESDdebuger.ToolDesc.post_camera_change_position>
+  <UESDdebuger.ToolDesc.post_stream_start>[RIMAPI] 开始相机视频流</UESDdebuger.ToolDesc.post_stream_start>
+  <UESDdebuger.ToolDesc.post_stream_stop>[RIMAPI] 停止相机视频流</UESDdebuger.ToolDesc.post_stream_stop>
+  <UESDdebuger.ToolDesc.post_stream_setup>[RIMAPI] 配置视频流参数</UESDdebuger.ToolDesc.post_stream_setup>
+  <UESDdebuger.ToolDesc.get_game_state>[RIMAPI] 获取游戏当前状态</UESDdebuger.ToolDesc.get_game_state>
+  <UESDdebuger.ToolDesc.get_colonists>[RIMAPI] 获取殖民者列表</UESDdebuger.ToolDesc.get_colonists>
+  <UESDdebuger.ToolDesc.get_maps>[RIMAPI] 获取地图列表</UESDdebuger.ToolDesc.get_maps>
+  <UESDdebuger.ToolDesc.get_map_things>[RIMAPI] 获取地图上的物品</UESDdebuger.ToolDesc.get_map_things>
+  <UESDdebuger.ToolDesc.get_map_plants>[RIMAPI] 获取地图上的植物</UESDdebuger.ToolDesc.get_map_plants>
+  <UESDdebuger.ToolDesc.get_map_weather>[RIMAPI] 获取地图天气信息</UESDdebuger.ToolDesc.get_map_weather>
+  <UESDdebuger.ToolDesc.get_map_animals>[RIMAPI] 获取地图上的动物</UESDdebuger.ToolDesc.get_map_animals>
+  <UESDdebuger.ToolDesc.get_research>[RIMAPI] 获取研究进度</UESDdebuger.ToolDesc.get_research>
+  <UESDdebuger.ToolDesc.get_factions>[RIMAPI] 获取派系列表</UESDdebuger.ToolDesc.get_factions>
+  <UESDdebuger.ToolDesc.get_world_caravans>[RIMAPI] 获取世界地图商队列表</UESDdebuger.ToolDesc.get_world_caravans>
+  <UESDdebuger.ToolDesc.post_game_load>[RIMAPI] 加载游戏存档</UESDdebuger.ToolDesc.post_game_load>
+  <UESDdebuger.ToolDesc.post_game_save>[RIMAPI] 保存游戏</UESDdebuger.ToolDesc.post_game_save>
+  <UESDdebuger.ToolDesc.post_incident_execute>[RIMAPI] 执行随机事件</UESDdebuger.ToolDesc.post_incident_execute>
+  <UESDdebuger.ToolDesc.post_order_designate>[RIMAPI] 下达区域指令（采矿/收割/狩猎等）</UESDdebuger.ToolDesc.post_order_designate>
+  <UESDdebuger.ToolDesc.post_game_speed>[RIMAPI] 设置游戏时间速度</UESDdebuger.ToolDesc.post_game_speed>
+  <UESDdebuger.ToolDesc.get_colonists_detailed>[RIMAPI] 获取所有殖民者详细信息</UESDdebuger.ToolDesc.get_colonists_detailed>
+  <UESDdebuger.ToolDesc.get_colonist_detailed>[RIMAPI] 获取单个殖民者详细信息</UESDdebuger.ToolDesc.get_colonist_detailed>
+  <UESDdebuger.ToolDesc.get_version>[RIMAPI] 获取游戏/模组/API 版本信息</UESDdebuger.ToolDesc.get_version>
+  <UESDdebuger.ToolDesc.get_mods_info>[RIMAPI] 获取已加载模组列表</UESDdebuger.ToolDesc.get_mods_info>
+  <UESDdebuger.ToolDesc.post_select>[RIMAPI] 选择游戏中的对象</UESDdebuger.ToolDesc.post_select>
+  <UESDdebuger.ToolDesc.post_deselect>[RIMAPI] 取消当前选择</UESDdebuger.ToolDesc.post_deselect>
+  <UESDdebuger.ToolDesc.post_ui_message>[RIMAPI] 在游戏中显示消息通知</UESDdebuger.ToolDesc.post_ui_message>
+  <UESDdebuger.ToolDesc.post_ui_dialog>[RIMAPI] 在游戏中显示对话框</UESDdebuger.ToolDesc.post_ui_dialog>
+  <UESDdebuger.ToolDesc.post_dev_console>[RIMAPI] 操作开发者控制台</UESDdebuger.ToolDesc.post_dev_console>
+  <UESDdebuger.ToolDesc.list_debug_actions>[Debug] 列出 DebugAction 菜单</UESDdebuger.ToolDesc.list_debug_actions>
+  <UESDdebuger.ToolDesc.get_debug_action_detail>[Debug] 获取 DebugAction 完整信息</UESDdebuger.ToolDesc.get_debug_action_detail>
+  <UESDdebuger.ToolDesc.execute_debug_action>[Debug] 执行指定的 DebugAction</UESDdebuger.ToolDesc.execute_debug_action>
+  <UESDdebuger.ToolDesc.get_debug_action_categories>[Debug] 获取 DebugAction 分类列表</UESDdebuger.ToolDesc.get_debug_action_categories>
+  <UESDdebuger.ToolDesc.search_debug_actions>[Debug] 按关键词搜索 DebugAction</UESDdebuger.ToolDesc.search_debug_actions>
+  <UESDdebuger.ToolDesc.get_map_structure>[Map] 读取地图结构数据</UESDdebuger.ToolDesc.get_map_structure>
+  <UESDdebuger.ToolDesc.search_map_structure>[Map] 按关键词搜索地图结构</UESDdebuger.ToolDesc.search_map_structure>
+  <UESDdebuger.ToolDesc.status>[调试] 查看调试会话状态</UESDdebuger.ToolDesc.status>
+  <UESDdebuger.ToolDesc.attach>[调试] 连接 RimWorld 的 mono 调试端口</UESDdebuger.ToolDesc.attach>
+  <UESDdebuger.ToolDesc.detach>[调试] 安全断开调试会话</UESDdebuger.ToolDesc.detach>
+  <UESDdebuger.ToolDesc.resume>[调试] 恢复 VM 运行</UESDdebuger.ToolDesc.resume>
+  <UESDdebuger.ToolDesc.suspend>[调试] 挂起整个 VM</UESDdebuger.ToolDesc.suspend>
+  <UESDdebuger.ToolDesc.launch>[调试] 以调试模式启动游戏并自动附加</UESDdebuger.ToolDesc.launch>
+  <UESDdebuger.ToolDesc.break_add>[调试] 在指定方法设置断点</UESDdebuger.ToolDesc.break_add>
+  <UESDdebuger.ToolDesc.break_list>[调试] 列出当前会话全部断点</UESDdebuger.ToolDesc.break_list>
+  <UESDdebuger.ToolDesc.break_remove>[调试] 按 id 移除断点</UESDdebuger.ToolDesc.break_remove>
+  <UESDdebuger.ToolDesc.break_clear>[调试] 清空全部断点</UESDdebuger.ToolDesc.break_clear>
+  <UESDdebuger.ToolDesc.break_exception>[调试] 创建异常断点（按异常类型/捕获状态）</UESDdebuger.ToolDesc.break_exception>
+  <UESDdebuger.ToolDesc.wait>[调试] 等待匹配的调试事件（断点/步进/异常）</UESDdebuger.ToolDesc.wait>
+  <UESDdebuger.ToolDesc.step>[调试] 单步执行（进入/跳过/跳出）</UESDdebuger.ToolDesc.step>
+  <UESDdebuger.ToolDesc.threads>[调试] 列出 VM 全部线程</UESDdebuger.ToolDesc.threads>
+  <UESDdebuger.ToolDesc.callstack>[调试] 获取指定线程调用栈</UESDdebuger.ToolDesc.callstack>
+  <UESDdebuger.ToolDesc.locals>[调试] 获取栈帧实参/局部变量/this</UESDdebuger.ToolDesc.locals>
+  <UESDdebuger.ToolDesc.inspect>[调试] 展开对象字段（子对象返回句柄）</UESDdebuger.ToolDesc.inspect>
+  <UESDdebuger.ToolDesc.eval>[调试] 在游戏进程内求值表达式</UESDdebuger.ToolDesc.eval>
+  <UESDdebuger.ToolDesc.find_types>[调试] 按子串搜索类型</UESDdebuger.ToolDesc.find_types>
+  <UESDdebuger.ToolDesc.find_methods>[调试] 按方法名子串搜索方法</UESDdebuger.ToolDesc.find_methods>
+
+</LanguageData>

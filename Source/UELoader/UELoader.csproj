@@ -1,0 +1,83 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <RootNamespace>UELoader</RootNamespace>
+    <AssemblyName>UELoader</AssemblyName>
+    <Version>0.8.0.0</Version>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Deterministic>true</Deterministic>
+    <Nullable>disable</Nullable>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 首启解压 bun 运行时（UnzipRuntime.cs）需要的 BCL 程序集；运行时由游戏 Mono 提供 -->
+    <Reference Include="System.IO.Compression" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- RimWorld 游戏程序集（编译引用，不复制）。
+         注意：HintPath 以 C:\SteamLibrary 的实际游戏为准（目标游戏为
+         C:\SteamLibrary\steamapps\common\RimWorld，1.6.9676）。
+         曾指向 F:\RimWorld3（1.6.9438），两者 Assembly-CSharp.dll 哈希不一致，故统一改指 C:\SteamLibrary。 -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- UE 公共 API 面涉及的 UnityEngine 模块（保险引用，避免元数据传递解析失败） -->
+    <Reference Include="UnityEngine.UI">
+      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- 0Harmony 2.3.3（brrainz.harmony / Lib.Harmony，与重编译 UE 编译面一致）。
+         运行时由 brrainz.harmony 模组提供；UESDdebuger/Assemblies 不再携带 0Harmony。 -->
+    <Reference Include="0Harmony">
+      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\Mods\RimworldMCPDebug\Assemblies\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- 重编译的 UE 二进制（UESDdebuger/Assemblies，HintPath 指向绝对路径，不复制到输出） -->
+    <Reference Include="UnityExplorer.STANDALONE.Mono">
+      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Assemblies\UnityExplorer.STANDALONE.Mono.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UniverseLib.Mono">
+      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Assemblies\UniverseLib.Mono.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- 构建后把 UELoader.dll 部署到 UESDdebuger/Assemblies（仅本产物，避免覆盖官方 UE DLL） -->
+  <Target Name="DeployToAssemblies" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Assemblies" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFolder="C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Assemblies" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+  </Target>
+
+</Project>

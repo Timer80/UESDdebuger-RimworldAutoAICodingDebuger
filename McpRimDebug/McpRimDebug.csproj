@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Version>0.8.0.0</Version>
+    <!-- vendored mono 6.12 Mono.Debugger.Soft 代码会触发 SYSLIB 过时告警（BinaryFormatter/MarshalByRefObject 等），
+         仅作为告警保留，不得升级为错误 -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <!-- 旧代码按旧语义编译，不启用隐式 using 与可空上下文 -->
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AssemblyName>McpRimDebug</AssemblyName>
+    <RootNamespace>McpRimDebug</RootNamespace>
+    <!-- vendored 代码是 C# 4 时代源码：C# 14 起 'field' 成为半自动属性的合成后备字段关键字，
+         CustomAttributeNamedArgumentMirror.Field 的 `return field;` 会被重新绑定导致运行时行为变化（返回 null）。
+         固定为 C# 13 以保持上游语义（CS9258 不再出现）。 -->
+    <LangVersion>13.0</LangVersion>
+    <!-- SdbClient 全部源文件与根目录源文件均显式纳入编译，避免依赖默认 glob 的隐式行为 -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- vendored DataConverter.cs 使用 unsafe（指针转换），需要允许不安全代码 -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- 与上游 mono 的 Mono.Debugger.Soft 构建一致：
+         ENABLE_CECIL 启用 Cecil 驱动的 IL 解析/行映射（Method.Locations 等，供后续断点/调用栈使用）；
+         MONO_DATACONVERTER_STATIC_METHODS 暴露 DataConverter 的静态方法（Connection.cs 依赖） -->
+    <DefineConstants>ENABLE_CECIL;MONO_DATACONVERTER_STATIC_METHODS</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- vendored Mono.Debugger.Soft（协议 2.57），内容保持上游原样，不改动 -->
+    <Compile Include="SdbClient\*.cs" />
+    <!-- 后续任务新增的宿主源文件（Program.cs / DebugSession.cs 等）放在项目根目录 -->
+    <Compile Include="*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" Version="2.1.0" />
+    <PackageReference Include="Mono.Cecil" Version="0.10.4" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,18 @@
+{
+  "name": "rimworld-debug-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for RimWorld debug and development tools",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  },
+  "keywords": ["rimworld", "mcp", "game-control"],
+  "author": "NightmareCorporation",
+  "license": "MIT"
+}

@@ -1,0 +1,20 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+  <name>UESDdebuger - UnityExplorer + SDB Debug</name>
+  <author>UESDdebuger</author>
+  <packageId>UESDdebuger.debug.unityexplorer</packageId>
+  <modVersion>0.8.0.0</modVersion>
+  <description>Debug toolchain mod for RimWorld: in-game UnityExplorer (UE 4.9.0, official binary unmodified, press F7 to show/hide UI) + SDB code-level debugger (McpRimDebug), used for RimWorld game debugging.
+调试用模组：游戏内 UnityExplorer（UE 4.9.0，官方二进制零修改，按 F7 显示/隐藏界面） + SDB 代码级调试器（McpRimDebug），用于 RimWorld 游戏调试。
+Portions of the materials used to create this content/mod are trademarks and/or copyrighted works of Ludeon Studios Inc. All rights reserved by Ludeon. This content/mod is not official and is not endorsed by Ludeon.</description>
+  <supportedVersions>
+    <li>1.5</li>
+    <li>1.6</li>
+  </supportedVersions>
+  <modDependencies>
+    <li>
+      <packageId>brrainz.harmony</packageId>
+      <displayName>Harmony</displayName>
+    </li>
+  </modDependencies>
+</ModMetaData>

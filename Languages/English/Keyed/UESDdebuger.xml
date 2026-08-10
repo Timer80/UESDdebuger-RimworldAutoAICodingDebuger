@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<LanguageData>
+
+  <!-- ==================== Mod settings ==================== -->
+  <UESDdebuger.SettingsCategory>UESDdebuger Debug Toolchain</UESDdebuger.SettingsCategory>
+  <UESDdebuger.SettingsHeader>Project configuration (MCP/config.json) and tool toggles (MCP/toolConfig.json). Closing this window saves; the MCP server needs to be restarted to take effect.</UESDdebuger.SettingsHeader>
+  <UESDdebuger.ButtonRedetectConfig>Redetect and reset config.json</UESDdebuger.ButtonRedetectConfig>
+  <UESDdebuger.ButtonShowAnnouncements>Show configuration announcements again (does not modify configuration)</UESDdebuger.ButtonShowAnnouncements>
+  <UESDdebuger.ToolSectionHeader>Tool toggles (toolConfig.json tools) — uncheck to disable; agg_call_tool can still invoke disabled tools</UESDdebuger.ToolSectionHeader>
+  <UESDdebuger.ResetComplete>Reset complete: {0}</UESDdebuger.ResetComplete>
+  <UESDdebuger.ResetFailed>Reset failed: {0}</UESDdebuger.ResetFailed>
+
+  <!-- ==================== Announcement dialogs ==================== -->
+  <UESDdebuger.DialogFirstRunTitle>UESDdebuger First-Run Configuration</UESDdebuger.DialogFirstRunTitle>
+  <UESDdebuger.DialogCodeLabel>MCP configuration code:</UESDdebuger.DialogCodeLabel>
+  <UESDdebuger.DialogCopyButton>Copy selected IDE configuration to clipboard</UESDdebuger.DialogCopyButton>
+  <UESDdebuger.DialogCopied>MCP configuration copied to clipboard.</UESDdebuger.DialogCopied>
+  <UESDdebuger.DialogOk>OK</UESDdebuger.DialogOk>
+  <UESDdebuger.DialogNoIdeSelected>(No IDE selected)</UESDdebuger.DialogNoIdeSelected>
+  <UESDdebuger.DialogChangelogTitle>UESDdebuger Update Notes</UESDdebuger.DialogChangelogTitle>
+  <UESDdebuger.DialogChangelogEmpty>(No update notes for the current version)</UESDdebuger.DialogChangelogEmpty>
+  <UESDdebuger.Version>Version {0}</UESDdebuger.Version>
+
+  <!-- ==================== Tool descriptions (key derived from tool name) ==================== -->
+  <UESDdebuger.ToolDesc.agg_list_tools>Aggregation meta-tool: lists all tools with [enabled]/[disabled] status, including tools hidden by compressed mode</UESDdebuger.ToolDesc.agg_list_tools>
+  <UESDdebuger.ToolDesc.agg_call_tool>Aggregation meta-tool: invokes any tool directly by name — including tools disabled (unchecked) in this list; only agg_call_tool itself needs to be enabled</UESDdebuger.ToolDesc.agg_call_tool>
+  <UESDdebuger.ToolDesc.mcp_help>Query usage instructions for any tool (parameters/prerequisites/examples)</UESDdebuger.ToolDesc.mcp_help>
+  <UESDdebuger.ToolDesc.start_game>Start RimWorld and wait for the main menu to be ready</UESDdebuger.ToolDesc.start_game>
+  <UESDdebuger.ToolDesc.stop_game>Stop the RimWorld game process</UESDdebuger.ToolDesc.stop_game>
+  <UESDdebuger.ToolDesc.get_game_status>Get game running status and stage</UESDdebuger.ToolDesc.get_game_status>
+  <UESDdebuger.ToolDesc.read_log>Read the game log</UESDdebuger.ToolDesc.read_log>
+  <UESDdebuger.ToolDesc.tail_log>Get the latest log content</UESDdebuger.ToolDesc.tail_log>
+  <UESDdebuger.ToolDesc.get_config>Get current project configuration</UESDdebuger.ToolDesc.get_config>
+  <UESDdebuger.ToolDesc.start_quick_test>Trigger quick-test map load and wait for map loading to complete</UESDdebuger.ToolDesc.start_quick_test>
+  <UESDdebuger.ToolDesc.inspect_type>[UE] Open a specified type in the UE inspector</UESDdebuger.ToolDesc.inspect_type>
+  <UESDdebuger.ToolDesc.get_unityexplorer_status>[UE] Get UE UI and panel readiness status</UESDdebuger.ToolDesc.get_unityexplorer_status>
+  <UESDdebuger.ToolDesc.clear_unityexplorer_logs>[UE] Clear the UE log panel</UESDdebuger.ToolDesc.clear_unityexplorer_logs>
+  <UESDdebuger.ToolDesc.get_unityexplorer_logs>[UE] Read the UE log panel content</UESDdebuger.ToolDesc.get_unityexplorer_logs>
+  <UESDdebuger.ToolDesc.create_hook>[UE] Create a method hook to intercept calls and view parameters/return values</UESDdebuger.ToolDesc.create_hook>
+  <UESDdebuger.ToolDesc.toggle_hook>[UE] Enable or disable a created hook</UESDdebuger.ToolDesc.toggle_hook>
+  <UESDdebuger.ToolDesc.delete_hook>[UE] Delete a created hook</UESDdebuger.ToolDesc.delete_hook>
+  <UESDdebuger.ToolDesc.list_hooks>[UE] List all created hooks</UESDdebuger.ToolDesc.list_hooks>
+  <UESDdebuger.ToolDesc.execute_csharp_code>[UE] Execute code in the UE C# console</UESDdebuger.ToolDesc.execute_csharp_code>
+  <UESDdebuger.ToolDesc.reset_csharp_console>[UE] Reset the UE C# console state</UESDdebuger.ToolDesc.reset_csharp_console>
+  <UESDdebuger.ToolDesc.add_using_directive>[UE] Add a using directive to the C# console</UESDdebuger.ToolDesc.add_using_directive>
+  <UESDdebuger.ToolDesc.post_camera_change_zoom>[RIMAPI] Adjust the game camera zoom</UESDdebuger.ToolDesc.post_camera_change_zoom>
+  <UESDdebuger.ToolDesc.post_camera_change_position>[RIMAPI] Move the game camera to specified coordinates</UESDdebuger.ToolDesc.post_camera_change_position>
+  <UESDdebuger.ToolDesc.post_stream_start>[RIMAPI] Start the camera video stream</UESDdebuger.ToolDesc.post_stream_start>
+  <UESDdebuger.ToolDesc.post_stream_stop>[RIMAPI] Stop the camera video stream</UESDdebuger.ToolDesc.post_stream_stop>
+  <UESDdebuger.ToolDesc.post_stream_setup>[RIMAPI] Configure video stream parameters</UESDdebuger.ToolDesc.post_stream_setup>
+  <UESDdebuger.ToolDesc.get_game_state>[RIMAPI] Get the current game state</UESDdebuger.ToolDesc.get_game_state>
+  <UESDdebuger.ToolDesc.get_colonists>[RIMAPI] Get the colonist list</UESDdebuger.ToolDesc.get_colonists>
+  <UESDdebuger.ToolDesc.get_maps>[RIMAPI] Get the map list</UESDdebuger.ToolDesc.get_maps>
+  <UESDdebuger.ToolDesc.get_map_things>[RIMAPI] Get things on the map</UESDdebuger.ToolDesc.get_map_things>
+  <UESDdebuger.ToolDesc.get_map_plants>[RIMAPI] Get plants on the map</UESDdebuger.ToolDesc.get_map_plants>
+  <UESDdebuger.ToolDesc.get_map_weather>[RIMAPI] Get map weather information</UESDdebuger.ToolDesc.get_map_weather>
+  <UESDdebuger.ToolDesc.get_map_animals>[RIMAPI] Get animals on the map</UESDdebuger.ToolDesc.get_map_animals>
+  <UESDdebuger.ToolDesc.get_research>[RIMAPI] Get research progress</UESDdebuger.ToolDesc.get_research>
+  <UESDdebuger.ToolDesc.get_factions>[RIMAPI] Get the faction list</UESDdebuger.ToolDesc.get_factions>
+  <UESDdebuger.ToolDesc.get_world_caravans>[RIMAPI] Get world map caravan list</UESDdebuger.ToolDesc.get_world_caravans>
+  <UESDdebuger.ToolDesc.post_game_load>[RIMAPI] Load a game save</UESDdebuger.ToolDesc.post_game_load>
+  <UESDdebuger.ToolDesc.post_game_save>[RIMAPI] Save the game</UESDdebuger.ToolDesc.post_game_save>
+  <UESDdebuger.ToolDesc.post_incident_execute>[RIMAPI] Execute a random incident</UESDdebuger.ToolDesc.post_incident_execute>
+  <UESDdebuger.ToolDesc.post_order_designate>[RIMAPI] Issue a zone order (mine/harvest/hunt, etc.)</UESDdebuger.ToolDesc.post_order_designate>
+  <UESDdebuger.ToolDesc.post_game_speed>[RIMAPI] Set the game time speed</UESDdebuger.ToolDesc.post_game_speed>
+  <UESDdebuger.ToolDesc.get_colonists_detailed>[RIMAPI] Get detailed information for all colonists</UESDdebuger.ToolDesc.get_colonists_detailed>
+  <UESDdebuger.ToolDesc.get_colonist_detailed>[RIMAPI] Get detailed information for a single colonist</UESDdebuger.ToolDesc.get_colonist_detailed>
+  <UESDdebuger.ToolDesc.get_version>[RIMAPI] Get game/mod/API version information</UESDdebuger.ToolDesc.get_version>
+  <UESDdebuger.ToolDesc.get_mods_info>[RIMAPI] Get the loaded mod list</UESDdebuger.ToolDesc.get_mods_info>
+  <UESDdebuger.ToolDesc.post_select>[RIMAPI] Select an object in the game</UESDdebuger.ToolDesc.post_select>
+  <UESDdebuger.ToolDesc.post_deselect>[RIMAPI] Deselect the current selection</UESDdebuger.ToolDesc.post_deselect>
+  <UESDdebuger.ToolDesc.post_ui_message>[RIMAPI] Show a message notification in the game</UESDdebuger.ToolDesc.post_ui_message>
+  <UESDdebuger.ToolDesc.post_ui_dialog>[RIMAPI] Show a dialog in the game</UESDdebuger.ToolDesc.post_ui_dialog>
+  <UESDdebuger.ToolDesc.post_dev_console>[RIMAPI] Operate the developer console</UESDdebuger.ToolDesc.post_dev_console>
+  <UESDdebuger.ToolDesc.list_debug_actions>[Debug] List the DebugAction menu</UESDdebuger.ToolDesc.list_debug_actions>
+  <UESDdebuger.ToolDesc.get_debug_action_detail>[Debug] Get full DebugAction information</UESDdebuger.ToolDesc.get_debug_action_detail>
+  <UESDdebuger.ToolDesc.execute_debug_action>[Debug] Execute a specified DebugAction</UESDdebuger.ToolDesc.execute_debug_action>
+  <UESDdebuger.ToolDesc.get_debug_action_categories>[Debug] Get the DebugAction category list</UESDdebuger.ToolDesc.get_debug_action_categories>
+  <UESDdebuger.ToolDesc.search_debug_actions>[Debug] Search DebugActions by keyword</UESDdebuger.ToolDesc.search_debug_actions>
+  <UESDdebuger.ToolDesc.get_map_structure>[Map] Read map structure data</UESDdebuger.ToolDesc.get_map_structure>
+  <UESDdebuger.ToolDesc.search_map_structure>[Map] Search map structure by keyword</UESDdebuger.ToolDesc.search_map_structure>
+  <UESDdebuger.ToolDesc.status>[Debug] View debug session status</UESDdebuger.ToolDesc.status>
+  <UESDdebuger.ToolDesc.attach>[Debug] Connect to RimWorld's mono debug port</UESDdebuger.ToolDesc.attach>
+  <UESDdebuger.ToolDesc.detach>[Debug] Safely detach the debug session</UESDdebuger.ToolDesc.detach>
+  <UESDdebuger.ToolDesc.resume>[Debug] Resume VM execution</UESDdebuger.ToolDesc.resume>
+  <UESDdebuger.ToolDesc.suspend>[Debug] Suspend the entire VM</UESDdebuger.ToolDesc.suspend>
+  <UESDdebuger.ToolDesc.launch>[Debug] Start the game in debug mode and auto-attach</UESDdebuger.ToolDesc.launch>
+  <UESDdebuger.ToolDesc.break_add>[Debug] Set a breakpoint at a specified method</UESDdebuger.ToolDesc.break_add>
+  <UESDdebuger.ToolDesc.break_list>[Debug] List all breakpoints in the current session</UESDdebuger.ToolDesc.break_list>
+  <UESDdebuger.ToolDesc.break_remove>[Debug] Remove a breakpoint by id</UESDdebuger.ToolDesc.break_remove>
+  <UESDdebuger.ToolDesc.break_clear>[Debug] Clear all breakpoints</UESDdebuger.ToolDesc.break_clear>
+  <UESDdebuger.ToolDesc.break_exception>[Debug] Create an exception breakpoint (by exception type/catch state)</UESDdebuger.ToolDesc.break_exception>
+  <UESDdebuger.ToolDesc.wait>[Debug] Wait for a matching debug event (breakpoint/step/exception)</UESDdebuger.ToolDesc.wait>
+  <UESDdebuger.ToolDesc.step>[Debug] Single step (into/over/out)</UESDdebuger.ToolDesc.step>
+  <UESDdebuger.ToolDesc.threads>[Debug] List all VM threads</UESDdebuger.ToolDesc.threads>
+  <UESDdebuger.ToolDesc.callstack>[Debug] Get the call stack of a specified thread</UESDdebuger.ToolDesc.callstack>
+  <UESDdebuger.ToolDesc.locals>[Debug] Get stack frame arguments/locals/this</UESDdebuger.ToolDesc.locals>
+  <UESDdebuger.ToolDesc.inspect>[Debug] Expand object fields (child objects return handles)</UESDdebuger.ToolDesc.inspect>
+  <UESDdebuger.ToolDesc.eval>[Debug] Evaluate an expression inside the game process</UESDdebuger.ToolDesc.eval>
+  <UESDdebuger.ToolDesc.find_types>[Debug] Search types by substring</UESDdebuger.ToolDesc.find_types>
+  <UESDdebuger.ToolDesc.find_methods>[Debug] Search methods by method name substring</UESDdebuger.ToolDesc.find_methods>
+
+</LanguageData>

@@ -1,0 +1,17 @@
+{
+  "name": "rimworld-mcp-aggregator",
+  "version": "1.0.0",
+  "description": "MCP aggregator: aggregates rimworld_DebugInEnvironment upstream (SSE) and compresses the exposed tool list",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  },
+  "keywords": ["rimworld", "mcp", "aggregator"],
+  "license": "MIT"
+}

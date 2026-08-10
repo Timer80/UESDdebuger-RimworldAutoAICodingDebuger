@@ -14,11 +14,10 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 ## 快速开始
 
 1. 将本模组放入 `RimWorld/Mods/` 并启用（需同时启用 Harmony）；
-2. 首次启动游戏后，模组会自动完成：
+2. 首次启动游戏后，模组会自动完成大部分配置，比如：
    - 解压便携运行时（`runtime/bun`、`runtime/node`、`MCP/node_modules`，工坊版以 zip 形式携带）；
    - 探测游戏路径/日志路径/Steam 路径并写入 `MCP/config.json`；
-4. 在支持 MCP 的 IDE（Trae 等）中按 模组内的配置接入 MCP 服务器（stdio 或 SSE），即可调用工具。
-
+3.根据进入游戏后显示的配置流程进行配置（不小心关闭了？可以在设置中重新找到）
 
 ## 功能组成
 

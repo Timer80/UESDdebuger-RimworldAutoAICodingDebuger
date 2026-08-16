@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -34,7 +34,6 @@ namespace UELoader
         {
             if (patchInstalled)
                 return;
-            patchInstalled = true;
             try
             {
                 var harmony = new Harmony("UESDdebuger.debug.announcement");
@@ -47,6 +46,7 @@ namespace UELoader
                 var prefix = typeof(AnnouncementWindowQueue).GetMethod("UIRootOnGUI_Prefix",
                     System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
                 harmony.Patch(original, new HarmonyMethod(prefix));
+                patchInstalled = true;   // 移到成功 Patch 之后
             }
             catch (Exception ex)
             {

@@ -16,7 +16,14 @@ namespace UELoader
     /// </summary>
     public static class UEHttpLog
     {
-        public static void Message(string msg) => Write("Message", msg);
+        /// <summary>交流报告/热路径日志开关（P2-MD-1.1/P3-CS-3），默认关。Warning/Error 不受影响。</summary>
+        public static bool DiagnosticEnabled { get; set; } = false;
+
+        public static void Message(string msg)
+        {
+            if (!DiagnosticEnabled) return;   // P3-CS-3：Message 级交流日志默认关
+            Write("Message", msg);
+        }
         public static void Warning(string msg) => Write("Warning", msg);
         public static void Error(string msg) => Write("Error", msg);
 

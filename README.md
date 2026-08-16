@@ -1,14 +1,17 @@
 # UESDdebuger - UnityExplorer + SDB Debug
 
-RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）与代码级调试提供一体化能力.
+RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）与代码级调试提供一体化能力，由三部分组成：
 
-- **MCP 调试服务器**：让支持 MCP 的客户端（Trae / Claude / opencode 等）直接控制游戏——启动/关闭、读日志、进测试地图、执行 C#、管理 Hook、查询殖民地/世界数据、执行 DebugAction 等 57 个工具；
 - **游戏内 UnityExplorer**（UE 4.9.0，官方二进制零修改）：按 `F7` 随时呼出/隐藏，支持对象检视、C# 控制台、方法 Hook、场景/游戏对象浏览等；
+- **MCP 调试服务器**：让支持 MCP 的客户端（Trae / Claude / opencode 等）直接控制游戏——启动/关闭、读日志、进测试地图、执行 C#、管理 Hook、查询殖民地/世界数据、执行 DebugAction 等；连接 RimBridgeServer（GABP）后可用工具**高达 184 个**（含 121 个 `rimworld.*` / `rimbridge.*` 镜像）；
 - **SDB 代码级调试器（McpRimDebug）**：通过 Mono Soft Debugger 协议直连真实游戏进程，提供断点、调用栈、局部变量、单步、求值、对象检查等 20 个调试工具。
 
-> 支持 RimWorld 1.6   
->  依赖 [Harmony](https://steamcommunity.com/sharedfiles/filedetails/?id=2009463077)
-                        [RIMAPI](https://steamcommunity.com/sharedfiles/filedetails/?id=3593423732)。
+> **支持 RimWorld 1.5 / 1.6**
+>
+> **依赖**：
+> - [Harmony](https://steamcommunity.com/sharedfiles/filedetails/?id=2009463077)（**必须**）：模组修补框架，UnityExplorer 与游戏侧桥接均依赖；
+> - [RimBridgeServer](https://steamcommunity.com/sharedfiles/filedetails/?id=3727949765)（**推荐**）：提供 GABP 桥接，连接后 MCP 工具总数从 23 个增至 **184 个**（含 121 个 `rimworld.*` / `rimbridge.*` 镜像工具）；未安装时相关镜像工具不可用，其余功能不受影响；
+> - [RIMAPI](https://steamcommunity.com/sharedfiles/filedetails/?id=3593423732)（**可选**）：游戏数据查询与操作注入类工具（29 个）依赖，未安装时仅这些工具返回 `RIMAPI_NOT_READY`。
 ---
 
 ## 快速开始
@@ -40,7 +43,22 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 
 > **依赖 RIMAPI**：游戏数据查询与操作注入类工具（共 29 个，下表中标注 Ⓡ）依赖第三方模组 **RIMAPI**（Steam 创意工坊/独立发布，端口 `8765`，可用环境变量 `RIMAPI_BASE_URL` 覆盖）。未安装/未启用 RIMAPI 时，这些工具返回 `RIMAPI_NOT_READY` 错误并给出引导；其余工具（基础、UE 集成、DebugAction、Map 结构）不依赖 RIMAPI。
 
-#### 完整工具清单（57 个）
+#### 优先 stdio 启动（P1-MCP-4，单实例）
+
+**推荐以 stdio 直接接入**：本服务用 `MCP_TRANSPORT=stdio` 环境变量或 `--stdio` 启动参数切换，stdout 走 MCP 协议、日志走 stderr，不监听任何 HTTP 端口，由客户端按需 spawn，**天然单实例**。
+
+- 方式一（独立启动脚本）：`.\MCP\start-mcp-stdio.ps1`（等价于 `node MCP/index.js --stdio`）；
+- 方式二（客户端命令行）：`node MCP/index.js --stdio`；
+- 方式三（环境变量）：设置 `MCP_TRANSPORT=stdio` 后再运行 `node MCP/index.js`。
+
+**为什么单实例（避免 HTTP 多实例互踩/争启）**：本服务的菜单/地图通知、鉴权 token、`selfStartedPid` 等全局状态均为模块级共享；HTTP（SSE）模式下若拉起多个实例，它们共享同一份全局状态会彼此互踩，且多个实例可能争相启动/停止游戏（双实例端口冲突、误杀风险，见 `start_game` / `stop_game` 防止重复启动与定向停止的相关实现）。stdio 由客户端每次连接按需创建独立进程，正好规避这一整类问题。
+
+**SSE（HTTP）仍可用但限单客户端**：仅供仍走 HTTP 的 IDE/客户端（如 Trae）使用，同一时间应只有一个客户端连接（地址 `http://127.0.0.1:3000/sse`，`/health` 健康检查）。
+
+
+#### 完整工具清单
+
+> 口径：连接 RimBridgeServer（GABP）后 `agg_list_tools` 实测工具**总数 184**（system 7 / unityexplorer 11 / mono 19 / meta 3 / bridge 16 / game_control 128）。默认压缩仅直接暴露 23 个，其余经 `agg_call_tool` 调用。下方「基础与进程控制」等小节用工具新名（原 `read_log`→`read_rimworld_log`、`tail_log`→`tail_rimworld_log`、`get_config`→`get_game_info`）。
 
 **基础与进程控制（7）**
 
@@ -48,8 +66,8 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 |---|---|
 | `start_game` / `stop_game` | 通过 Steam 或直接启动 / 正常或强制关闭游戏 |
 | `get_game_status` | 运行状态与阶段（多源探测：进程 / RIMAPI / UE） |
-| `read_log` / `tail_log` | 读取游戏日志末尾 N 行 / 实时最新日志 |
-| `get_config` | 获取当前配置 |
+| `read_rimworld_log` / `tail_rimworld_log` | 读取游戏日志末尾 N 行 / 实时最新日志 |
+| `get_game_info` | 获取当前配置与综合信息（三源合并：config + GABP + RIMAPI） |
 | `start_quick_test` | 主菜单即可用：快速进入官方 DevQuickTest 测试地图 |
 
 **聚合与元工具（3）**
@@ -73,6 +91,8 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 
 **RIMAPI 游戏数据（14， 依赖 RIMAPI，多数需进入地图,用于AI方便调用）**
 
+> 部分能力已迁移：`get_colonists`→`rimworld.list_colonists`、`get_mods_info`→`rimworld.list_mods`、`get_game_state`→原生合并 `get_game_info`（见「RimBridgeServer 镜像工具」）。下表保留历史原生名作对照。
+
 | 工具 | 说明 |
 |---|---|
 | `get_game_state` | 游戏当前状态 |
@@ -87,6 +107,8 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 
 **RIMAPI 操作注入（10， 依赖 RIMAPI,需进入地图,用于AI方便调用）**
 
+> 存档/读档/速度/选择等能力在 tool-cleanup 后已被 **GABP 镜像承接**（见「RimBridgeServer 镜像工具」）：`post_game_load`→`rimworld.load_game`、`post_game_save`→`rimworld.save_game`、`post_game_speed`→`rimworld.set_time_speed`、`post_select`/`post_deselect`→`rimworld.select_pawn`/`rimworld.clear_selection`。下表保留历史原生名作对照，直接调用请用镜像名。
+
 | 工具 | 说明 |
 |---|---|
 | `post_game_load` / `post_game_save` | 加载 / 保存存档 |
@@ -99,12 +121,16 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 
 **RIMAPI 镜头与视频流（5，Ⓡ 依赖 RIMAPI，需进入地图）**
 
+> 相机缩放/移动已被镜像承接：`post_camera_change_zoom`→`rimworld.set_camera_zoom`、`post_camera_change_position`→`rimworld.jump_camera_to_cell`。
+
 | 工具 | 说明 |
 |---|---|
 | `post_camera_change_zoom` / `post_camera_change_position` | 调整相机缩放 / 移动相机 |
-| `post_stream_start` / `post_stream_stop` / `post_stream_setup` | 相机视频流开始 / 停止 / 参数配置 |
+| `post_stream_start` / `post_stream_stop` / `post_stream_setup` | 相机视频流开始 / 停止 / 参数配置；`post_stream_start` 支持 `output_frames=true` 随流抓帧输出 JPEG 序列到 `out_dir`（配 `post_stream_stop` 停止） |
 
 **DebugAction（5，需进入地图，经 UE 桥接，不依赖 RIMAPI）**
+
+> 调试菜单遍历与执行已被镜像承接：`list_debug_actions`→`rimworld.list_debug_action_roots`/`rimworld.list_debug_action_children`、`get_debug_action_detail`→`rimworld.get_debug_action`、`execute_debug_action`→`rimworld.execute_debug_action`（仅 `path`/`pawnId`）。
 
 | 工具 | 说明 |
 |---|---|
@@ -121,7 +147,32 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 | `get_map_structure` | 按路径浏览 Map 结构（Grid/Manager/Component 等，含字段/属性/方法） |
 | `search_map_structure` | 搜索 Map 结构路径 |
 
-- **工具开关**：`MCP/toolConfig.json` 按工具启用/禁用，默认压缩预设仅暴露 10 个高频工具；
+**RimBridgeServer（GABP）镜像工具（121 个，依赖 RimBridgeServer）**
+
+> 依赖 **RimBridgeServer**（[Steam 创意工坊](https://steamcommunity.com/sharedfiles/filedetails/?id=3727949765)）。MCP 服务器内置 GABP 客户端，自动从游戏日志发现并连接游戏内 RimBridgeServer 的 GABP 服务器（默认端口 5174），把 RBS 工具以 `rimworld.*` / `rimbridge.*` 前缀镜像进工具表（命名 `/` → `.`）。游戏需进入主菜单后才启动 GABP 服务器，并在日志打印端口与 token。连接状态见 `get_game_status` 的 `gabp` 字段。**13 个重叠能力的原生工具已删除**，由恢复暴露的 GABP 镜像承接为唯一入口（如 `get_colonists`→`rimworld.list_colonists`、`post_game_load`→`rimworld.load_game`、`execute_debug_action`→`rimworld.execute_debug_action` 等）。
+
+默认直接暴露的 13 个镜像：
+
+| 工具 | 说明 |
+|---|---|
+| `rimworld.list_colonists` | 殖民者列表（含 pawnId） |
+| `rimworld.list_mods` | Mod 列表 |
+| `rimworld.save_game` / `rimworld.load_game` | 存档 / 读档（参数 `saveName`） |
+| `rimworld.set_time_speed` | 设置时间流速 |
+| `rimworld.clear_selection` / `rimworld.select_pawn` | 清除选区 / 选择殖民者（需完整 Thing id，如 `Thing_Human737`） |
+| `rimworld.list_debug_action_roots` / `rimworld.list_debug_action_children` | 调试菜单根节点 / 子节点遍历 |
+| `rimworld.get_debug_action` / `rimworld.execute_debug_action` | 调试动作详情 / 执行（仅 `path`/`pawnId`） |
+| `rimworld.jump_camera_to_cell` / `rimworld.set_camera_zoom` | 相机跳转格子 / 设置缩放 |
+
+其余镜像按功能分组（经 `agg_call_tool` 调用，约 108 个）：
+
+- **bridge（16 个 `rimbridge.*`）**：桥接基础——`list_capabilities` / `get_capability` / `list_operations` / `get_operation` / `list_operation_events` / `list_logs` / `get_script_reference` / `get_lua_reference` / `run_script` / `run_lua` / `run_lua_file` / `compile_lua` / `compile_lua_file` / `wait_for_game_loaded` / `wait_for_long_event_idle` / `wait_for_operation`。
+- **game_control 镜像（约 105 个 `rimworld.*`）**：游戏状态 / 时间 / 存档（`pause_game` / `step_game_ticks` / `load_game_ready` / `go_to_main_menu`）、相机（`move_camera` / `zoom_camera` / `frame_pawns`）、交互（`click_cell` / `drag_cell` / `right_click_cell`）、UI（`get_ui_state` / `get_ui_layout` / `open_main_tab` / `execute_gizmo`）、通知（`list_letters` / `list_alerts` / `take_screenshot`）、建筑/区域（`list_architect_*` / `create_allowed_area` / `delete_area` / `clear_area` / `list_areas` / `delete_zone`）、Mod 设置（`list_mod_settings_surfaces` / `get_mod_settings` / `update_mod_settings`）、DPA（`dpa_status` / `dpa_snapshot` / `dpa_cleanup`）、调试菜单与生成（`spawn_thing` / `set_draft` / `despawn_thing`）等。
+- 另有 18 个 RIMAPI 原生 + 4 个 debugaction 原生 `game_control` 工具（见上表）保留原生后端。
+
+> 完整逐工具清单与实测结果见 `MCP/index.js` 内工具注册表与 `MCP/announcements.md` 更新公告。
+
+- **工具开关**：`MCP/toolConfig.json` 按工具启用/禁用，默认压缩预设仅暴露 23 个高频工具；
 - **MCP 聚合器**（`MCP/aggregator/`）：中间层聚合器，默认压缩模式下只暴露 `agg_list_tools` / `agg_call_tool` + 核心白名单，避免向客户端暴露全部工具。
 
 ### 4. SDB 代码级调试器（`McpRimDebug/`）

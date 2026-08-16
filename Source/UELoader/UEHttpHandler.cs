@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -178,13 +178,20 @@ namespace UELoader
 
             ExplorerStandalone.OnLog += listener;
             string err = null;
+            // executionTimeMs 由主线程（闭包内）写、HTTP 线程（闭包外）读；
+            // ExecuteOnMainThread 同步阻塞等待主线程完成后才返回，读发生在返回前，
+            // 由此建立 happens-before，普通 long 跨线程读是安全的。
+            long executionTimeMs = 0;
             try
             {
                 UEMainThreadDispatcher.ExecuteOnMainThread(() =>
                 {
                     try
                     {
+                        var sw = System.Diagnostics.Stopwatch.StartNew();
                         ConsoleController.Evaluate(code, false);
+                        sw.Stop();
+                        executionTimeMs = sw.ElapsedMilliseconds;
                     }
                     catch (Exception ex)
                     {
@@ -233,7 +240,7 @@ namespace UELoader
             {
                 { "result", result },
                 { "output", output },
-                { "executionTime", 0 }
+                { "executionTime", executionTimeMs }
             });
         }
 

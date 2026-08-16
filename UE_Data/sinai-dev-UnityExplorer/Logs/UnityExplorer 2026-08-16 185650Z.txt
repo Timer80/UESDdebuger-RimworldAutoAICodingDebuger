@@ -1,0 +1,19 @@
+UnityExplorer 4.9.0 initializing...
+[UniverseLib] UniverseLib 1.5.1 initializing...
+[UniverseLib] Finished UniverseLib initial setup.
+Initialized UnityCrashPrevention for: Canvas.get_renderingDisplaySize
+[Unity] [UELoader] UnityExplorer initialized. Press F7 to toggle the UI (default master toggle).
+[UniverseLib] Initialized Legacy Input support
+[Unity] [UnityExplorer] [UniverseLib] Initialized Legacy Input support
+[UniverseLib] Loaded modern bundle for Unity 2022.3.35f1
+[Unity] [UnityExplorer] [UniverseLib] Loaded modern bundle for Unity 2022.3.35f1
+[UniverseLib] UniverseLib 1.5.1 initialized.
+[Unity] [UnityExplorer] [UniverseLib] UniverseLib 1.5.1 initialized.
+Creating UI...
+[Unity] [UnityExplorer] Creating UI...
+
+UnityExplorer 4.9.0 (Mono) initialized.
+[Unity] [UnityExplorer] UnityExplorer 4.9.0 (Mono) initialized.
+Invoked REPL, result: 5
+[Unity] [UnityExplorer] Invoked REPL, result: 5
+[Unity] Shutting down API server...

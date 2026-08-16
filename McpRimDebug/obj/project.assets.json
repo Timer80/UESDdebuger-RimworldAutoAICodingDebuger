@@ -663,7 +663,7 @@
     "C:\\Users\\Timer_0\\.nuget\\packages\\": {}
   },
   "project": {
-    "version": "0.8.0",
+    "version": "0.9.0",
     "restore": {
       "projectUniqueName": "C:\\SteamLibrary\\steamapps\\common\\RimWorld\\Mods\\UESDdebuger\\McpRimDebug\\McpRimDebug.csproj",
       "projectName": "McpRimDebug",

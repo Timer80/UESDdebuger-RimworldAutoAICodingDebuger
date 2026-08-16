@@ -1,9 +1,9 @@
-﻿# McpRimDebug — RimWorld Mono Soft Debugger MCP 服务器
+# McpRimDebug — RimWorld Mono Soft Debugger MCP 服务器
 
 通过 **Mono Soft Debugger（SDB）协议**直接连接 RimWorld 真实游戏进程，向 AI 客户端（Trae / opencode 等支持 MCP 的 IDE）暴露代码级调试工具：断点、调用栈、局部变量、单步、求值、对象检查。
 
 - 实现：.NET 10 控制台程序（stdio MCP 传输，官方 `ModelContextProtocol` SDK 2.1.0）
-- 协议：SDB（mono soft debugger，与游戏协商为 **2.58**，VM：mono 6.13.0 Visual Studio built mono）
+- 协议：SDB（mono soft debugger，与游戏协商为 **2.57**，VM：mono 6.13.0 Visual Studio built mono）
 - 依赖：仅 vendor 的 SDB 客户端源码 + `Mono.Cecil`（未使用 Harmony 等注入手段）
 
 ---
@@ -114,11 +114,13 @@ resume()                      # resume 后游戏才开始运行
 ### 会话管理
 | 工具 | 说明 |
 |---|---|
-| `status` | 会话状态：游戏进程/端口监听/连接/协议版本/挂起状态 + `debugPortFromLog` |
+| `status` | 会话状态：游戏进程/端口监听/连接/协议版本/挂起状态 + `debugPortFromLog`；断点统计：`breakpointsActive`（当前活动断点数）/`breakpointsAddedTotal`（break_add 累计成功次数）/`breakpointsRemovedTotal`（break_remove+break_clear 累计释放次数）/`eventRequestsActive`（break_exception 活动事件请求数），随会话断开/detach 清零 |
 | `attach(host, port)` | 连接游戏调试端口（推荐传入 status 的 debugPortFromLog） |
 | `detach` | 安全断开，游戏继续运行 |
 | `resume` / `suspend` | 恢复 / 挂起整个 VM |
 | `launch(path, port, workingDir)` | 以调试模式启动游戏（已有游戏进程会拒绝） |
+
+> `status` 挂起提示：当 VM 挂起（`suspended=true`）且存在活动断点时，人类可读 `message` 会附带提示——挂起可能因命中断点，可用 `break_remove` / `break_clear` 释放后 `resume` 恢复。
 
 ### 断点与事件
 | 工具 | 说明 |

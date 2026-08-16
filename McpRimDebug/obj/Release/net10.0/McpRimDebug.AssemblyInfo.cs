@@ -12,11 +12,11 @@ using System.Reflection;
 
 [assembly: System.Reflection.AssemblyCompanyAttribute("McpRimDebug")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
-[assembly: System.Reflection.AssemblyFileVersionAttribute("0.8.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.8.0.0")]
+[assembly: System.Reflection.AssemblyFileVersionAttribute("0.9.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.9.0.0+b01d88a70cb50ab5279e474c6a523ff303df638f")]
 [assembly: System.Reflection.AssemblyProductAttribute("McpRimDebug")]
 [assembly: System.Reflection.AssemblyTitleAttribute("McpRimDebug")]
-[assembly: System.Reflection.AssemblyVersionAttribute("0.8.0.0")]
+[assembly: System.Reflection.AssemblyVersionAttribute("0.9.0.0")]
 
 // 由 MSBuild WriteCodeFragment 类生成。
 

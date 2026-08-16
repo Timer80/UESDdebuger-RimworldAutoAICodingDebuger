@@ -45,8 +45,8 @@
   <UESDdebuger.ToolDesc.add_using_directive>[UE] 为 C# 控制台添加 using 指令</UESDdebuger.ToolDesc.add_using_directive>
   <UESDdebuger.ToolDesc.post_camera_change_zoom>[RIMAPI] 调整游戏相机缩放</UESDdebuger.ToolDesc.post_camera_change_zoom>
   <UESDdebuger.ToolDesc.post_camera_change_position>[RIMAPI] 移动游戏相机到指定坐标</UESDdebuger.ToolDesc.post_camera_change_position>
-  <UESDdebuger.ToolDesc.post_stream_start>[RIMAPI] 开始相机视频流</UESDdebuger.ToolDesc.post_stream_start>
-  <UESDdebuger.ToolDesc.post_stream_stop>[RIMAPI] 停止相机视频流</UESDdebuger.ToolDesc.post_stream_stop>
+  <UESDdebuger.ToolDesc.post_stream_start>[RIMAPI] 开始相机视频流；output_frames=true 时随流抓帧输出 JPEG 序列到 out_dir</UESDdebuger.ToolDesc.post_stream_start>
+  <UESDdebuger.ToolDesc.post_stream_stop>[RIMAPI] 停止相机视频流（若开了 output_frames 会自动停止抓帧）</UESDdebuger.ToolDesc.post_stream_stop>
   <UESDdebuger.ToolDesc.post_stream_setup>[RIMAPI] 配置视频流参数</UESDdebuger.ToolDesc.post_stream_setup>
   <UESDdebuger.ToolDesc.get_game_state>[RIMAPI] 获取游戏当前状态</UESDdebuger.ToolDesc.get_game_state>
   <UESDdebuger.ToolDesc.get_colonists>[RIMAPI] 获取殖民者列表</UESDdebuger.ToolDesc.get_colonists>
@@ -100,4 +100,128 @@
   <UESDdebuger.ToolDesc.find_types>[调试] 按子串搜索类型</UESDdebuger.ToolDesc.find_types>
   <UESDdebuger.ToolDesc.find_methods>[调试] 按方法名子串搜索方法</UESDdebuger.ToolDesc.find_methods>
 
+
+  <UESDdebuger.ToolDesc.rimbridge.compile_lua>[RimBridgeServer] 编译受支持的降级 Lua 子集（非通用 Lua）为 JSON 脚本模型，不执行能力调用；新的脚本形态请先使用此工具</UESDdebuger.ToolDesc.rimbridge.compile_lua>
+  <UESDdebuger.ToolDesc.rimbridge.compile_lua_file>[RimBridgeServer] 加载 .lua 文件并编译为与 rimbridge/run_lua 相同的降级 Lua 子集，不执行能力调用</UESDdebuger.ToolDesc.rimbridge.compile_lua_file>
+  <UESDdebuger.ToolDesc.rimbridge.get_bridge_status>[RimBridgeServer] 获取当前桥接与 RimWorld 状态快照，不改动游戏状态</UESDdebuger.ToolDesc.rimbridge.get_bridge_status>
+  <UESDdebuger.ToolDesc.rimbridge.get_capability>[RimBridgeServer] 按能力 id 或别名获取一个已注册桥接能力描述</UESDdebuger.ToolDesc.rimbridge.get_capability>
+  <UESDdebuger.ToolDesc.rimbridge.get_lua_reference>[RimBridgeServer] 获取 rimbridge/run_lua 降级子集的机器可读编写参考，包括快速入门规则、常见陷阱、参数绑定、编译错误、限制与示例</UESDdebuger.ToolDesc.rimbridge.get_lua_reference>
+  <UESDdebuger.ToolDesc.rimbridge.get_operation>[RimBridgeServer] 按操作 id 获取最近保留的日志快照，包括有界的保留结果载荷</UESDdebuger.ToolDesc.rimbridge.get_operation>
+  <UESDdebuger.ToolDesc.rimbridge.get_script_reference>[RimBridgeServer] 获取 rimbridge/run_script 的机器可读编写参考，包括语句类型、表达式、条件、限制与示例</UESDdebuger.ToolDesc.rimbridge.get_script_reference>
+  <UESDdebuger.ToolDesc.rimbridge.list_capabilities>[RimBridgeServer] 列出已注册桥接能力，使智能体可发现实时桥接表面，而非依赖硬编码工具知识</UESDdebuger.ToolDesc.rimbridge.list_capabilities>
+  <UESDdebuger.ToolDesc.rimbridge.list_logs>[RimBridgeServer] 列出内存日志期刊中最近捕获的 RimWorld 与桥接日志条目，可用时包含操作关联</UESDdebuger.ToolDesc.rimbridge.list_logs>
+  <UESDdebuger.ToolDesc.rimbridge.list_operation_events>[RimBridgeServer] 列出内存事件期刊中最近的桥接操作生命周期事件</UESDdebuger.ToolDesc.rimbridge.list_operation_events>
+  <UESDdebuger.ToolDesc.rimbridge.list_operations>[RimBridgeServer] 列出内存操作期刊中最近的桥接操作，可选展开保留的结果载荷</UESDdebuger.ToolDesc.rimbridge.list_operations>
+  <UESDdebuger.ToolDesc.rimbridge.ping>[RimBridgeServer] 连通性测试，返回 'pong'</UESDdebuger.ToolDesc.rimbridge.ping>
+  <UESDdebuger.ToolDesc.rimbridge.run_lua>[RimBridgeServer] 将小型降级 Lua 子集（非通用 Lua）编译到共享脚本运行器，并通过常规能力注册表执行；先从 rimbridge/get_lua_reference 或 rimbridge/compile_lua 开始</UESDdebuger.ToolDesc.rimbridge.run_lua>
+  <UESDdebuger.ToolDesc.rimbridge.run_lua_file>[RimBridgeServer] 加载 .lua 文件，作为与 rimbridge/run_lua 相同的降级 Lua 子集，通过共享脚本运行器执行</UESDdebuger.ToolDesc.rimbridge.run_lua_file>
+  <UESDdebuger.ToolDesc.rimbridge.run_script>[RimBridgeServer] 执行包含有序能力调用与通用控制语句的 JSON 脚本；机器可读语言参考见 rimbridge/get_script_reference</UESDdebuger.ToolDesc.rimbridge.run_script>
+  <UESDdebuger.ToolDesc.rimbridge.wait_for_game_loaded>[RimBridgeServer] 等待 RimWorld 达到请求的已加载游戏就绪级别</UESDdebuger.ToolDesc.rimbridge.wait_for_game_loaded>
+  <UESDdebuger.ToolDesc.rimbridge.wait_for_long_event_idle>[RimBridgeServer] 等待 RimWorld 报告没有进行中的长事件</UESDdebuger.ToolDesc.rimbridge.wait_for_long_event_idle>
+  <UESDdebuger.ToolDesc.rimbridge.wait_for_operation>[RimBridgeServer] 等待日志中的操作达到终态</UESDdebuger.ToolDesc.rimbridge.wait_for_operation>
+  <UESDdebuger.ToolDesc.rimworld.activate_alert>[RimBridgeServer] 按 rimworld/list_alerts 返回的警报 id 激活一条警报，模拟正常左键点击警报栏</UESDdebuger.ToolDesc.rimworld.activate_alert>
+  <UESDdebuger.ToolDesc.rimworld.apply_architect_designator>[RimBridgeServer] 将建造分类设计器应用到单个格子或矩形区域，可选干跑校验</UESDdebuger.ToolDesc.rimworld.apply_architect_designator>
+  <UESDdebuger.ToolDesc.rimworld.clear_area>[RimBridgeServer] 清空可变区域（如自定义允许区域）的全部格子</UESDdebuger.ToolDesc.rimworld.clear_area>
+  <UESDdebuger.ToolDesc.rimworld.clear_hover_target>[RimBridgeServer] 清除当前虚拟光标/悬停目标，使截图、悬停驱动的 UI 与地图点击回到真实光标状态</UESDdebuger.ToolDesc.rimworld.clear_hover_target>
+  <UESDdebuger.ToolDesc.rimworld.clear_selection>[RimBridgeServer] 清除当前地图选择</UESDdebuger.ToolDesc.rimworld.clear_selection>
+  <UESDdebuger.ToolDesc.rimworld.click_cell>[RimBridgeServer] 在当前地图格子派发实时地图点击，无需操作系统焦点，支持左/右/中键，并报告点击前后选择</UESDdebuger.ToolDesc.rimworld.click_cell>
+  <UESDdebuger.ToolDesc.rimworld.click_screen_target>[RimBridgeServer] 语义化点击 rimworld/get_screen_targets 返回的已知可操作目标 id，无需操作系统焦点</UESDdebuger.ToolDesc.rimworld.click_screen_target>
+  <UESDdebuger.ToolDesc.rimworld.click_ui_target>[RimBridgeServer] 在下一真实绘制帧激活 rimworld/get_ui_layout 返回的可操作 UI 控件目标</UESDdebuger.ToolDesc.rimworld.click_ui_target>
+  <UESDdebuger.ToolDesc.rimworld.close_context_menu>[RimBridgeServer] 关闭当前打开的调试右键菜单</UESDdebuger.ToolDesc.rimworld.close_context_menu>
+  <UESDdebuger.ToolDesc.rimworld.close_main_tab>[RimBridgeServer] 关闭当前打开的 RimWorld 主选项卡，可选先断言打开的是哪个选项卡</UESDdebuger.ToolDesc.rimworld.close_main_tab>
+  <UESDdebuger.ToolDesc.rimworld.close_window>[RimBridgeServer] 按类型名关闭打开的 RimWorld 窗口；省略时关闭最顶层窗口</UESDdebuger.ToolDesc.rimworld.close_window>
+  <UESDdebuger.ToolDesc.rimworld.create_allowed_area>[RimBridgeServer] 新建允许区域，可选设为当前允许区域目标</UESDdebuger.ToolDesc.rimworld.create_allowed_area>
+  <UESDdebuger.ToolDesc.rimworld.delete_area>[RimBridgeServer] 删除可变区域（如自定义允许区域）</UESDdebuger.ToolDesc.rimworld.delete_area>
+  <UESDdebuger.ToolDesc.rimworld.delete_zone>[RimBridgeServer] 按 id 删除已有区域（zone）</UESDdebuger.ToolDesc.rimworld.delete_zone>
+  <UESDdebuger.ToolDesc.rimworld.deselect_pawn>[RimBridgeServer] 按名字或稳定小人 id 取消选中单个已选小人</UESDdebuger.ToolDesc.rimworld.deselect_pawn>
+  <UESDdebuger.ToolDesc.rimworld.dismiss_letter>[RimBridgeServer] 按原生信件 id 关闭特定可关闭信件，模拟正常右键点击信件堆条目</UESDdebuger.ToolDesc.rimworld.dismiss_letter>
+  <UESDdebuger.ToolDesc.rimworld.dpa_cleanup>[RimBridgeServer] 性能分析运行后请求 Dubs Performance Analyzer 清理</UESDdebuger.ToolDesc.rimworld.dpa_cleanup>
+  <UESDdebuger.ToolDesc.rimworld.dpa_patch_methods>[RimBridgeServer] 将显式方法或内置预设补丁到 Dubs Performance Analyzer 以进行可重复的 Tick/Update 性能分析</UESDdebuger.ToolDesc.rimworld.dpa_patch_methods>
+  <UESDdebuger.ToolDesc.rimworld.dpa_reset>[RimBridgeServer] 重置 Dubs Performance Analyzer 分析器缓冲，不改动当前补丁集</UESDdebuger.ToolDesc.rimworld.dpa_reset>
+  <UESDdebuger.ToolDesc.rimworld.dpa_snapshot>[RimBridgeServer] 按平均值/最大值/总计/调用数/每条目调用数/标签排序快照 Dubs Performance Analyzer 当前分析行</UESDdebuger.ToolDesc.rimworld.dpa_snapshot>
+  <UESDdebuger.ToolDesc.rimworld.dpa_status>[RimBridgeServer] 读取 Dubs Performance Analyzer 可用性与桥接集成状态，不改动 DPA</UESDdebuger.ToolDesc.rimworld.dpa_status>
+  <UESDdebuger.ToolDesc.rimworld.dpa_stop>[RimBridgeServer] 停止 Dubs Performance Analyzer 分析并重置其 UI 状态，不运行清理</UESDdebuger.ToolDesc.rimworld.dpa_stop>
+  <UESDdebuger.ToolDesc.rimworld.drag_cell>[RimBridgeServer] 派发从一个当前地图格子到另一个的实时鼠标拖拽（无需操作系统焦点），发布鼠标位置与按住/按下/抬起状态，原版与模组输入处理器均可看到该手势；左键拖拽可框选，右键可驱动征召队目标，中键可平移镜头</UESDdebuger.ToolDesc.rimworld.drag_cell>
+  <UESDdebuger.ToolDesc.rimworld.execute_context_menu_option>[RimBridgeServer] 按索引或标签执行右键菜单选项</UESDdebuger.ToolDesc.rimworld.execute_context_menu_option>
+  <UESDdebuger.ToolDesc.rimworld.execute_gizmo>[RimBridgeServer] 按 rimworld/list_selected_gizmos 返回的 gizmo id 为当前选择执行一个分组 gizmo</UESDdebuger.ToolDesc.rimworld.execute_gizmo>
+  <UESDdebuger.ToolDesc.rimworld.find_random_cell_near>[RimBridgeServer] 使用 RimWorld 的扩展半径随机格子搜索查找满足通用地图条件的附近格子或足迹</UESDdebuger.ToolDesc.rimworld.find_random_cell_near>
+  <UESDdebuger.ToolDesc.rimworld.flood_fill_cells>[RimBridgeServer] 使用 RimWorld 通用格子泛洪填充算法从根格子分析连续区域，使用与 find_random_cell_near 相同的可复用足迹条件</UESDdebuger.ToolDesc.rimworld.flood_fill_cells>
+  <UESDdebuger.ToolDesc.rimworld.frame_cell_rect>[RimBridgeServer] 在当前镜头缩放下框住请求的地图格子矩形加可选边距格子；提供显式根尺寸时用之</UESDdebuger.ToolDesc.rimworld.frame_cell_rect>
+  <UESDdebuger.ToolDesc.rimworld.frame_pawns>[RimBridgeServer] 框住按名字和/或稳定小人 id 的逗号分隔小人列表，使其可见</UESDdebuger.ToolDesc.rimworld.frame_pawns>
+  <UESDdebuger.ToolDesc.rimworld.get_camera_state>[RimBridgeServer] 获取当前地图镜头位置、缩放、配置尺寸范围、扩展启用状态与可见矩形</UESDdebuger.ToolDesc.rimworld.get_camera_state>
+  <UESDdebuger.ToolDesc.rimworld.get_cell_info>[RimBridgeServer] 检查单个地图格子，包括实体、蓝图、框架、指定、区域（zone）与允许区域</UESDdebuger.ToolDesc.rimworld.get_cell_info>
+  <UESDdebuger.ToolDesc.rimworld.get_cells_info>[RimBridgeServer] 检查矩形内最多 1024 个格子的每个地图格子，包括实体、蓝图、框架、指定、区域与允许区域</UESDdebuger.ToolDesc.rimworld.get_cells_info>
+  <UESDdebuger.ToolDesc.rimworld.get_context_menu_options>[RimBridgeServer] 获取当前打开的调试右键菜单选项</UESDdebuger.ToolDesc.rimworld.get_context_menu_options>
+  <UESDdebuger.ToolDesc.rimworld.get_debug_action>[RimBridgeServer] 获取单个 RimWorld 调试操作路径的元数据，可选包含其直接子项</UESDdebuger.ToolDesc.rimworld.get_debug_action>
+  <UESDdebuger.ToolDesc.rimworld.get_designator_state>[RimBridgeServer] 获取当前建造分类/设计器选择状态，包括上帝模式与当前选中设计器</UESDdebuger.ToolDesc.rimworld.get_designator_state>
+  <UESDdebuger.ToolDesc.rimworld.get_game_info>[RimBridgeServer] 获取当前 RimWorld 游戏的基本信息</UESDdebuger.ToolDesc.rimworld.get_game_info>
+  <UESDdebuger.ToolDesc.rimworld.get_map_target_info>[RimBridgeServer] 将当前地图小人或实体解析为地图位置与占用格子矩形</UESDdebuger.ToolDesc.rimworld.get_map_target_info>
+  <UESDdebuger.ToolDesc.rimworld.get_mod_configuration_status>[RimBridgeServer] 读取当前活动加载顺序的语义化模组配置状态，包括警告、顺序问题以及是否需要重启以匹配已加载会话</UESDdebuger.ToolDesc.rimworld.get_mod_configuration_status>
+  <UESDdebuger.ToolDesc.rimworld.get_mod_settings>[RimBridgeServer] 按稳定模组 id、package id、设置类别或句柄类型名读取已加载模组的语义化 ModSettings 对象</UESDdebuger.ToolDesc.rimworld.get_mod_settings>
+  <UESDdebuger.ToolDesc.rimworld.get_screen_targets>[RimBridgeServer] 获取当前屏幕空间目标，如打开的窗口与活动的右键菜单几何</UESDdebuger.ToolDesc.rimworld.get_screen_targets>
+  <UESDdebuger.ToolDesc.rimworld.get_selected_pawn_inventory_state>[RimBridgeServer] 读取选中小人携带的实体与库存内容，可用时包含 Pick Up And Haul 追踪物品</UESDdebuger.ToolDesc.rimworld.get_selected_pawn_inventory_state>
+  <UESDdebuger.ToolDesc.rimworld.get_selection_semantics>[RimBridgeServer] 获取当前选择的结构化细节，包括检视字符串、检视选项卡类型与当前选择指纹</UESDdebuger.ToolDesc.rimworld.get_selection_semantics>
+  <UESDdebuger.ToolDesc.rimworld.get_ui_layout>[RimBridgeServer] 捕获当前对话框、窗口、主选项卡、动态检视选项卡条或选中 gizmo 网格的通用结构化布局快照，包括可操作控件、可裁剪屏幕矩形与滚动视图元数据</UESDdebuger.ToolDesc.rimworld.get_ui_layout>
+  <UESDdebuger.ToolDesc.rimworld.get_ui_state>[RimBridgeServer] 获取当前 RimWorld 窗口栈与输入状态，用于后台安全的 UI 自动化</UESDdebuger.ToolDesc.rimworld.get_ui_state>
+  <UESDdebuger.ToolDesc.rimworld.go_to_main_menu>[RimBridgeServer] 返回 RimWorld 主菜单入口场景；已在则无操作</UESDdebuger.ToolDesc.rimworld.go_to_main_menu>
+  <UESDdebuger.ToolDesc.rimworld.jump_camera_to_cell>[RimBridgeServer] 将镜头跳到地图格子</UESDdebuger.ToolDesc.rimworld.jump_camera_to_cell>
+  <UESDdebuger.ToolDesc.rimworld.jump_camera_to_pawn>[RimBridgeServer] 按名字或稳定小人 id 将镜头跳到小人</UESDdebuger.ToolDesc.rimworld.jump_camera_to_pawn>
+  <UESDdebuger.ToolDesc.rimworld.list_alerts>[RimBridgeServer] 列出活动 RimWorld 警报，含结构化肇事者目标与警报快照范围的警报 id</UESDdebuger.ToolDesc.rimworld.list_alerts>
+  <UESDdebuger.ToolDesc.rimworld.list_architect_categories>[RimBridgeServer] 使用稳定类别 id 列出 RimWorld 建造分类类别</UESDdebuger.ToolDesc.rimworld.list_architect_categories>
+  <UESDdebuger.ToolDesc.rimworld.list_architect_designators>[RimBridgeServer] 列出某类别的建造设计器，将下拉控件展开为可操作的子设计器</UESDdebuger.ToolDesc.rimworld.list_architect_designators>
+  <UESDdebuger.ToolDesc.rimworld.list_areas>[RimBridgeServer] 列出当前地图区域，如住宅区、屋顶区、扫雪区与允许区域</UESDdebuger.ToolDesc.rimworld.list_areas>
+  <UESDdebuger.ToolDesc.rimworld.list_colonists>[RimBridgeServer] 列出可选中与可征召的玩家控制殖民者，含稳定小人 id</UESDdebuger.ToolDesc.rimworld.list_colonists>
+  <UESDdebuger.ToolDesc.rimworld.list_debug_action_children>[RimBridgeServer] 列出 RimWorld 调试操作路径的直接子项</UESDdebuger.ToolDesc.rimworld.list_debug_action_children>
+  <UESDdebuger.ToolDesc.rimworld.list_debug_action_roots>[RimBridgeServer] 使用稳定内部调试操作路径列出 RimWorld 顶层调试操作根</UESDdebuger.ToolDesc.rimworld.list_debug_action_roots>
+  <UESDdebuger.ToolDesc.rimworld.list_inspect_tabs>[RimBridgeServer] 列出当前选择的动态 RimWorld 检视选项卡（健康、需求、装备与模组选项卡），含稳定选择范围的检视选项卡 id</UESDdebuger.ToolDesc.rimworld.list_inspect_tabs>
+  <UESDdebuger.ToolDesc.rimworld.list_languages>[RimBridgeServer] 列出已安装 RimWorld 语言，含每种语言的推荐 ASCII 安全切换查询与当前活动语言</UESDdebuger.ToolDesc.rimworld.list_languages>
+  <UESDdebuger.ToolDesc.rimworld.list_letters>[RimBridgeServer] 列出当前信件堆条目，含原生信件 id、语义信件内容与结构化视线目标元数据</UESDdebuger.ToolDesc.rimworld.list_letters>
+  <UESDdebuger.ToolDesc.rimworld.list_main_tabs>[RimBridgeServer] 列出 RimWorld 主选项卡（工作、分配、研究等与模组选项卡），含稳定主选项卡目标 id</UESDdebuger.ToolDesc.rimworld.list_main_tabs>
+  <UESDdebuger.ToolDesc.rimworld.list_messages>[RimBridgeServer] 列出实时 RimWorld 消息，含原生消息 id 与结构化视线目标元数据</UESDdebuger.ToolDesc.rimworld.list_messages>
+  <UESDdebuger.ToolDesc.rimworld.list_mod_settings_surfaces>[RimBridgeServer] 列出暴露设置对话框、持久 ModSettings 状态对象或两者的已加载模组句柄</UESDdebuger.ToolDesc.rimworld.list_mod_settings_surfaces>
+  <UESDdebuger.ToolDesc.rimworld.list_mods>[RimBridgeServer] 列出已安装 RimWorld 模组，每个是否在当前配置中启用，以及是否匹配当前加载会话</UESDdebuger.ToolDesc.rimworld.list_mods>
+  <UESDdebuger.ToolDesc.rimworld.list_saves>[RimBridgeServer] 列出已保存 RimWorld 存档，含模组兼容性细节，可选仅返回记录模组全部当前活动的存档</UESDdebuger.ToolDesc.rimworld.list_saves>
+  <UESDdebuger.ToolDesc.rimworld.list_selected_gizmos>[RimBridgeServer] 使用确定性选择范围的 gizmo id 列出当前选择的可操作分组 gizmo</UESDdebuger.ToolDesc.rimworld.list_selected_gizmos>
+  <UESDdebuger.ToolDesc.rimworld.list_zones>[RimBridgeServer] 列出当前地图区域（zone），如库存堆与生长区</UESDdebuger.ToolDesc.rimworld.list_zones>
+  <UESDdebuger.ToolDesc.rimworld.load_game>[RimBridgeServer] 加载指定 RimWorld 存档，先验证每个记录模组活动；ignoreModCompatibility 为真时跳过</UESDdebuger.ToolDesc.rimworld.load_game>
+  <UESDdebuger.ToolDesc.rimworld.load_game_ready>[RimBridgeServer] 加载指定 RimWorld 存档（模组校验同 load_game），然后等待请求的就绪级别</UESDdebuger.ToolDesc.rimworld.load_game_ready>
+  <UESDdebuger.ToolDesc.rimworld.move_camera>[RimBridgeServer] 按格子偏移移动镜头</UESDdebuger.ToolDesc.rimworld.move_camera>
+  <UESDdebuger.ToolDesc.rimworld.open_context_menu>[RimBridgeServer] 在目标小人或格子派发实时地图点击并捕获保持打开的右键菜单</UESDdebuger.ToolDesc.rimworld.open_context_menu>
+  <UESDdebuger.ToolDesc.rimworld.open_inspect_tab>[RimBridgeServer] 按检视选项卡 id、翻译标签、标签键、教学标签或 .NET 类型名打开当前 RimWorld 检视选项卡</UESDdebuger.ToolDesc.rimworld.open_inspect_tab>
+  <UESDdebuger.ToolDesc.rimworld.open_letter>[RimBridgeServer] 按原生信件 id 打开特定信件，模拟正常左键点击信件堆条目</UESDdebuger.ToolDesc.rimworld.open_letter>
+  <UESDdebuger.ToolDesc.rimworld.open_main_tab>[RimBridgeServer] 按稳定目标 id、defName、标签或选项卡窗口类型打开 RimWorld 主选项卡</UESDdebuger.ToolDesc.rimworld.open_main_tab>
+  <UESDdebuger.ToolDesc.rimworld.open_mod_settings>[RimBridgeServer] 为已加载模组打开 RimWorld 原生 Dialog_ModSettings 窗口，不依赖前台输入</UESDdebuger.ToolDesc.rimworld.open_mod_settings>
+  <UESDdebuger.ToolDesc.rimworld.open_window_by_type>[RimBridgeServer] 当窗口暴露公开无参构造函数时，按简称或完整 .NET 类型名打开 RimWorld 窗口</UESDdebuger.ToolDesc.rimworld.open_window_by_type>
+  <UESDdebuger.ToolDesc.rimworld.pause_game>[RimBridgeServer] 暂停或取消暂停游戏</UESDdebuger.ToolDesc.rimworld.pause_game>
+  <UESDdebuger.ToolDesc.rimworld.play_for>[RimBridgeServer] 以请求的时间速度取消暂停并运行一段有界的真实时长，然后再次暂停；速度 4（极速）默认加速，运行期间可选择性抑制强制常速减速</UESDdebuger.ToolDesc.rimworld.play_for>
+  <UESDdebuger.ToolDesc.rimworld.play_until_letter>[RimBridgeServer] 以请求的时间速度取消暂停直到出现新的右侧信件，然后暂停并返回新信件载荷；速度 4（极速）默认加速，可选择性抑制强制常速减速</UESDdebuger.ToolDesc.rimworld.play_until_letter>
+  <UESDdebuger.ToolDesc.rimworld.press_accept>[RimBridgeServer] 无需操作系统焦点向活动 RimWorld 窗口栈发送语义化确认输入</UESDdebuger.ToolDesc.rimworld.press_accept>
+  <UESDdebuger.ToolDesc.rimworld.press_cancel>[RimBridgeServer] 无需操作系统焦点向活动 RimWorld 窗口栈发送语义化取消输入</UESDdebuger.ToolDesc.rimworld.press_cancel>
+  <UESDdebuger.ToolDesc.rimworld.reload_mod_settings>[RimBridgeServer] 从磁盘重新加载模组的 ModSettings 对象，丢弃未保存的内存更改</UESDdebuger.ToolDesc.rimworld.reload_mod_settings>
+  <UESDdebuger.ToolDesc.rimworld.reorder_mod>[RimBridgeServer] 将当前启用的模组移到新的零基活动加载顺序索引，可选立即持久化更新的 ModsConfig.xml</UESDdebuger.ToolDesc.rimworld.reorder_mod>
+  <UESDdebuger.ToolDesc.rimworld.right_click_cell>[RimBridgeServer] 为当前小人选择派发实时地图点击交互，使原版与模组处理器看到与真实点击相同的输入路径</UESDdebuger.ToolDesc.rimworld.right_click_cell>
+  <UESDdebuger.ToolDesc.rimworld.save_game>[RimBridgeServer] 将当前游戏保存到指定存档</UESDdebuger.ToolDesc.rimworld.save_game>
+  <UESDdebuger.ToolDesc.rimworld.screenshot_cell_rect>[RimBridgeServer] 在当前镜头缩放下居中请求的地图格子矩形加可选边距，截取、裁剪到格子边界，默认截取后立即恢复原镜头</UESDdebuger.ToolDesc.rimworld.screenshot_cell_rect>
+  <UESDdebuger.ToolDesc.rimworld.scroll_ui_target>[RimBridgeServer] 在下一真实绘制帧滚动 rimworld/get_ui_layout 返回的 scroll_view UI 元素目标</UESDdebuger.ToolDesc.rimworld.scroll_ui_target>
+  <UESDdebuger.ToolDesc.rimworld.select_allowed_area>[RimBridgeServer] 按 id 选择允许区域用于区域设计流程；省略 areaId 时清除选择</UESDdebuger.ToolDesc.rimworld.select_allowed_area>
+  <UESDdebuger.ToolDesc.rimworld.select_architect_designator>[RimBridgeServer] 按稳定 id 选择建造设计器，不依赖前台 UI 交互</UESDdebuger.ToolDesc.rimworld.select_architect_designator>
+  <UESDdebuger.ToolDesc.rimworld.select_pawn>[RimBridgeServer] 按名字或稳定小人 id 选择单个殖民者</UESDdebuger.ToolDesc.rimworld.select_pawn>
+  <UESDdebuger.ToolDesc.rimworld.set_camera_zoom>[RimBridgeServer] 直接设置当前镜头根尺寸</UESDdebuger.ToolDesc.rimworld.set_camera_zoom>
+  <UESDdebuger.ToolDesc.rimworld.set_camera_zoom_extension>[RimBridgeServer] 启用或禁用 RimBridgeServer 的会话级扩展镜头缩放范围；默认禁用</UESDdebuger.ToolDesc.rimworld.set_camera_zoom_extension>
+  <UESDdebuger.ToolDesc.rimworld.set_colonist_job_logging>[RimBridgeServer] 确定性启用/禁用当前地图单个殖民者的工作追踪日志，返回日志游标与消费后续工作行的推荐 rimbridge/list_logs 参数</UESDdebuger.ToolDesc.rimworld.set_colonist_job_logging>
+  <UESDdebuger.ToolDesc.rimworld.set_debug_setting>[RimBridgeServer] 按稳定路径将 RimWorld 调试设置开关设为确定性开/关状态</UESDdebuger.ToolDesc.rimworld.set_debug_setting>
+  <UESDdebuger.ToolDesc.rimworld.set_draft>[RimBridgeServer] 按名字或稳定小人 id 征召或取消征召殖民者</UESDdebuger.ToolDesc.rimworld.set_draft>
+  <UESDdebuger.ToolDesc.rimworld.set_god_mode>[RimBridgeServer] 确定性启用或禁用 RimWorld 上帝模式</UESDdebuger.ToolDesc.rimworld.set_god_mode>
+  <UESDdebuger.ToolDesc.rimworld.set_hover_target>[RimBridgeServer] 为 UI 审查与截图设置有界虚拟光标/悬停目标，可用 ui 元素或屏幕目标 id、显式屏幕坐标或当前地图格子、小人、实体</UESDdebuger.ToolDesc.rimworld.set_hover_target>
+  <UESDdebuger.ToolDesc.rimworld.set_mod_enabled>[RimBridgeServer] 按稳定模组 id、package id、名字或文件夹名启用/禁用已安装模组，可选立即持久化更新的 ModsConfig.xml</UESDdebuger.ToolDesc.rimworld.set_mod_enabled>
+  <UESDdebuger.ToolDesc.rimworld.set_time_speed>[RimBridgeServer] 直接设置 RimWorld 当前时间速度；RimBridgeServer 启动时启用速度 4（极速）加速，本工具可改变该状态</UESDdebuger.ToolDesc.rimworld.set_time_speed>
+  <UESDdebuger.ToolDesc.rimworld.set_zone_target>[RimBridgeServer] 设置或清除区域添加设计器上的显式既有区域目标</UESDdebuger.ToolDesc.rimworld.set_zone_target>
+  <UESDdebuger.ToolDesc.rimworld.spawn_thing>[RimBridgeServer] 在当前地图目标格子生成实体</UESDdebuger.ToolDesc.rimworld.spawn_thing>
+  <UESDdebuger.ToolDesc.rimworld.start_debug_game>[RimBridgeServer] 从主菜单启动 RimWorld 内置快速测试殖民地，遵循 RimWorld 的加载时暂停偏好</UESDdebuger.ToolDesc.rimworld.start_debug_game>
+  <UESDdebuger.ToolDesc.rimworld.start_debug_game_ready>[RimBridgeServer] 从主菜单启动 RimWorld 内置快速测试殖民地，遵循加载时暂停偏好，并等待请求的就绪级别</UESDdebuger.ToolDesc.rimworld.start_debug_game_ready>
+  <UESDdebuger.ToolDesc.rimworld.step_game_ticks>[RimBridgeServer] 将暂停游戏精确推进指定 tick 数（每 Unity 更新帧一个 tick），镜像 RimWorld 的 Dev_TickOnce 路径并保持渲染帧边界</UESDdebuger.ToolDesc.rimworld.step_game_ticks>
+  <UESDdebuger.ToolDesc.rimworld.switch_language>[RimBridgeServer] 按 rimworld/list_languages 的 recommendedQuery 或其他精确语言名匹配切换 RimWorld 语言，镜像主菜单语言选择器并保存偏好</UESDdebuger.ToolDesc.rimworld.switch_language>
+  <UESDdebuger.ToolDesc.rimworld.take_screenshot>[RimBridgeServer] 拍摄游戏内截图，可选裁剪到屏幕目标、UI 表面、UI 元素或滚动视图区域</UESDdebuger.ToolDesc.rimworld.take_screenshot>
+  <UESDdebuger.ToolDesc.rimworld.update_mod_settings>[RimBridgeServer] 对已加载模组的 ModSettings 对象应用一个或多个字段路径更新，可选通过 Mod.WriteSettings() 立即持久化</UESDdebuger.ToolDesc.rimworld.update_mod_settings>
+  <UESDdebuger.ToolDesc.rimworld.zoom_camera>[RimBridgeServer] 调整当前镜头缩放/根尺寸</UESDdebuger.ToolDesc.rimworld.zoom_camera>
 </LanguageData>

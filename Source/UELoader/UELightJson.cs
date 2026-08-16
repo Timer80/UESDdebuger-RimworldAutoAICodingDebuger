@@ -141,6 +141,8 @@ namespace UELoader
         {
             readonly string s;
             int i;
+            const int MaxDepth = 32;   // 嵌套容器深度上限（对象/数组递归）——P2-CS-2
+            int depth;
 
             public Parser(string str) { s = str; i = 0; }
 
@@ -180,21 +182,31 @@ namespace UELoader
                 SkipWs();
                 if (i >= s.Length) throw new FormatException("eof");
                 char c = s[i];
-                if (c == '{') return ParseObject();
-                if (c == '[')
+                // 深度限制（P2-CS-2）：对象/数组递归的唯一入口是 ParseValue 里的 { 和 [。
+                // 最外层对象由公共 ParseObject(json) 直接调 p.ParseObject()，不从本方法进，故 depth 初始 0 不计数。
+                if (c == '{' || c == '[')
                 {
-                    i++;
-                    var list = new List<object>();
-                    SkipWs();
-                    if (i < s.Length && s[i] == ']') { i++; return list; }
-                    for (;;)
+                    if (++depth > MaxDepth) throw new FormatException("JSON nesting too deep");
+                    try
                     {
-                        list.Add(ParseValue());
+                        if (c == '{') return ParseObject();
+                        i++;
+                        var list = new List<object>();
                         SkipWs();
-                        if (i >= s.Length) throw new FormatException("unterminated array");
-                        if (s[i] == ',') { i++; continue; }
-                        if (s[i] == ']') { i++; return list; }
-                        throw new FormatException("expected ',' or ']'");
+                        if (i < s.Length && s[i] == ']') { i++; return list; }
+                        for (;;)
+                        {
+                            list.Add(ParseValue());
+                            SkipWs();
+                            if (i >= s.Length) throw new FormatException("unterminated array");
+                            if (s[i] == ',') { i++; continue; }
+                            if (s[i] == ']') { i++; return list; }
+                            throw new FormatException("expected ',' or ']'");
+                        }
+                    }
+                    finally
+                    {
+                        depth--;
                     }
                 }
                 if (c == '"') return ParseString();

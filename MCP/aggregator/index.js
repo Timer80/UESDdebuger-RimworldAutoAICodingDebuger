@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 /**
  * RimWorld MCP 聚合器（Aggregator）
  * - 聚合上游 MCP 服务器（默认 rimworld_DebugInEnvironment，SSE http://127.0.0.1:3000/sse）
@@ -80,8 +80,14 @@ function summarizeToolArgs(name, args) {
 const META_TOOLS = [
   {
     name: 'agg_list_tools',
-    description: 'List all available tools across upstream servers with health status',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false }
+    description: 'List tools as a multi-level menu. Without path: upstream health + top-level overview (categories). With path: drill into a menu subtree (path is delegated to upstream mcp_help).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'menu path, e.g. "bridge", "bridge/lua_script", "game_control", "game_control/game", "game_control/game/gameplay", "game_control/game/gameplay/debug_action"' }
+      },
+      additionalProperties: false
+    }
   },
   {
     name: 'agg_call_tool',
@@ -148,8 +154,14 @@ async function connectUpstream(cfg) {
   return entry;
 }
 
-// 重连单个上游（新建 client/transport，刷新工具索引）
+// 重连单个上游（新建 client/transport，刷新工具索引）；失败冷却 + 超时保护（P2-MCP-3）
+const RECONNECT_COOLDOWN_MS = 5000;
+const RECONNECT_TIMEOUT_MS  = 8000;
 async function tryReconnect(u) {
+  if (!u) return false;
+  const now = Date.now();
+  if (u._lastReconnectAt && now - u._lastReconnectAt < RECONNECT_COOLDOWN_MS) return false; // 冷却期不重复重连
+  u._lastReconnectAt = now;
   log('INFO', `尝试重连上游 ${u.name} ...`);
   try {
     if (u.client) { try { await u.client.close(); } catch (e) { /* ignore */ } }
@@ -159,15 +171,34 @@ async function tryReconnect(u) {
       { name: 'rimworld-aggregator', version: '1.0.0' },
       { capabilities: {} }
     );
-    await client.connect(transport);
-    const { tools } = await client.listTools();
-    u.client = client;
-    u.transport = transport;
-    u.tools = new Map(tools.map(t => [t.name, t]));
-    u.healthy = true;
-    u.error = null;
-    log('INFO', `上游 ${u.name} 重连成功，工具数=${tools.length}`);
-    return true;
+    // 超时保护：SSE connect 的 transport.start() 阶段无内置超时——上游假死后可能永不 resolve，
+    // 因此用 Promise.race 兜底整体超时（reject 后剩余 pending 的 connect 由 transport.close() 释放）。
+    const control = new AbortController();
+    let timer = null;
+    const connectPromise = Promise.race([
+      client.connect(transport, { signal: control.signal }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          control.abort();
+          try { transport.close(); } catch (e) { /* ignore */ }
+          reject(new Error(`重连超时（${RECONNECT_TIMEOUT_MS}ms）`));
+        }, RECONNECT_TIMEOUT_MS);
+      })
+    ]);
+    try {
+      await connectPromise;
+      clearTimeout(timer);
+      const { tools } = await client.listTools();
+      u.client = client;
+      u.transport = transport;
+      u.tools = new Map(tools.map(t => [t.name, t]));
+      u.healthy = true;
+      u.error = null;
+      log('INFO', `上游 ${u.name} 重连成功，工具数=${tools.length}`);
+      return true;
+    } finally {
+      clearTimeout(timer);
+    }
   } catch (e) {
     u.healthy = false;
     u.error = e && e.message ? e.message : String(e);
@@ -176,15 +207,12 @@ async function tryReconnect(u) {
   }
 }
 
-// 按需重连：对 enabled 且 unhealthy 的上游，每次 ListTools/CallTool 请求到来时尝试重连一次
+// 按需重连：对 enabled 且 unhealthy 的上游，每次 ListTools/CallTool 请求到来时并行尝试重连一次
 async function ensureHealthy() {
-  let changed = false;
-  for (const u of upstreams) {
-    if (u.enabled && !u.healthy) {
-      if (await tryReconnect(u)) changed = true;
-    }
-  }
-  if (changed) rebuildRouteMap();
+  const targets = upstreams.filter(u => u.enabled && !u.healthy);
+  if (targets.length === 0) return;
+  const results = await Promise.all(targets.map(u => tryReconnect(u)));   // 并行
+  if (results.some(Boolean)) rebuildRouteMap();
 }
 
 // 重建全局路由表 routeMap：toolName → { upstreamName, originalName }
@@ -255,23 +283,40 @@ function getAggregatedTools() {
   return tools;
 }
 
-// agg_list_tools 的目录文本：每上游一行状态 + 每工具一行
-function buildDirectoryText() {
-  const lines = [];
-  for (const u of upstreams) {
-    if (!u.enabled) continue;
-    if (!u.healthy) {
-      lines.push(`[server:${u.name}] <unhealthy> 0 tools${u.error ? ` (${u.error})` : ''}`);
-      continue;
-    }
-    lines.push(`[server:${u.name}] <healthy> ${u.tools.size} tools`);
-    for (const [toolName, def] of u.tools) {
-      let desc = String(def.description || '').split(/\r?\n/)[0] || '';
-      if (desc.length > 200) desc = desc.slice(0, 200) + '…';
-      lines.push(`- ${toolName} ${desc}`);
-    }
+// agg_list_tools 处理：多级菜单。有 path → 透传上游 mcp_help {path}；无 path → 前置各上游健康状态行 + 透传上游 mcp_help 无参（一级概览）
+async function handleAggListTools(args) {
+  const path = args && typeof args.path === 'string' && args.path.trim() ? args.path.trim() : null;
+  const enabled = upstreams.filter(u => u.enabled);
+  const healthy = enabled.filter(u => u.healthy);
+
+  // 所有上游均不可用：健康降级提示
+  if (healthy.length === 0) {
+    const lines = enabled.map(u =>
+      `[server:${u.name}] <unhealthy> 0 tools${u.error ? ` (${u.error})` : ''}`);
+    return {
+      content: [{ type: 'text', text: `所有上游均不可用，无法获取工具目录。\n${lines.join('\n')}` }],
+      isError: true
+    };
   }
-  return lines.join('\n');
+
+  const target = healthy[0];
+  try {
+    const result = await target.client.callTool({
+      name: 'mcp_help',
+      arguments: path ? { path } : {}
+    });
+    const text = (result.content || []).map(c => (c.type === 'text' ? c.text : '')).join('\n');
+    // 无 path 时前置各上游健康状态行，便于直接判断可用性
+    const prefix = path
+      ? ''
+      : enabled.map(u =>
+          `[server:${u.name}] ${u.healthy ? `<healthy> ${u.tools.size} tools` : `<unhealthy> 0 tools${u.error ? ` (${u.error})` : ''}`}`).join('\n') + '\n\n';
+    return { content: [{ type: 'text', text: prefix + text }], isError: result.isError === true };
+  } catch (e) {
+    target.healthy = false;
+    target.error = `调用失败，标记不可用待重连: ${e.message}`;
+    throw e;
+  }
 }
 
 // 调用上游工具；连接层异常时标记该上游 unhealthy（下次请求自动重连），并重新抛出
@@ -286,35 +331,46 @@ async function callUpstreamTool(u, originalName, args) {
   }
 }
 
-// agg_call_tool 处理：server/tool 校验 + 路由透传
+// agg_call_tool 处理：server 校验 + 透传上游 agg_call_tool 元工具
+// 语义（spec aggregator-tools-switches 修订）：开关=是否暴露给 AI，不控制能否使用。
+// 因此不再用 u.tools.has(tool) 门禁（u.tools 仅含上游已启用工具），改为透传上游
+// agg_call_tool——上游用 allToolNames()（含禁用工具）做存在性校验并直接执行。
+// 不可直接 client.callTool({name: 禁用工具})：上游普通路径有 isToolEnabled 检查会拒绝。
 async function handleAggCallTool(args) {
   const serverName = args && args.server;
   const tool = args && args.tool;
   const toolArgs = (args && args.args) || {};
   if (!serverName) {
-    return { content: [{ type: 'text', text: '缺少参数 server（上游名称）' }], isError: true };
+    return { content: [{ type: 'text', text: '缺少参数 server（上游名称），正确调用范式: agg_call_tool { server: "<上游名>", tool: "<工具名>", args: { ... } }' }], isError: true };
   }
   if (!tool) {
-    return { content: [{ type: 'text', text: '缺少参数 tool（工具名称）' }], isError: true };
+    return { content: [{ type: 'text', text: '缺少参数 tool（工具名称），正确调用范式: agg_call_tool { server: "<上游名>", tool: "<工具名>", args: { ... } }' }], isError: true };
   }
   const u = upstreams.find(x => x.name === serverName);
   if (!u) {
-    return { content: [{ type: 'text', text: `未知上游: ${serverName}，可用上游: ${upstreams.filter(x => x.enabled).map(x => x.name).join(', ')}` }], isError: true };
+    return { content: [{ type: 'text', text: `未知上游: ${serverName}，可用上游: ${upstreams.filter(x => x.enabled).map(x => x.name).join(', ')}，可调用 agg_list_tools { server: "<上游名>" } 或直接 agg_list_tools 查看可用上游` }], isError: true };
   }
   if (!u.healthy) {
     return { content: [{ type: 'text', text: `上游 ${serverName} 当前不可用: ${u.error || '未知错误'}` }], isError: true };
   }
-  if (!u.tools.has(tool)) {
-    return { content: [{ type: 'text', text: `上游 ${serverName} 不存在工具: ${tool}` }], isError: true };
+  try {
+    const result = await u.client.callTool({
+      name: 'agg_call_tool',
+      arguments: { tool, args: toolArgs },
+    });
+    return { content: result.content, isError: result.isError === true };
+  } catch (e) {
+    u.healthy = false;
+    u.error = `调用失败，标记不可用待重连: ${e.message}`;
+    throw e;
   }
-  return await callUpstreamTool(u, tool, toolArgs);
 }
 
 // 按路由表执行普通工具调用（coreTools 直调 / 非压缩模式明细工具 / 冲突别名）
 async function handleRoutedCall(name, args) {
   const route = routeMap.get(name);
   if (!route) {
-    return { content: [{ type: 'text', text: `未知工具: ${name}（可用工具请调用 agg_list_tools 查看）` }], isError: true };
+    return { content: [{ type: 'text', text: `未知工具: ${name}（可用工具请调用 agg_list_tools 查看；或 mcp_help { tool: "<工具名>" } 查询用法）` }], isError: true };
   }
   const u = upstreams.find(x => x.name === route.upstreamName);
   if (!u || !u.healthy) {
@@ -345,7 +401,7 @@ function createAggServer() {
       await ensureHealthy();     // 每次调用前按需重连
       rebuildRouteMap();
       if (name === 'agg_list_tools') {
-        result = { content: [{ type: 'text', text: buildDirectoryText() }], isError: false };
+        result = await handleAggListTools(args || {});
       } else if (name === 'agg_call_tool') {
         result = await handleAggCallTool(args || {});
       } else {
@@ -357,7 +413,10 @@ function createAggServer() {
     } catch (error) {
       const elapsed = Date.now() - startMs;
       log('ERROR', `tools/call ${name} args=${summary} → ${elapsed}ms error=${error.message}`);
-      return { content: [{ type: 'text', text: `调用失败: ${error.message}` }], isError: true };
+      // 元工具（agg_list_tools / agg_call_tool / mcp_help）失败时仅返回错误本身，不加调用范式提示
+      const isMetaTool = ['agg_list_tools', 'agg_call_tool', 'mcp_help'].includes(name);
+      const usageHint = isMetaTool ? '' : '\n正确调用范式: agg_call_tool { tool: "<工具名>", args: { ... } }（或直接调用工具名）';
+      return { content: [{ type: 'text', text: `调用失败: ${error.message}${usageHint}` }], isError: true };
     }
   });
 
@@ -414,7 +473,9 @@ app.get('/health', (req, res) => {
   const tools = getAggregatedTools();
   res.setHeader('Content-Type', 'application/json');
   res.end(JSON.stringify({
-    status: 'ok',
+    status: fatalErrorCount > 5 ? 'degraded' : 'ok',
+    state: fatalErrorCount > 5 ? 'degraded' : 'ok',
+    fatalErrorCount,
     compress,
     toolCount: tools.length,
     upstreams: upstreams.map(u => ({
@@ -428,8 +489,11 @@ app.get('/health', (req, res) => {
 });
 
 // 未捕获异常/拒绝：记录日志后不退出
+let fatalErrorCount = 0;
 process.on('uncaughtException', (err) => {
+  fatalErrorCount += 1;
   log('ERROR', `uncaughtException: ${err && err.stack ? err.stack : String(err)}`);
+  log('WARN', `第 ${fatalErrorCount} 次未捕获异常；连续多次请重启（P2-MCP-3）。`);
 });
 process.on('unhandledRejection', (reason) => {
   log('ERROR', `unhandledRejection: ${reason instanceof Error ? (reason.stack || reason.message) : String(reason)}`);

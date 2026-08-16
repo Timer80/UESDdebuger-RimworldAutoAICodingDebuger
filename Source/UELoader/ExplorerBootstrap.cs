@@ -45,6 +45,14 @@ namespace UELoader
                 // 顶部 UI 下移补丁（调试工具栏 + 殖民地头像条避开 UE 菜单栏），不依赖 UE 初始化，提前安装
                 UEUIShifter.Install();
 
+                // RimBridgeServer（GABP）收发状态监控补丁：反射解析 Lib.GAB，记录是否接收到 GABP 信息
+                // 与是否成功向 GABP 发送信息（经 GET /rimbridge/status 查询）。RimBridgeServer 未启用时静默跳过。
+                RimBridgeGABPStatusPatch.Install();
+
+                // RimBridgeServer architect 地区写操作主线程派发补丁：修复 DeleteAreaResponse/
+                // ClearAreaResponse 在读线程同步改主线程状态导致的连接僵死。RimBridgeServer 未启用时静默跳过。
+                RimBridgeAreaMarshallingPatch.Install();
+
                 // UEHttpHandler 运行时初始化（日志流订阅 + 主线程调度器）。
                 // 必须在主线程执行（UEMainThreadDispatcher.EnsureInitialized 会 new GameObject），
                 // 因此由本方法（SceneManager.sceneLoaded 回调，主线程）调用，而非 Mod 构造函数。

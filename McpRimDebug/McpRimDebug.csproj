@@ -3,7 +3,7 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
-    <Version>0.8.0.0</Version>
+    <Version>0.9.0.0</Version>
     <!-- vendored mono 6.12 Mono.Debugger.Soft 代码会触发 SYSLIB 过时告警（BinaryFormatter/MarshalByRefObject 等），
          仅作为告警保留，不得升级为错误 -->
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>

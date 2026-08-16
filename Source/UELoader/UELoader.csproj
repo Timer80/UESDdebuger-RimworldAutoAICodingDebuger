@@ -5,7 +5,7 @@
     <LangVersion>9.0</LangVersion>
     <RootNamespace>UELoader</RootNamespace>
     <AssemblyName>UELoader</AssemblyName>
-    <Version>0.8.0.0</Version>
+    <Version>0.9.0.0</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <Deterministic>true</Deterministic>
@@ -20,64 +20,70 @@
 
   <ItemGroup>
     <!-- RimWorld 游戏程序集（编译引用，不复制）。
-         注意：HintPath 以 C:\SteamLibrary 的实际游戏为准（目标游戏为
-         C:\SteamLibrary\steamapps\common\RimWorld，1.6.9676）。
-         曾指向 F:\RimWorld3（1.6.9438），两者 Assembly-CSharp.dll 哈希不一致，故统一改指 C:\SteamLibrary。 -->
+         路径已参量化到 $(RimWorldManagedDir)（Source/Directory.Build.props）。
+         历史迁移备注：目标游戏曾指向 F:\RimWorld3（1.6.9438）改指
+         C:\SteamLibrary\steamapps\common\RimWorld（1.6.9676，1.6.9438 的
+         Assembly-CSharp.dll 哈希与其不一致）。 -->
     <Reference Include="Assembly-CSharp">
-      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <HintPath>$(RimWorldManagedDir)\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(RimWorldManagedDir)\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine">
-      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\UnityEngine.dll</HintPath>
+      <HintPath>$(RimWorldManagedDir)\UnityEngine.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <!-- UE 公共 API 面涉及的 UnityEngine 模块（保险引用，避免元数据传递解析失败） -->
     <Reference Include="UnityEngine.UI">
-      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\UnityEngine.UI.dll</HintPath>
+      <HintPath>$(RimWorldManagedDir)\UnityEngine.UI.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.UIModule">
-      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\UnityEngine.UIModule.dll</HintPath>
+      <HintPath>$(RimWorldManagedDir)\UnityEngine.UIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.TextRenderingModule">
-      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
+      <HintPath>$(RimWorldManagedDir)\UnityEngine.TextRenderingModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.IMGUIModule">
-      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+      <HintPath>$(RimWorldManagedDir)\UnityEngine.IMGUIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.InputLegacyModule">
-      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\RimWorldWin64_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
+      <HintPath>$(RimWorldManagedDir)\UnityEngine.InputLegacyModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
 
+    <!-- P1-BD-1：0Harmony 仅编译引用（Private=false，不复制到 bin/Assemblies）。
+         运行期真身由 brrainz.harmony 的 Lib.Harmony 提供；vendor 副本版本必须恒等于 brrainz 运行面版本。
+         升级 brrainz 时须同步替换 Source/UELoader/lib/0Harmony.dll。 -->
     <!-- 0Harmony 2.3.3（brrainz.harmony / Lib.Harmony，与重编译 UE 编译面一致）。
-         运行时由 brrainz.harmony 模组提供；UESDdebuger/Assemblies 不再携带 0Harmony。 -->
+         编译副本位于 $(HarmonyRefDir)（Source/UELoader/lib）；运行时由 brrainz.harmony 模组提供；
+         UESDdebuger/Assemblies 不再携带 0Harmony。 -->
     <Reference Include="0Harmony">
-      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\Mods\RimworldMCPDebug\Assemblies\0Harmony.dll</HintPath>
+      <HintPath>$(HarmonyRefDir)\0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
-    <!-- 重编译的 UE 二进制（UESDdebuger/Assemblies，HintPath 指向绝对路径，不复制到输出） -->
+    <!-- 重编译的 UE 二进制（$(UEProjectDir)，即 UESDdebuger/Assemblies，编译引用、不复制到输出） -->
     <Reference Include="UnityExplorer.STANDALONE.Mono">
-      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Assemblies\UnityExplorer.STANDALONE.Mono.dll</HintPath>
+      <HintPath>$(UEProjectDir)\UnityExplorer.STANDALONE.Mono.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UniverseLib.Mono">
-      <HintPath>C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Assemblies\UniverseLib.Mono.dll</HintPath>
+      <HintPath>$(UEProjectDir)\UniverseLib.Mono.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
 
-  <!-- 构建后把 UELoader.dll 部署到 UESDdebuger/Assemblies（仅本产物，避免覆盖官方 UE DLL） -->
+  <!-- 构建后把 UELoader.dll 部署到 $(AssetsOutDir)（仅本产物，避免覆盖官方 UE DLL） -->
   <Target Name="DeployToAssemblies" AfterTargets="Build">
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Assemblies" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFolder="C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Assemblies" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+    <MakeDir Directories="$(AssetsOutDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(AssetsOutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFolder="$(AssetsOutDir)" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
   </Target>
 
 </Project>

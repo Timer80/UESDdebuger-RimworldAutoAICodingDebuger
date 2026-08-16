@@ -2,7 +2,7 @@
   "host": "127.0.0.1",
   "port": 3100,
   "compress": true,
-  "coreTools": ["start_game", "start_quick_test", "stop_game", "get_game_status", "read_log", "tail_log", "get_config"],
+  "coreTools": ["start_game", "start_quick_test", "stop_game", "get_game_status", "read_rimworld_log", "tail_rimworld_log", "get_game_info"],
   "upstreams": [
     { "name": "rimworld", "type": "sse", "url": "http://127.0.0.1:3000/sse", "enabled": true }
   ]

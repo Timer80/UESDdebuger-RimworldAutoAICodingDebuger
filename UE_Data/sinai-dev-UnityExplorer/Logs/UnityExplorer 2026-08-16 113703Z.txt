@@ -1,0 +1,121 @@
+UnityExplorer 4.9.0 initializing...
+[UniverseLib] UniverseLib 1.5.1 initializing...
+[UniverseLib] Finished UniverseLib initial setup.
+Initialized UnityCrashPrevention for: Canvas.get_renderingDisplaySize
+[Unity] [UELoader] UnityExplorer initialized. Press F7 to toggle the UI (default master toggle).
+[Unity] [UEHttp] UEHttpHandler ready: UnityExplorer 4.9.0 HTTP API
+[Unity] [UEHttp] ports.json 已写入 C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\MCP\ports.json（ueHttpPort=3001，unityDebugPort=null）
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[UniverseLib] Initialized Legacy Input support
+[Unity] [UnityExplorer] [UniverseLib] Initialized Legacy Input support
+[UniverseLib] Loaded modern bundle for Unity 2022.3.35f1
+[Unity] [UnityExplorer] [UniverseLib] Loaded modern bundle for Unity 2022.3.35f1
+[UniverseLib] UniverseLib 1.5.1 initialized.
+[Unity] [UnityExplorer] [UniverseLib] UniverseLib 1.5.1 initialized.
+Creating UI...
+[Unity] [UnityExplorer] Creating UI...
+
+UnityExplorer 4.9.0 (Mono) initialized.
+[Unity] [UnityExplorer] UnityExplorer 4.9.0 (Mono) initialized.
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 2ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 7ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 5ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 3ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 2ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 1ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] [UEHttp] GET /unityexplorer/status
+[Unity] [UEHttp] → ok, 0ms
+[Unity] Shutting down API server...

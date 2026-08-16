@@ -1,0 +1,10 @@
+C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Source\UELoader\bin\Debug\UELoader.dll
+C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Source\UELoader\bin\Debug\UELoader.pdb
+C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Source\UELoader\obj\Debug\UELoader.csproj.AssemblyReference.cache
+C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Source\UELoader\obj\Debug\UELoader.GeneratedMSBuildEditorConfig.editorconfig
+C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Source\UELoader\obj\Debug\UELoader.AssemblyInfoInputs.cache
+C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Source\UELoader\obj\Debug\UELoader.AssemblyInfo.cs
+C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Source\UELoader\obj\Debug\UELoader.csproj.CoreCompileInputs.cache
+C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Source\UELoader\obj\Debug\UELoader.sourcelink.json
+C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Source\UELoader\obj\Debug\UELoader.dll
+C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\Source\UELoader\obj\Debug\UELoader.pdb

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -30,6 +30,30 @@ namespace UELoader
         static HttpListener listener;
         static Thread listenerThread;
         static volatile bool running;
+        static string authToken;             // 每次游戏启动随机生成（P0-CS-1）
+
+        /// <summary>校验 Bearer token（P0-CS-1）。空 token 或头不匹配返回 false。</summary>
+        static bool IsAuthorized(HttpListenerRequest request)
+        {
+            if (string.IsNullOrEmpty(authToken)) return false;
+            string auth = request.Headers["Authorization"];
+            const string prefix = "Bearer ";
+            if (string.IsNullOrEmpty(auth) || !auth.StartsWith(prefix, StringComparison.Ordinal))
+                return false;
+            string token = auth.Substring(prefix.Length).Trim();
+            return string.Equals(token, authToken, StringComparison.Ordinal);
+        }
+
+        /// <summary>未授权响应（HTTP 401）。</summary>
+        static Dictionary<string, object> Unauthorized()
+        {
+            return new Dictionary<string, object>
+            {
+                { "success", false },
+                { "error", "Unauthorized" },
+                { "errorCode", "UNAUTHORIZED" }
+            };
+        }
 
         /// <summary>实际监听端口（动态探测得到；未启动/启动失败为 0）。</summary>
         public static int ActualPort { get; private set; }
@@ -106,6 +130,9 @@ namespace UELoader
 
                 UEHttpLog.Message($"[UEHttp] UE HTTP server started on http://127.0.0.1:{ActualPort}/");
 
+                // P0-CS-1：每次游戏启动随机生成 token（不落盘即不可预测，保证会话内鉴权可用）
+                authToken = Guid.NewGuid().ToString("N"); // 64 个 hex，无特殊字符，安全放进 JSON 与 Header
+
                 // 启动成功后立即写端口文件（unityDebugPort 此刻可能尚未打印到 Player.log，
                 // 进场景后由 RefreshPortsFile() 补写刷新）。
                 WritePortsFile();
@@ -133,6 +160,13 @@ namespace UELoader
         /// { "ueHttpPort": &lt;int&gt;, "unityDebugPort": &lt;int|null&gt;, "updatedAt": "&lt;ISO8601&gt;" }。
         /// MCP 侧（UESDdebuger/MCP/index.js）与 McpRimDebug 均读取该文件以适配动态端口。
         /// 写入失败仅记日志，不阻断游戏启动。
+        ///
+        /// 鉴权设计说明（P0-CS-1，待实现，勿删除本注释）:
+        /// 已拍板方案 = 游戏侧每次启动生成随机 token 并写入本文件的 token 字段，
+        /// MCP 服务器启动时读同一文件取 token；所有“写操作”端点（unityexplorer/console/execute、
+        /// unityexplorer/hook/create、area/delete|clear、debugaction/execute 等）校验
+        /// Authorization: Bearer &lt;token&gt;，不匹配返回 401；“读操作”（status/log 等）免 token。
+        /// token 生命周期 = 本次游戏会话（每次运行随机），这是天然对齐点。
         /// </summary>
         public static void WritePortsFile()
         {
@@ -150,6 +184,7 @@ namespace UELoader
                 // 手写 JSON 保证格式精确（Unity JsonUtility 对 null 序列化与字段名大小写不友好）
                 int? unityPort = DiscoverUnityDebugPort();
                 string json = "{ \"ueHttpPort\": " + ActualPort
+                    + ", \"token\": \"" + (authToken ?? "") + "\""
                     + ", \"unityDebugPort\": " + (unityPort.HasValue ? unityPort.Value.ToString() : "null")
                     + ", \"updatedAt\": \"" + DateTime.Now.ToString("yyyy-MM-dd'T'HH:mm:sszzz") + "\" }";
 
@@ -331,6 +366,19 @@ namespace UELoader
                     case "unityexplorer/status":
                         result = GetGuard(request, () => UEHttpHandler.GetStatus());
                         break;
+                    // ---------- RimBridgeServer（GABP）收发状态（RimBridgeGABPStatusPatch，只读静态快照） ----------
+                    case "rimbridge/status":
+                        result = GetGuard(request, () => RimBridgeGABPStatusPatch.GetStatus());
+                        break;
+                    // ---------- 手搓 Area 删除/清空（UEAreaActions，主线程执行，替代 RimBridge 僵死的 delete_area/clear_area） ----------
+                    case "area/delete":
+                        result = PostGuard(request, () =>
+                            UEAreaActions.DeleteArea(GetString(body, "areaId")));
+                        break;
+                    case "area/clear":
+                        result = PostGuard(request, () =>
+                            UEAreaActions.ClearArea(GetString(body, "areaId")));
+                        break;
                     case "unityexplorer/log/clear":
                         result = PostGuard(request, () => UEHttpHandler.ClearLogs());
                         break;
@@ -422,6 +470,17 @@ namespace UELoader
             }
             catch (Exception ex)
             {
+                if (ex is BodyTooLargeException)
+                {
+                    LogResult(null, sw, "PAYLOAD_TOO_LARGE");
+                    SendJson(context.Response, 413, new Dictionary<string, object>
+                    {
+                        { "success", false },
+                        { "error", "Request body too large (max 1MB)" },
+                        { "errorCode", "PAYLOAD_TOO_LARGE" }
+                    });
+                    return;
+                }
                 UEHttpLog.Error($"[UEHttp] Error processing request: {ex}");
                 try
                 {
@@ -495,14 +554,23 @@ namespace UELoader
 
         // ---------------------------------------------------------------- 请求体解析
 
+        // 请求体大小上限（P2-CS-2）。ContentLength64 与实际读入字节两者任一超限都拒绝，双保险覆盖 chunked / 头不可信。
+        const int MaxBodyBytes = 1 * 1024 * 1024;
+
         static Dictionary<string, object> ParseBody(HttpListenerRequest request)
         {
             if (request.ContentLength64 <= 0)
                 return new Dictionary<string, object>(StringComparer.Ordinal);
+            if (request.ContentLength64 > MaxBodyBytes)
+                throw new BodyTooLargeException();
 
             using (var reader = new StreamReader(request.InputStream, request.ContentEncoding ?? Encoding.UTF8))
             {
-                string body = reader.ReadToEnd();
+                char[] buf = new char[MaxBodyBytes + 1];
+                int n = reader.Read(buf, 0, buf.Length);
+                if (n > MaxBodyBytes)
+                    throw new BodyTooLargeException();  // 双保险：chunked 或 ContentLength64 不可信时仍截断
+                string body = new string(buf, 0, n);
                 return UELightJson.ParseObject(body) ?? new Dictionary<string, object>(StringComparer.Ordinal);
             }
         }
@@ -563,6 +631,7 @@ namespace UELoader
         {
             if (request.HttpMethod != "POST")
                 return MethodNotAllowed();
+            if (!IsAuthorized(request)) return Unauthorized();   // P0-CS-1 写操作鉴权
             return handler();
         }
 
@@ -577,6 +646,7 @@ namespace UELoader
         {
             if (request.HttpMethod != "DELETE")
                 return MethodNotAllowed();
+            if (!IsAuthorized(request)) return Unauthorized();   // P0-CS-1 写操作鉴权
             return handler();
         }
 
@@ -600,6 +670,8 @@ namespace UELoader
         static int StatusCodeFor(Dictionary<string, object> result)
         {
             if (result == null) return 500;
+            if (result.TryGetValue("errorCode", out object ec)
+                && Convert.ToString(ec) == "UNAUTHORIZED") return 401;
             return 400; // 业务错误统一 4xx（MCP 端主要看 success 字段）
         }
 
@@ -620,5 +692,8 @@ namespace UELoader
                 UEHttpLog.Warning($"[UEHttp] Failed to send response: {ex.Message}");
             }
         }
+
+        /// <summary>请求体超限异常（P2-CS-2）。ProcessRequest 捕获后映射为 HTTP 413。</summary>
+        sealed class BodyTooLargeException : Exception { }
     }
 }

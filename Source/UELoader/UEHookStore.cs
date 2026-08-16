@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using UnityExplorer.Hooks;
 using Verse;
 
 namespace UELoader
@@ -14,7 +15,7 @@ namespace UELoader
         public sealed class HookEntry
         {
             public string HookId;
-            public object Instance;          // UnityExplorer.Hooks.HookInstance
+            public HookInstance Instance;    // 强类型 HookInstance，支持直接 Unpatch()
             public string TargetMethod;
             public string DeclaringType;
             public string MethodName;
@@ -28,7 +29,7 @@ namespace UELoader
         static readonly object Lock = new object();
         static int nextId = 1;
 
-        public static string Store(object hookInstance, string targetMethod, string declaringType,
+        public static string Store(HookInstance hookInstance, string targetMethod, string declaringType,
             string methodName, string patchType, string patchCode)
         {
             lock (Lock)
@@ -66,11 +67,12 @@ namespace UELoader
 
                 try
                 {
-                    entry.Instance?.GetType().GetMethod("Unpatch")?.Invoke(entry.Instance, null);
+                    if (entry.Instance != null)
+                        entry.Instance.Unpatch();   // 强类型，非反射
                 }
                 catch (Exception ex)
                 {
-                    Log.Warning($"[UEHttp] Error unpatching hook {hookId}: {ex.Message}");
+                    UEHttpLog.Warning($"[UEHook] Unpatch 失败：{ex.Message}");
                 }
 
                 Hooks.Remove(hookId);

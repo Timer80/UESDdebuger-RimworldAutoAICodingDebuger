@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -116,8 +116,31 @@ namespace McpRimDebug
         // 常见端口区分（勿混用）：3001=UE HTTP（UESDdebuger 模组，动态）；8765=RIMAPI（第三方，固定）；
         // 55000=Unity PlayerConnection（引擎内置 Profiler 用，固定，**不是** mono 调试端口）；
         // 其他随机端口（如 56030）=mono 调试代理（每次运行不同）。
-        public const string FallbackLogPath =
-            @"C:\Users\Timer_0\AppData\LocalLow\Ludeon Studios\RimWorld by Ludeon Studios\Player.log";
+        /// <summary>
+        /// 默认 Player.log 路径（Steam 版）。不再硬编码用户名，改为按本机 %LOCALAPPDATA% 动态推导
+        /// （Unity 实际写在 LocalLow；LocalLow 无独立 SpecialFolder，取其父目录 Local 的兄弟目录）。
+        /// 仍可用环境变量 MCP_RIMDBG_LOG_PATH 显式覆盖。
+        /// </summary>
+        public static string FallbackLogPath
+        {
+            get
+            {
+                try
+                {
+                    string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                    if (!string.IsNullOrEmpty(local))
+                    {
+                        string localLow = Path.Combine(Path.GetDirectoryName(local) ?? string.Empty, "LocalLow");
+                        string p = Path.Combine(localLow, "Ludeon Studios", "RimWorld by Ludeon Studios", "Player.log");
+                        return p;
+                    }
+                }
+                catch { }
+                // 最后兜底：仍在本地数据目录下按 Ludeon 惯例推断；找不到时退回 LocalApplicationData 路径
+                string local2 = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                return Path.Combine(local2, "Ludeon Studios", "RimWorld by Ludeon Studios", "Player.log");
+            }
+        }
 
         /// <summary>Unity Player.log 路径：环境变量 MCP_RIMDBG_LOG_PATH 优先，缺省为 Steam 版路径。</summary>
         public static string LogPath
@@ -166,7 +189,7 @@ namespace McpRimDebug
         /// <summary>socket 连接/握手超时（毫秒），仅 attach 阶段生效（之后接收线程需无限阻塞读）。</summary>
         const int SocketTimeoutMs = 10000;
         /// <summary>事件日志队列上限（wait 的非匹配事件暂存队列，防事件风暴）。</summary>
-        const int EventLogMax = 200;
+        internal const int EventLogMax = 200;
         /// <summary>launch 后自动等待调试端口出现并 attach 的最大时长（毫秒）。</summary>
         const int LaunchAutoAttachTimeoutMs = 90000;
         /// <summary>端口进入监听后、发起 attach 前的就绪缓冲（毫秒）：agent 完全就绪需短暂时间，过早连接会被 RST。</summary>
@@ -176,6 +199,8 @@ namespace McpRimDebug
 
         // ---- 全局命令锁：所有 VM socket 操作经此串行化 ----
         readonly object commandLock = new object();
+        /// <summary>获取 commandLock 的短等待（毫秒）：拿不到即返回忙警告（P1-MD-1 阻塞返回警告）。</summary>
+        const int CommandBusyWaitMs = 50;
 
         // ---- 事件循环 ----
         readonly BlockingCollection<RawEvent> eventQueue = new BlockingCollection<RawEvent>();
@@ -188,6 +213,12 @@ namespace McpRimDebug
         readonly Dictionary<int, BreakpointEntry> breakpoints = new Dictionary<int, BreakpointEntry>();
         // 异常事件请求注册表：请求 id → 描述（detach/断连时随会话一并清除）
         readonly Dictionary<int, string> exceptionRequests = new Dictionary<int, string>();
+
+        // ---- 断点/事件请求统计（会话级；随会话复位清零，见 HandleDisconnect/ResetSession）----
+        long breakpointsAddedTotal;    // break_add 累计成功次数
+        long breakpointsRemovedTotal;  // break_remove + break_clear 累计释放次数
+        /// <summary>当前活动异常事件请求数（派生自 exceptionRequests，无需单独维护）。</summary>
+        int eventRequestsActive { get { return exceptionRequests.Count; } }
 
         // ---- Task 4：对象句柄缓存 ----
         // SDB 对象 id → 句柄号（正查）+ 句柄号 → ObjectMirror（反查，供 inspect 展开）；
@@ -223,6 +254,10 @@ namespace McpRimDebug
             string host;
             int port;
             string lastReason;
+            int breakpointsActive = 0;
+            long breakpointsAdded = 0;
+            long breakpointsRemoved = 0;
+            int exceptionEventsActive = 0;
 
             lock (stateLock)
             {
@@ -238,6 +273,15 @@ namespace McpRimDebug
                 {
                     proto = vm.Version.MajorVersion + "." + vm.Version.MinorVersion;
                     vmVersion = vm.Version.VMVersion;
+                }
+
+                // 断点统计（与 HandleDisconnect/ResetSession 保持 stateLock → breakpointsLock 同序嵌套）
+                lock (breakpointsLock)
+                {
+                    breakpointsActive = breakpoints.Count;
+                    breakpointsAdded = breakpointsAddedTotal;
+                    breakpointsRemoved = breakpointsRemovedTotal;
+                    exceptionEventsActive = eventRequestsActive;
                 }
             }
 
@@ -287,6 +331,11 @@ namespace McpRimDebug
                 ["vmVersion"] = vmVersion,
                 ["needResume"] = st == SessionState.Attached && !resumed,
                 ["lastDisconnectReason"] = lastReason,
+                // 断点统计：任何状态（含未连接）都返回，未连接时恒为 0
+                ["breakpointsActive"] = breakpointsActive,
+                ["breakpointsAddedTotal"] = breakpointsAdded,
+                ["breakpointsRemovedTotal"] = breakpointsRemoved,
+                ["eventRequestsActive"] = exceptionEventsActive,
             };
 
             string msg;
@@ -317,6 +366,14 @@ namespace McpRimDebug
                     if (!resumed)
                         msg += "；attach 后需 resume 游戏才运行（wait-for-managed-debugger=1）";
                     break;
+            }
+
+            // 挂起提示：VM 挂起且仍有活动断点/异常请求时，解释“卡住”属正常断点挂起并给出释放建议
+            if (susp && (breakpointsActive + exceptionEventsActive) > 0)
+            {
+                msg += "；注意：VM 挂起中仍保留 " + breakpointsActive + " 个活动断点"
+                    + (exceptionEventsActive > 0 ? "、" + exceptionEventsActive + " 个异常事件请求" : "")
+                    + "——游戏看起来“卡住”属正常的断点挂起，可用 break_remove / break_clear 释放断点后调用 resume 恢复运行";
             }
 
             return ToolResult.OkResult(msg, data);
@@ -394,7 +451,8 @@ namespace McpRimDebug
                     };
                     return ToolResult.OkResult(
                         "已连接 " + host + ":" + p + "，协议 " + v.MajorVersion + "." + v.MinorVersion
-                        + "，VM " + v.VMVersion + "；attach 后需 resume 游戏才运行（wait-for-managed-debugger=1）",
+                        + "，VM " + v.VMVersion + "；attach 后需 resume 游戏才运行（wait-for-managed-debugger=1）。"
+                        + "注意：本会话为一次性调试会话，detach/断开后如需再次调试，请重启调试服务器（McpRimDebug）",
                         data);
                 }
                 catch (Exception ex)
@@ -405,9 +463,13 @@ namespace McpRimDebug
                     }
                     lock (stateLock)
                     {
-                        state = SessionState.Disconnected;
+                        // P0-MD-2：只在仍是本调用自设的 Attaching 时才复位；
+                        // 若已被新的 Attach/Reset 占用则不动，避免旧后台任务冲掉新会话。
+                        if (state == SessionState.Attaching)
+                            state = SessionState.Disconnected;
                     }
-                    return ToolResult.ErrorResult("attach 失败: " + FriendlyError(ex, "无法连接 " + host + ":" + p));
+                    return ToolResult.ErrorResult("attach 失败: " + FriendlyError(ex, "无法连接 " + host + ":" + p)
+                        + "；mono 调试为一次性会话，重连需重启调试服务器（McpRimDebug）");
                 }
             }
         }
@@ -433,6 +495,11 @@ namespace McpRimDebug
             {
                 try
                 {
+                    // P3-MD-8（双重关闭语义）：target.Detach() 在代理侧确认后内部会关闭本连接 socket。
+                    // 若同一连接此前已经被 ForceDisconnectForTimeout 的 socket.Shutdown（或事件循环的
+                    // VMDisconnect 路径）触碰过，这里再次 Close 属幂等安全组合——Socket/连接对象二次关闭
+                    // 抛出的 ObjectDisposedException 会被上层 catch 忽略，不会破坏状态机；
+                    // 连接对象的生命周期统一由 HandleDisconnect/ResetSession 结束时把 vm/sessionSocket 置 null 收束。
                     target.Detach();
                     ResetSession();
                     return ToolResult.OkResult("已安全 detach，游戏继续运行");
@@ -463,7 +530,9 @@ namespace McpRimDebug
                 target = vm;
             }
 
-            lock (commandLock)
+            if (!TryEnterCommandLock(out string busy))
+                return ToolResult.ErrorResult(busy);
+            try
             {
                 try
                 {
@@ -486,6 +555,7 @@ namespace McpRimDebug
                     return ToolResult.ErrorResult("resume 失败: " + FriendlyError(ex, "恢复 VM"));
                 }
             }
+            finally { ExitCommandLock(); }
         }
 
         /// <summary>挂起整个 VM，并更新挂起状态。</summary>
@@ -499,7 +569,9 @@ namespace McpRimDebug
                 target = vm;
             }
 
-            lock (commandLock)
+            if (!TryEnterCommandLock(out string busy))
+                return ToolResult.ErrorResult(busy);
+            try
             {
                 try
                 {
@@ -522,6 +594,7 @@ namespace McpRimDebug
                     return ToolResult.ErrorResult("suspend 失败: " + FriendlyError(ex, "挂起 VM"));
                 }
             }
+            finally { ExitCommandLock(); }
         }
 
         // ---------------------------------------------------------------- launch
@@ -628,9 +701,12 @@ namespace McpRimDebug
                 // 端口发现：ports.json 优先，但若其端口 == 启动前记录（preLaunchPort），
                 // 说明是上次运行的残留旧值（本次运行的游戏尚未刷新端口文件），必须回退
                 // Player.log 解析本次新端口，否则永远等不到“新端口”而超时。
+                // P2-MD-4：ports.json 命中本次新端口时直接采用，跳过 Player.log 的 IO 读。
                 int? fromPorts = DiscoverDebugPortFromPortsFile();
-                int? fromLog = DiscoverDebugPortFromLog();
-                logPort = (fromPorts.HasValue && fromPorts.Value != preLaunchPort) ? fromPorts : fromLog;
+                if (fromPorts.HasValue && fromPorts.Value != preLaunchPort)
+                    logPort = fromPorts;
+                else
+                    logPort = DiscoverDebugPortFromLog();
                 // 必须是本次运行的新端口（≠ 启动前的残留端口）且已进入监听
                 if (logPort.HasValue && logPort.Value != preLaunchPort && ProbeTcpPort(host, logPort.Value))
                     break;
@@ -793,6 +869,9 @@ namespace McpRimDebug
         {
             while (eventLoopRunning)
             {
+                bool stillMine;
+                lock (stateLock) { stillMine = ReferenceEquals(target, vm); }
+                if (!stillMine) break;   // P1-MD-5：会话已更换/该 VM 已非当前 → 旧循环退出
                 EventSet es;
                 try
                 {
@@ -832,6 +911,11 @@ namespace McpRimDebug
                     };
                     EnqueueEvent(raw);
 
+                    // P2-MD-2：新程序集/类型加载会使已缓存程序集元数据过期，清会话级缓存
+                    // 避免 find_* 返回旧元数据（新程序集下次 find 会重新拉取）。
+                    if (e.EventType == EventType.AssemblyLoad || e.EventType == EventType.TypeLoad)
+                        InvalidateMetadataCache();
+
                     if (e.EventType == EventType.VMDisconnect)
                     {
                         HandleDisconnect("调试器已断开");
@@ -842,9 +926,29 @@ namespace McpRimDebug
         }
 
         /// <summary>
-        /// 事件入队（统一入口）：入队后维护事件日志上限，超过 EventLogMax 条丢弃最旧事件
-        /// （防事件风暴导致内存/输出无界增长）。事件循环与 wait/step 放回未匹配事件时都经此。
+        /// 尝试获取 commandLock；拿不到返回 busy 提示（P1-MD-1 阻塞返回警告）。
+        /// 供短命令（threads/callstack/locals/inspect/eval/搜索/断点等非占用者）使用，
+        /// 避免排队在 Step 等长锁占用者后面被看门狗判定超时。
         /// </summary>
+        bool TryEnterCommandLock(out string busy)
+        {
+            if (Monitor.TryEnter(commandLock, CommandBusyWaitMs))
+            {
+                busy = null;
+                return true;
+            }
+            busy = "调试会话忙（正被 step/等待事件等阻塞型命令占用命令锁），命令已排队/等待中，请稍后重试";
+            return false;
+        }
+
+        /// <summary>释放 commandLock（与 TryEnterCommandLock 配对；仅在 TryEnter 成功后的 finally 中调用）。</summary>
+        void ExitCommandLock()
+        {
+            Monitor.Exit(commandLock);
+        }
+
+        /// <summary>事件入队（统一入口）：入队后维护事件日志上限，超过 EventLogMax 条丢弃最旧事件
+        /// （防事件风暴导致内存/输出无界增长）。事件循环与 wait/step 放回未匹配事件时都经此。</summary>
         void EnqueueEvent(RawEvent raw)
         {
             eventQueue.Add(raw);
@@ -876,6 +980,9 @@ namespace McpRimDebug
                 {
                     breakpoints.Clear();
                     exceptionRequests.Clear();
+                    // 会话级断点统计随会话复位清零（活动数由字典派生，自动为 0）
+                    breakpointsAddedTotal = 0;
+                    breakpointsRemovedTotal = 0;
                 }
                 // 对象句柄缓存随连接销毁（对象 id 仅对当前连接有意义）
                 lock (handlesLock)
@@ -884,7 +991,11 @@ namespace McpRimDebug
                     handleObjects.Clear();
                     nextHandle = 1;
                 }
+                // P2-MD-2：程序集元数据缓存随连接销毁（避免跨 VM/跨会话残留旧程序集定义）
+                InvalidateMetadataCache();
             }
+            // P1-MD-2.2：会话结束清理本会话登记的截断落盘文件
+            TruncationSink.SweepOnSessionEnd();
         }
 
         /// <summary>直接把会话复位到 Disconnected（detach 成功路径；与 HandleDisconnect 幂等共存）。</summary>
@@ -903,6 +1014,9 @@ namespace McpRimDebug
                 {
                     breakpoints.Clear();
                     exceptionRequests.Clear();
+                    // 会话级断点统计随会话复位清零（活动数由字典派生，自动为 0）
+                    breakpointsAddedTotal = 0;
+                    breakpointsRemovedTotal = 0;
                 }
                 lock (handlesLock)
                 {
@@ -910,7 +1024,11 @@ namespace McpRimDebug
                     handleObjects.Clear();
                     nextHandle = 1;
                 }
+                // P2-MD-2：程序集元数据缓存随会话复位清空（避免跨 VM 残留旧程序集定义）
+                InvalidateMetadataCache();
             }
+            // P1-MD-2.2：会话结束清理本会话登记的截断落盘文件
+            TruncationSink.SweepOnSessionEnd();
         }
 
         // ---------------------------------------------------------------- Task 6：统一执行包装与超时
@@ -953,10 +1071,18 @@ namespace McpRimDebug
 
             string reason = what + " 超时（" + CommandTimeoutMs + "ms）：调试代理未响应，已强制断开连接";
             ForceDisconnectForTimeout(reason);
+            // P0-MD-2：force-disconnect 会唤醒阻塞的命令线程抛 VMDisconnectedException 退出；
+            // 有界等待让被放弃的命令尽快 settle，避免其残留占用 commandLock/socket，
+            // 使超时后能安全立即重新 attach。限时未结束也返回（其 catch 已被上一步守卫成不复查状态）。
+            try { task.Wait(CommandTimeoutMs); } catch { /* 忽略 AggregateException */ }
             return ToolResult.ErrorResult(reason + "，可重新 attach");
         }
 
-        /// <summary>超时强制断开：Shutdown 打断接收线程阻塞读，使挂起的命令线程被唤醒并抛 VMDisconnectedException。</summary>
+        /// <summary>超时强制断开：Shutdown 打断接收线程阻塞读，使挂起的命令线程被唤醒并抛 VMDisconnectedException。
+        /// P3-MD-8（双重关闭语义）：socket.Shutdown 与 target.ForceDisconnect（及其内部对本 socket 的 Close）
+        /// 是幂等安全组合——此处先 Shutdown 唤醒阻塞读，再调 ForceDisconnect 让代理端正式终止并内部 Close 连接；
+        /// 即使本连接已被事件循环的 VMDisconnect 路径或后续 detach 二次关闭，二次 Close 抛出的异常均被忽略，
+        /// 连接对象的生命周期统一由 HandleDisconnect 结束时把 vm/sessionSocket 置 null 收束。</summary>
         void ForceDisconnectForTimeout(string reason)
         {
             VirtualMachine target;
@@ -967,6 +1093,7 @@ namespace McpRimDebug
                 s = sessionSocket;
             }
             try { if (s != null) s.Shutdown(SocketShutdown.Both); } catch { }
+            // ForceDisconnect 内部会对本连接 socket 执行 Close；与上面的 Shutdown 是幂等组合（二次关闭异常被忽略）
             try { if (target != null) target.ForceDisconnect(); } catch { }
             HandleDisconnect(reason);
         }
@@ -991,9 +1118,66 @@ namespace McpRimDebug
             }
         }
 
+        // ---- P2-MD-4：GetActiveTcpListeners 短时间窗缓存 ----
+        // IPGlobalProperties.GetActiveTcpListeners() 每次都做系统级监听表枚举，auto_attach 每 500ms
+        // 探测一次、status 也会探测，重复调用昂贵。短时间窗内复用结果；枚举源可注入（供 selftest 计次断言）。
+        static readonly object listenersLock = new object();
+        static IPEndPoint[] _activeListeners;
+        static DateTime _listenersFetchedAt = DateTime.MinValue;
+        static Func<IPEndPoint[]> listenerSource = () =>
+            IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners();
+        /// <summary>监听表缓存时间窗（毫秒）：窗口内命中复用上次枚举结果，超出才重新枚举。</summary>
+        internal static int ActiveListenersCacheWindowMs = 2000;
+
+        /// <summary>
+        /// 获取当前活动 TCP 监听表（短时间窗缓存）。窗口内任一 / 探测共享同一份结果，
+        /// 避免每次 ProbeTcpPort 都对系统做监听表枚举；返回数组为只读视图，调用方勿持有引用跨窗口使用。
+        /// </summary>
+        internal static IPEndPoint[] GetActiveTcpListeners()
+        {
+            lock (listenersLock)
+            {
+                DateTime now = DateTime.UtcNow;
+                if (_activeListeners != null
+                    && (now - _listenersFetchedAt).TotalMilliseconds < ActiveListenersCacheWindowMs)
+                    return _activeListeners;
+                IPEndPoint[] arr;
+                try { arr = listenerSource(); }
+                catch { arr = null; }
+                _activeListeners = arr != null ? arr : Array.Empty<IPEndPoint>();
+                _listenersFetchedAt = now;
+                return _activeListeners;
+            }
+        }
+
+        /// <summary>测试钩子：注入监听表枚举源（传 null 恢复默认）。仅 selftest 用。</summary>
+        internal static void SetListenerSourceForTest(Func<IPEndPoint[]> source)
+        {
+            lock (listenersLock)
+            {
+                listenerSource = source ?? (() =>
+                    IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners());
+                _activeListeners = null;
+                _listenersFetchedAt = DateTime.MinValue;
+            }
+        }
+
+        /// <summary>测试钩子：重置监听表缓存（清理注入的枚举源）。仅 selftest 用。</summary>
+        internal static void ResetListenerCacheForTest()
+        {
+            lock (listenersLock)
+            {
+                listenerSource = () =>
+                    IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners();
+                _activeListeners = null;
+                _listenersFetchedAt = DateTime.MinValue;
+            }
+        }
+
         /// <summary>
         /// 端口监听探测：通过本地 TCP 监听表判断端口是否处于监听状态，**不建立真实连接**。
         /// （mono 调试代理收到 raw TCP 连接但 DWP 握手失败时会中止游戏进程，故禁止用连接探测。）
+        /// 监听表经 GetActiveTcpListeners 的短时间窗缓存读取（P2-MD-4）。
         /// </summary>
         static bool ProbeTcpPort(string host, int port)
         {
@@ -1001,8 +1185,7 @@ namespace McpRimDebug
                 return false;
             try
             {
-                IPGlobalProperties props = IPGlobalProperties.GetIPGlobalProperties();
-                foreach (IPEndPoint ep in props.GetActiveTcpListeners())
+                foreach (IPEndPoint ep in GetActiveTcpListeners())
                 {
                     if (ep.Port != port)
                         continue;
@@ -1038,7 +1221,7 @@ namespace McpRimDebug
         /// 路径可用环境变量 MCP_RIMDBG_PORTS_FILE 覆盖。文件缺失/不可读/解析失败/
         /// 字段为 null 或非正整数时返回 null（由调用方回退 Player.log 解析）。
         /// </summary>
-        static int? DiscoverDebugPortFromPortsFile()
+        internal static int? DiscoverDebugPortFromPortsFile()
         {
             try
             {
@@ -1087,19 +1270,29 @@ namespace McpRimDebug
             return null;
         }
 
+        // P3-MD-4：端口行正则提为常量并注明来源。
+        // Unity mono 调试代理在 Player.log 首行打印（boot.config wait-for-managed-debugger=1 触发）：
+        //   "Starting managed debugger on port XXXX"
+        const string DebugPortPattern = @"Starting managed debugger on port (\d+)";
+
         /// <summary>
-        /// 从 Unity Player.log 尾部解析游戏自报的调试端口（"Starting managed debugger on port XXXX"）。
+        /// 从 Unity Player.log 解析游戏自报的调试端口（"Starting managed debugger on port XXXX"）。
         /// 端口每次运行随机且为本次运行的最新值，故取最后一个匹配；文件可能被游戏独占，
         /// 以 FileShare.ReadWrite|Delete 打开（读不到/无匹配时返回 null）。
         ///
+        /// 查找策略（P2-MD-1：尾窗优先，未命中全文件扫描兜底）：
+        /// - **尾窗快速命中**：先读尾部 64KB，用 RightToLeft 在尾窗内取最后一个匹配，命中即 parse 返回
+        ///   （省 IO 的主路径，覆盖端口行仍落在尾窗内的情况）；
+        /// - **全文件扫描兜底**：尾窗未命中时，读整个日志文件并行 Regex.Matches，取**最后一次**匹配返回。
+        ///   这覆盖了端口行打印在 **首行** 而日志已增长到尾窗不含该行的场景（游戏启动早期）——
+        ///   该场景下不再丢命中（原实现会返回 null）。
+        ///
         /// 已知限制（务必牢记，勿误解返回值）：
-        /// - 该行打印在 Player.log **首行**（Unity 启动早期），游戏运行越久尾部 64KB 越不含该行，
-        ///   → 返回 null 属**正常**，不代表游戏没开调试代理；
         /// - 端口每次运行随机，多个匹配取最后一个（文件被游戏覆盖写，通常只有一个匹配）；
-        /// - 如需更高命中率可改全文件扫描（日志可达数 MB，尾窗是省 IO 的取舍）。
+        /// - 全文件扫描会读整个文件（日志可达数 MB），仅在尾窗未命中时触发，属必要的 IO 取舍。
         /// 调用方优先级：ports.json（游戏侧 UELoader 写入）> 本函数 > 默认端口 56574。
         /// </summary>
-        static int? DiscoverDebugPortFromLog()
+        internal static int? DiscoverDebugPortFromLog()
         {
             string logPath = Defaults.LogPath;
             if (string.IsNullOrEmpty(logPath) || !File.Exists(logPath))
@@ -1117,17 +1310,33 @@ namespace McpRimDebug
                     byte[] buf = new byte[fs.Length - start];
                     int n = fs.Read(buf, 0, buf.Length);
                     string tail = System.Text.Encoding.UTF8.GetString(buf, 0, n);
-                    Match m = Regex.Match(tail, @"Starting managed debugger on port (\d+)",
+                    Match m = Regex.Match(tail, DebugPortPattern,
                         RegexOptions.RightToLeft | RegexOptions.Multiline);
-                    if (!m.Success)
-                        return null;
-                    return int.TryParse(m.Groups[1].Value, out int p) ? p : (int?)null;
+                    if (m.Success)
+                        return ParsePort(m);
                 }
+
+                // P2-MD-1 兜底：尾窗未命中 → 全文件扫描，取最后一次匹配（覆盖端口行在首行的情况）。
+                Match last = null;
+                using (var fs = new FileStream(logPath, FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete))
+                using (var reader = new StreamReader(fs, System.Text.Encoding.UTF8))
+                {
+                    foreach (Match im in Regex.Matches(reader.ReadToEnd(), DebugPortPattern, RegexOptions.Multiline))
+                        last = im;
+                }
+                return last != null ? ParsePort(last) : null;
             }
             catch
             {
                 return null;
             }
+        }
+
+        /// <summary>从已命中的端口匹配里抽取端口号；解析失败返回 null。</summary>
+        static int? ParsePort(Match m)
+        {
+            return int.TryParse(m.Groups[1].Value, out int p) ? p : (int?)null;
         }
 
         /// <summary>把异常转成可读文本；VMDisconnectedException 统一措辞。</summary>
@@ -1189,6 +1398,64 @@ namespace McpRimDebug
         internal static int DefaultPort()
         {
             return Defaults.Port;
+        }
+
+        // ---- 自检测试钩子（仅 selftest 使用，不进入生产调用路径）----
+
+        /// <summary>测试钩子：从当前线程直接获取 commandLock（用于 P1-MD-1 忙锁断言）。仅 selftest 用。</summary>
+        internal void EnterCommandLockForTest()
+        {
+            Monitor.Enter(commandLock);
+        }
+
+        /// <summary>测试钩子：释放 test 通过 EnterCommandLockForTest 获取的 commandLock。仅 selftest 用。</summary>
+        internal void ReleaseCommandLockForTest()
+        {
+            Monitor.Exit(commandLock);
+        }
+
+        /// <summary>
+        /// 测试钩子：把会话置为「已 attach 且 vm 非空」的占位状态（不建立真实调试连接），
+        /// 使 Resume/Suspend 越过 state-precheck 走到 TryEnterCommandLock，从而在纯逻辑
+        /// selftest 中命中其「忙」分支。测试专用，不进入生产路径。
+        /// 占位 vm 仅用于通过 vm==null 判断，绝不真正调用其成员（忙分支在拿到锁前即返回）。
+        /// stateLock 保护以保证与生产并发语义一致。
+        /// </summary>
+        internal void SetAttachedForTest()
+        {
+            lock (stateLock)
+            {
+                state = SessionState.Attached;
+#pragma warning disable SYSLIB0050 // 测试专用占位 vm：跳过构造函数得到非空实例，仅用于 vm==null 判断
+                vm = (VirtualMachine)System.Runtime.Serialization.FormatterServices
+                    .GetUninitializedObject(typeof(VirtualMachine));
+#pragma warning restore SYSLIB0050
+                sessionSocket = null;
+                sessionHost = null;
+                sessionPort = 0;
+                suspended = false;
+                everResumed = false;
+                lastDisconnectReason = "";
+            }
+        }
+
+        /// <summary>测试钩子：把会话复位到未连接（与 SetAttachedForTest 配对），避免污染后续自测。仅 selftest 用。</summary>
+        internal void ResetSessionStateForTest()
+        {
+            lock (stateLock)
+            {
+                state = SessionState.Disconnected;
+                vm = null;
+                sessionSocket = null;
+                suspended = false;
+                everResumed = false;
+            }
+        }
+
+        /// <summary>测试钩子：触发事件日志上限裁剪（P1-MD-2 断言用）。仅 selftest 用。</summary>
+        internal void DrainStaleSuspendEventsForTest()
+        {
+            DrainStaleSuspendEvents();
         }
     }
 }

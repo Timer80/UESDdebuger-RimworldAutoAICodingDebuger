@@ -18,6 +18,33 @@ namespace McpRimDebug
         /// <summary>wait 命中时的调用栈摘要最大帧数（防输出爆炸，超限标注 framesTruncated）。</summary>
         const int WaitFramesSummaryMax = 10;
 
+        // ---- P3-MD-1：事件解析输出字典键常量（避免魔法字符串，wait/step/BuildEventData 共用）----
+        const string KeyEventType = "eventType";
+        const string KeyRequestId = "requestId";
+        const string KeySuspendsVm = "suspendsVm";
+        const string KeyDescription = "description";
+        const string KeyTimestamp = "timestamp";
+        const string KeyFrames = "frames";
+        const string KeyFramesTruncated = "framesTruncated";
+        const string KeyStepSize = "stepSize";
+        // P3-MD-1：BuildEventData / Wait / Step 的剩余数据字典键常量（收敛字面字符串）
+        const string KeySuspended = "suspended";
+        const string KeyThreadId = "threadId";
+        const string KeyThreadName = "threadName";
+        const string KeyLocation = "location";
+        const string KeyMethod = "method";
+        const string KeyFile = "file";
+        const string KeyLine = "line";
+        const string KeyIlOffset = "ilOffset";
+        const string KeyError = "error";
+        const string KeyTimeout = "timeout";
+        const string KeyWaitMs = "waitMs";
+        const string KeyEventLogMax = "eventLogMax";
+        /// <summary>step 单步粒度标签（指令级，无调试符号自动退化）。</summary>
+        const string StepSizeLabelMin = "min（指令级，无调试符号自动退化）";
+        /// <summary>step 单步粒度标签（行级）。</summary>
+        const string StepSizeLabelLine = "line（行级）";
+
         // ---------------------------------------------------------------- wait
 
         /// <summary>
@@ -74,10 +101,10 @@ namespace McpRimDebug
 
                 var tdata = new Dictionary<string, object>
                 {
-                    ["timeout"] = true,
-                    ["eventType"] = filter.HasValue ? filter.Value.ToString() : "any",
-                    ["waitMs"] = timeoutMs,
-                    ["eventLogMax"] = EventLogMax,
+                    [KeyTimeout] = true,
+                    [KeyEventType] = filter.HasValue ? filter.Value.ToString() : "any",
+                    [KeyWaitMs] = timeoutMs,
+                    [KeyEventLogMax] = EventLogMax,
                 };
                 return ToolResult.OkResult("等待超时（" + timeoutMs + "ms），未收到匹配事件；期间非匹配事件已保留在队列供下次取用"
                     + "（事件日志上限 " + EventLogMax + " 条，超出丢弃最旧）", tdata);
@@ -94,8 +121,8 @@ namespace McpRimDebug
                     return ToolResult.OkResult("命中 " + hit.Type + "（连接已断开）: " + hit.Description,
                         new Dictionary<string, object>
                         {
-                            ["eventType"] = hit.Type.ToString(),
-                            ["description"] = hit.Description,
+                            [KeyEventType] = hit.Type.ToString(),
+                            [KeyDescription] = hit.Description,
                         });
                 }
                 try
@@ -170,6 +197,9 @@ namespace McpRimDebug
                     if (hit == null)
                     {
                         try { req.Disable(); } catch { }
+                        // P2-MD-7：超时后按真实挂起态校准 suspended（SDB 未挂起时多数 getter 抛 VMNotSuspendedException）
+                        bool actual = IsActuallySuspended(target);
+                        lock (stateLock) { suspended = actual; }
                         return ToolResult.ErrorResult("step 超时（" + StepTimeoutMs + "ms），未收到 StepEvent；"
                             + "VM 可能已恢复运行（可用 suspend/resume 控制）");
                     }
@@ -177,7 +207,9 @@ namespace McpRimDebug
                     {
                         // VM 被其他事件挂起（如断点/异常命中），step 无法完成
                         try { req.Disable(); } catch { }
-                        lock (stateLock) { suspended = true; }
+                        // P2-MD-7：打断后按真实挂起态校准 suspended（不能盲目假定已挂起）
+                        bool actual = IsActuallySuspended(target);
+                        lock (stateLock) { suspended = actual; }
                         return ToolResult.ErrorResult("step 被 " + hit.Type + " 事件打断（VM 已挂起），请先处理该事件后 resume 再重试");
                     }
 
@@ -185,8 +217,8 @@ namespace McpRimDebug
                     try { req.Disable(); } catch { }
 
                     var data = BuildEventData(hit);
-                    data["stepSize"] = req.Size == StepSize.Min ? "min（指令级，无调试符号自动退化）" : "line（行级）";
-                    object location = data.ContainsKey("location") ? data["location"] : null;
+                    data[KeyStepSize] = req.Size == StepSize.Min ? StepSizeLabelMin : StepSizeLabelLine;
+                    object location = data.ContainsKey(KeyLocation) ? data[KeyLocation] : null;
                     return ToolResult.OkResult("step 命中" + (location != null ? " @ " + location : "（无行信息）"), data);
                 }
                 catch (VMDisconnectedException)
@@ -211,12 +243,12 @@ namespace McpRimDebug
         {
             var data = new Dictionary<string, object>
             {
-                ["eventType"] = raw.Type.ToString(),
-                ["requestId"] = raw.RequestId,
-                ["suspendsVm"] = raw.SuspendsVm,
-                ["description"] = raw.Description,
-                ["timestamp"] = raw.Timestamp.ToString("o"),
-                ["suspended"] = IsSuspended(),
+                [KeyEventType] = raw.Type.ToString(),
+                [KeyRequestId] = raw.RequestId,
+                [KeySuspendsVm] = raw.SuspendsVm,
+                [KeyDescription] = raw.Description,
+                [KeyTimestamp] = raw.Timestamp.ToString("o"),
+                [KeySuspended] = IsSuspended(),
             };
 
             Event e = raw.Source;
@@ -230,53 +262,53 @@ namespace McpRimDebug
 
             if (thread != null)
             {
-                data["threadId"] = thread.Id;
-                try { data["threadName"] = thread.Name; }
+                data[KeyThreadId] = thread.Id;
+                try { data[KeyThreadName] = thread.Name; }
                 catch (VMDisconnectedException) { throw; }
                 catch { }
             }
 
             string location = DescribeHitLocation(e);
             if (location != null)
-                data["location"] = location;
+                data[KeyLocation] = location;
 
             // 调用栈摘要：挂起状态下经 GetFrames 取前 WaitFramesSummaryMax 帧（方法 + file:line），超限标注
             if (thread != null)
             {
                 var frames = new List<object>();
                 bool fetched = false;
+                StackFrame[] allFrames = null;   // P1-MD-2.2：截断时全量快照用
                 if (raw.SuspendsVm || IsSuspended())
                 {
                     try
                     {
                         StackFrame[] fs = thread.GetFrames();
+                        allFrames = fs;
                         int n = Math.Min(fs.Length, WaitFramesSummaryMax);
                         for (int i = 0; i < n; i++)
-                        {
-                            StackFrame f = fs[i];
-                            frames.Add(new Dictionary<string, object>
-                            {
-                                ["method"] = SafeFrame(() => f.Method.FullName),
-                                ["file"] = SafeFrame(() => f.Location.SourceFile),
-                                ["line"] = SafeFrameInt(() => f.Location.LineNumber),
-                                ["ilOffset"] = SafeFrameInt(() => f.Location.ILOffset),
-                            });
-                        }
+                            frames.Add(FormatWaitStepFrame(fs[i]));
                         fetched = true;
                         if (fs.Length > n)
-                            data["framesTruncated"] = true;
+                            data[KeyFramesTruncated] = true;
                     }
                     catch (VMDisconnectedException) { throw; }
                     catch (Exception fex)
                     {
-                        frames.Add(new Dictionary<string, object> { ["error"] = fex.Message });
+                        frames.Add(new Dictionary<string, object> { [KeyError] = fex.Message });
                         fetched = true;
                     }
                 }
                 if (fetched)
-                    data["frames"] = frames;
+                    data[KeyFrames] = frames;
                 else
-                    data["frames"] = new List<object>(); // VM 未挂起，无法取帧
+                    data[KeyFrames] = new List<object>(); // VM 未挂起，无法取帧
+                // P1-MD-2.2：调用栈摘要超限（framesTruncated）时，全量帧快照落盘 + 截断报告
+                if (allFrames != null)
+                {
+                    StackFrame[] snapshot = allFrames;
+                    TruncationSink.AttachTruncation(data, () => System.Text.Json.JsonSerializer.Serialize(
+                        BuildFullWaitStepFramesSnapshot(snapshot)));
+                }
             }
             return data;
         }
@@ -363,7 +395,7 @@ namespace McpRimDebug
                     keep.Add(e);
             }
             foreach (RawEvent k in keep)
-                eventQueue.Add(k);
+                EnqueueEvent(k); // P1-MD-2：统一走 EnqueueEvent，受 EventLogMax 上限裁剪
         }
 
         /// <summary>
@@ -385,6 +417,33 @@ namespace McpRimDebug
         }
 
         // ---------------------------------------------------------------- 解析辅助
+
+        /// <summary>wait/step 单帧条目（受限摘要与全量快照共用）。P2-MD-5：数值字段失败以 <read-error> 标记。</summary>
+        static Dictionary<string, object> FormatWaitStepFrame(StackFrame f)
+        {
+            int? line = SafeFrameInt(() => f.Location.LineNumber);
+            int? ilOffset = SafeFrameInt(() => f.Location.ILOffset);
+            return new Dictionary<string, object>
+            {
+                [KeyMethod] = SafeFrame(() => f.Method.FullName),
+                [KeyFile] = SafeFrame(() => f.Location.SourceFile),
+                [KeyLine] = line.HasValue ? (object)line.Value : "<read-error>",
+                [KeyIlOffset] = ilOffset.HasValue ? (object)ilOffset.Value : "<read-error>",
+            };
+        }
+
+        /// <summary>wait/step 全量帧快照（不受 WaitFramesSummaryMax 限制，含全部帧），供超限回复落盘。</summary>
+        static Dictionary<string, object> BuildFullWaitStepFramesSnapshot(StackFrame[] frames)
+        {
+            var all = new List<object>();
+            for (int i = 0; i < frames.Length; i++)
+                all.Add(FormatWaitStepFrame(frames[i]));
+            return new Dictionary<string, object>
+            {
+                [KeyFrames] = all,
+                [KeyFramesTruncated] = false,
+            };
+        }
 
         static bool TryParseEventType(string eventType, out EventType? filter)
         {
@@ -457,19 +516,31 @@ namespace McpRimDebug
             lock (stateLock) { return suspended; }
         }
 
-        /// <summary>单帧字段安全取值（帧字段解析失败不拖垮整条调用栈）。</summary>
-        static string SafeFrame(Func<string> getter)
+        /// <summary>
+        /// 判定 VM 是否真实挂起（P2-MD-7）。SDB 在未挂起时多数 getter（如 Threads）
+        /// 会抛 VMNotSuspendedException，据此判定；其余异常（如 VMDisconnected）交上层处理。
+        /// </summary>
+        static bool IsActuallySuspended(VirtualMachine target)
+        {
+            try { target.GetThreads(); return true; }   // 挂起时读线程成功
+            catch (VMNotSuspendedException) { return false; }
+            catch { return true; }                 // VMDisconnected 等交上层
+        }
+
+        /// <summary>单帧字段安全取值（帧字段解析失败不拖垮整条调用栈）。string 失败返回 null（null 即失败标记）。</summary>
+        internal static string SafeFrame(Func<string> getter)
         {
             try { return getter(); }
             catch (VMDisconnectedException) { throw; }
             catch { return null; }
         }
 
-        static int SafeFrameInt(Func<int> getter)
+        /// <summary>单帧数值安全取值：失败返回 null（区别于真实值 -1/0）；VMDisconnectedException 重新抛出。</summary>
+        internal static int? SafeFrameInt(Func<int?> getter)
         {
             try { return getter(); }
             catch (VMDisconnectedException) { throw; }
-            catch { return -1; }
+            catch { return null; }
         }
     }
 }

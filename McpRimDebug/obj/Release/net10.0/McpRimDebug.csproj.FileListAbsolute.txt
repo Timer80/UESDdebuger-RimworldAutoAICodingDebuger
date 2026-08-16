@@ -30,3 +30,4 @@ C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\McpRimDebug\obj\Relea
 C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\McpRimDebug\obj\Release\net10.0\McpRimDebug.pdb
 C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\McpRimDebug\obj\Release\net10.0\McpRimDebug.genruntimeconfig.cache
 C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\McpRimDebug\obj\Release\net10.0\ref\McpRimDebug.dll
+C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\McpRimDebug\obj\Release\net10.0\McpRimDebug.sourcelink.json

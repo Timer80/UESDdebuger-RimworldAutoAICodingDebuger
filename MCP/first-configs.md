@@ -136,7 +136,10 @@ env = { MCP_TRANSPORT = "stdio" }
 
 
 3.2前往 Unity 国际版构建版本下载安装 Windows 版、版本号严格匹配。
-
+****给与使用者的关键提示****
+你需要**严格**的**2022.3.35f1**版本（也就是现rimworld的版本），而不是--2022.3.35f1c1--或者--2022.3.35f1c2--等天朝特供版。
+后者存在修改，与前者并不兼容。
+Ps.如果你决定整这一套，可能是你部署耗费时间对多的一步
 
 3.3 装好后进安装目录取前置文件，路径是：
 [安装目录]\Editor\Data\PlaybackEngines\windowsstandalonesupport\Variations\win64_development_mono\WinPixEventRuntime.dll

@@ -1,1 +1,9 @@
-{"gamePath":"C:/SteamLibrary/steamapps/common/RimWorld/RimWorldWin64.exe","logPath":"C:/Users/Timer_0/AppData/LocalLow/Ludeon Studios/RimWorld by Ludeon Studios/Player.log","steamPath":"d:/steam/steam.exe","appId":"294100","startTimeout":180000}
+{
+  "gamePath": "C:/SteamLibrary/steamapps/common/RimWorld/RimWorldWin64.exe",
+  "logPath": "C:/Users/Timer_0/AppData/LocalLow/Ludeon Studios/RimWorld by Ludeon Studios/Player.log",
+  "steamPath": "d:/steam/steam.exe",
+  "appId": "294100",
+  "startTimeout": 180000,
+  "timings": "System.Collections.Generic.Dictionary`2[System.String,System.Object]",
+  "rimBridge": "System.Collections.Generic.Dictionary`2[System.String,System.Object]"
+}

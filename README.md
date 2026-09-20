@@ -149,11 +149,11 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 
 **地图坐标光标（1，需进入地图，经 UE 桥接，不依赖 RIMAPI/GABP）**
 
-> 把「AI 报的坐标数字」变成地图上一眼可见的准星——炼狱魔王炮风格的指示器（外环 + 四向刻线 + 贯穿十字 + 中心点）配地面坐标文字，解决「AI 报坐标、玩家对不上号」。**玩家鼠标左键点击光标即消除**（被窗口遮挡时那一次点击按 UI 点击处理，不会误消）。
+> 让 AI 把坐标显示在地图上，方便使用者直接观测它在说哪一格。
 
 | 工具 | 说明 |
 |---|---|
-| `post_map_marker` | `action`：`set`（默认，打光标）/ `clear`（不给 `id` 则清全部）/ `recolor`（改色）/ `list`（列出当前光标）。`x`/`z` 为目标格坐标；`color` 支持 13 种英文名（red/orange/gold/yellow/lime/green/teal/cyan/blue/purple/magenta/pink/white/gray）、`#RRGGBB`（也接受 `RRGGBB` / `#RGB`）或 `"r,g,b"`，默认 `#FF4A1F`（炼狱魔王同款橙红）；`label` 为光标上方标题；`size` 边长 1–40 格（默认 8）；`ttl_seconds` 定时消失（0/省略=常驻）；`id` 可并存多个（上限 8），`set` 不给 `id` 时默认先清掉已有光标 |
+| `post_map_marker` | 在地图上显示 AI 报出的坐标，方便使用者直接观测；具体参数与用法由调用方（AI）自行查阅 |
 
 **RimBridgeServer（GABP）镜像工具（121 个，依赖 RimBridgeServer）**
 
@@ -238,6 +238,6 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 
 ## 许可与声明
 
-- 本项目基于 MIT 等开源许可，第三方组件许可见 `THIRD_PARTY_NOTICES.md` 与 `LICENSE`；
+- 本模组（游戏内部分）以 **GPL-3.0** 授权（见 `LICENSE`）；`MCP/` 与 `McpRimDebug/` 是独立进程，各按 **MIT** 授权。第三方组件的许可分层与修改声明见 `THIRD_PARTY_NOTICES.md`；
 - 模组引用的部分素材/商标归 Ludeon Studios Inc. 所有；本模组非官方内容，未获 Ludeon 认可；
 - 用于调试目的，请勿在正式存档/多人环境中滥用。

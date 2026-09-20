@@ -5,11 +5,12 @@
     <LangVersion>9.0</LangVersion>
     <RootNamespace>UELoader</RootNamespace>
     <AssemblyName>UELoader</AssemblyName>
-    <Version>0.9.0.0</Version>
+    <Version>0.9.0.1</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <Deterministic>true</Deterministic>
     <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
@@ -34,6 +35,12 @@
     </Reference>
     <Reference Include="UnityEngine">
       <HintPath>$(RimWorldManagedDir)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- 坐标光标 shader 走 AssetBundle.LoadFromFile 读取（UECoordCursorShader.cs）；
+         UnityEngine.AssetBundle 被 type-forward 到 UnityEngine.AssetBundleModule，需显式引用。 -->
+    <Reference Include="UnityEngine.AssetBundleModule">
+      <HintPath>$(RimWorldManagedDir)\UnityEngine.AssetBundleModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <!-- UE 公共 API 面涉及的 UnityEngine 模块（保险引用，避免元数据传递解析失败） -->
@@ -77,6 +84,8 @@
       <HintPath>$(UEProjectDir)\UniverseLib.Mono.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- 热重载桥的字段校验已改为纯反射（读内存中的新旧程序集 IL + 类型字段布局），
+         不再需要 Mono.Cecil 编译引用（2026-09-19：原实现读磁盘 DLL，而磁盘已被新构建覆盖 → 误判）。 -->
   </ItemGroup>
 
   <!-- 构建后把 UELoader.dll 部署到 $(AssetsOutDir)（仅本产物，避免覆盖官方 UE DLL） -->

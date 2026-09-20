@@ -128,6 +128,65 @@ class GabpClient extends EventEmitter {
     this._connectPromise = null;
     this._abortWake = null;
     this._lastSocketError = null;
+    this._connectTarget = null; // 已发起/在途连接的端点 {port, token}（状态追踪用）
+  }
+
+  // ---------- 按需重连（lazy reconnect / watcher 入口） ----------
+
+  // 工具调用前的断连检测 + 重连（spec §10 扩展）：
+  //   - disabled → false；connected → true（零成本直通）。
+  //   - 未连接/断连（state=error/idle/connecting 等）→ discover（重读 Player.log 拿最新
+  //     token，覆盖外部手动重启游戏后 token 滚动）→ 有限次 _connectOnce 尝试。
+  //   - 连不上快速返回 false（不做后台无限退避：调用方据此报「未连接/未就绪」，用户稍后
+  //     重试即可，RimBridgeServer 启动约 65s 延迟，无需空转等待）。
+  // 无后台轮询、无进程/文件监听——断连检测完全惰性（被调用时发现）。
+  async ensureConnected(attempts = 2, retryDelayMs = 500) {
+    if (this.state === 'disabled') return false;
+    if (this.state === 'connected') return true;
+    // 已有在途连接循环（显式 connect()/forceReconnect 场景）：等它一小段时间，
+    // 避免双 _connectOnce 并发建 socket。
+    if (this._connectPromise) {
+      await Promise.race([
+        this._connectPromise.then(() => undefined, () => undefined),
+        this._sleep(retryDelayMs * 3),
+      ]);
+      if (this.state === 'connected') return true;
+    }
+    for (let i = 0; i < attempts; i++) {
+      let endpoint;
+      try {
+        endpoint = this.discoverRimBridge();
+      } catch (e) {
+        this._log('WARN', `ensureConnected discover 异常: ${e.message}`);
+        return false;
+      }
+      if (!endpoint) {
+        this._log('DEBUG', 'ensureConnected: 日志中未发现 RimBridge（游戏未启动或 RimBridgeServer 未就绪）');
+        return false;
+      }
+      this._connectTarget = { port: endpoint.port, token: endpoint.token };
+      try {
+        await this._connectOnce(endpoint.port, endpoint.token); // 成功内部置 state=connected
+        if (this.state === 'connected') {
+          this._log('INFO', `ensureConnected: 重连成功（port=${endpoint.port}, agentId=${this.agentId}）`);
+          void this._syncTools(); // 刷新镜像工具清单（不阻塞本次调用返回）
+          return true;
+        }
+      } catch (e) {
+        this._setError(e);
+        this._log('WARN', `ensureConnected 第 ${i + 1}/${attempts} 次失败: ${e && e.message ? e.message : String(e)}`);
+      }
+      if (i < attempts - 1) await this._sleep(retryDelayMs);
+    }
+    // 收尾：失败后把可能残留在 connecting/discovering 的状态归位为 idle，保持状态机可重试
+    if (this.state === 'connecting' || this.state === 'discovering' || this.state === 'error') {
+      this.state = 'idle';
+    }
+    return false;
+  }
+
+  _sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   // ---------- 日志 / 错误辅助 ----------
@@ -223,7 +282,17 @@ class GabpClient extends EventEmitter {
       return;
     }
     if (this._connectPromise) {
-      return this._connectPromise;
+      // 旧连接循环已被 forceReconnect()/disconnect() 中止、正在退出时（_abortConnect=true），
+      // 等它收尾后继续新建循环；否则（正常退避重试中）复用同一 promise，避免双循环竞态。
+      if (!this._abortConnect) {
+        return this._connectPromise;
+      }
+      try {
+        await this._connectPromise;
+      } catch (e) {
+        /* 旧循环退出时抛错（主动中止），忽略 */
+      }
+      this._connectPromise = null;
     }
     this._connectPromise = this._connectLoop(port, token);
     try {
@@ -231,6 +300,40 @@ class GabpClient extends EventEmitter {
     } finally {
       this._connectPromise = null;
     }
+  }
+
+  // 强制重连（项 7）：中止在途退避重试循环、销毁 socket、清空端点缓存与单飞锁，
+  // 使下一次 connect() 能以全新状态（重新 discover 后的端点）发起。
+  // 与 disconnect() 的区别：不断开"已连接"会话语义，专用于"旧端点失效需要立即换新"
+  // （游戏重启 token 滚动、端口偏移、外部手动启动后端点变化）。
+  forceReconnect() {
+    this._abortConnect = true;
+    if (this._abortWake) {
+      this._abortWake();
+    }
+    if (this._socket) {
+      try {
+        this._socket.destroy();
+      } catch (e) {
+        this._log('WARN', `forceReconnect 销毁 socket 异常: ${e.message}`);
+      }
+      this._socket = null;
+    }
+    const err = this._err(GABP_ERROR_CODES.SERVER_ERROR, 'GABP 强制重连');
+    for (const entry of this._pending.values()) {
+      clearTimeout(entry.timer);
+      entry.reject(err);
+    }
+    this._pending.clear();
+    this._discovered = null; // 下次 discoverRimBridge 重读 Player.log / env / config
+    // 注意：不在此处清 _connectPromise——旧循环收尾（abort 后 return）由旧 connect()
+    // 的 finally 完成；外部随后调 connect() 会因 _abortConnect=true 先等旧循环退出再新建。
+    this.state = this.state === 'disabled' ? 'disabled' : 'idle';
+    this.connectedAt = null;
+    this._log('INFO', 'GABP 强制重连：已中止在途连接并清空端点缓存');
+    // 推迟到旧 connect() 的 finally 清空 _connectPromise 后再跑一次 ensureConnected，
+    // 让重连即时发生（若立即调用，旧 promise 尚未清空会走「等待在途」分支）。
+    Promise.resolve().then(() => this.ensureConnected());
   }
 
   // 端点解析优先级：显式参数 > 环境变量 MCP_RIMBRIDGE_PORT/TOKEN > config.rimBridge > discoverRimBridge 缓存
@@ -247,7 +350,9 @@ class GabpClient extends EventEmitter {
   }
 
   async _connectLoop(port, token) {
-    const endpoint = this._resolveEndpoint(port, token);
+    // 端点每轮重解析（项 4）：网络级失败后端点可能已变化（token 每次游戏启动滚动、
+    // 端口偏移），退避重试前先重新 discover，避免用旧端点无限 ECONNREFUSED。
+    let endpoint = this._resolveEndpoint(port, token);
     if (!endpoint) {
       this._setError('connect: 缺少 port/token，请先 discoverRimBridge() 或提供显式配置');
       throw this._err(GABP_ERROR_CODES.SERVER_ERROR, 'connect 需要 port/token（可先调用 discoverRimBridge()）');
@@ -272,8 +377,25 @@ class GabpClient extends EventEmitter {
         if (aborted) {
           return;
         }
+        // 项 4 + 项 6：sleep 未被中止 → 网络级失败时强制重新 discover（重读
+        // Player.log / env / config），端点变化则下一轮用新端点；discover 仍不可用
+        // 时继续退避等 RimBridgeServer 起来（启动约 65s 延迟）。
+        if (this._isNetworkError(e)) {
+          const fresh = this.discoverRimBridge();
+          if (fresh) {
+            endpoint = fresh;
+          }
+        }
       }
     }
+  }
+
+  // 网络级错误判定：端点不可达（无人监听 / 拒绝 / 重置 / 超时 / 域名解析失败）时
+  // 应重新 discover（token 滚动后旧端点必失败），区别于协议级错误（认证失败/会话未建立
+  // ——端点是对的，重 discover 无意义）。
+  _isNetworkError(e) {
+    const msg = String((e && e.message) || e || '');
+    return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|EPIPE|fetch failed|connection refused|network error|socket 错误/i.test(msg);
   }
 
   // 指数退避：1s→2s→...→30s cap，±25% jitter
@@ -435,7 +557,12 @@ class GabpClient extends EventEmitter {
       }
       const id = crypto.randomUUID();
       // P1-MCP-3.1：per-call 超时。默认 this._requestTimeoutMs；opts.slow → 翻倍（慢操作：载存/调试动作等）。
-      const timeoutMs = opts.slow ? this._requestTimeoutMs * 2 : this._requestTimeoutMs;
+      // 2026-09-17：opts.timeoutMs 显式值优先于 slow 判定——由 MCP/longTask/timeoutPolicy.js
+      // 按入参推导（如 play_for{durationMs:600000} 应等 610000ms 而不是默认的 30000/60000），
+      // 使「时长就是入参」的工具自动获得与请求时长匹配的超时。
+      const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
+        ? opts.timeoutMs
+        : (opts.slow ? this._requestTimeoutMs * 2 : this._requestTimeoutMs);
       const timer = setTimeout(() => {
         this._pending.delete(id);
         reject(this._err(GABP_ERROR_CODES.SERVER_ERROR, `GABP 请求 '${method}' 超时（${timeoutMs}ms）`));

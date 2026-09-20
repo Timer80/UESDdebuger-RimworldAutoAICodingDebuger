@@ -3,12 +3,11 @@
   <name>UESDdebuger - UnityExplorer + SDB Debug</name>
   <author>UESDdebuger</author>
   <packageId>UESDdebuger.debug.unityexplorer</packageId>
-  <modVersion>0.9.0.0</modVersion>
-  <description>Debug toolchain mod for RimWorld: in-game UnityExplorer (UE 4.9.0, official binary unmodified, press F7 to show/hide UI) + SDB code-level debugger (McpRimDebug), used for RimWorld game debugging.
-调试用模组：游戏内 UnityExplorer（UE 4.9.0，官方二进制零修改，按 F7 显示/隐藏界面） + SDB 代码级调试器（McpRimDebug），用于 RimWorld 游戏调试。
+  <modVersion>0.9.0.1</modVersion>
+  <description>RimWorld debug toolkit: in-game UnityExplorer (F7) for inspecting objects, running C# and hooking methods, a local MCP server exposing 191 tools (process control, log reading, quick test map, C#/Hook, colony and map data queries, DebugAction, zone/selection, camera and video stream, map coordinate markers, long-running profiling tasks) that lets AI clients drive the game, and a Mono SDB code-level debugger with 20 tools (breakpoints, call stack, locals, stepping, eval, object inspection).
+调试工具链模组：游戏内 UnityExplorer（F7 检视对象、执行 C#、Hook 方法）+ 本地 MCP 服务器（191 个工具：进程控制、读日志、快速进测试地图、C#/Hook、殖民地与地图数据查询、DebugAction、区域/选中、相机与视频流、地图坐标光标、长任务性能采样），让 AI 客户端直接驱动游戏 + Mono SDB 代码级调试器（20 个工具：断点、调用栈、局部变量、单步、求值、对象检查）。
 Portions of the materials used to create this content/mod are trademarks and/or copyrighted works of Ludeon Studios Inc. All rights reserved by Ludeon. This content/mod is not official and is not endorsed by Ludeon.</description>
   <supportedVersions>
-    <li>1.5</li>
     <li>1.6</li>
   </supportedVersions>
   <modDependencies>
@@ -17,15 +16,20 @@ Portions of the materials used to create this content/mod are trademarks and/or 
       <packageId>brrainz.harmony</packageId>
       <displayName>Harmony</displayName>
     </li>
-    <!-- RimBridgeServer Steam Workshop: https://steamcommunity.com/sharedfiles/filedetails/?id=3727949765 -->
+    <!-- 2026-09-20 改为显式声明（此前只有代码里的惰性对接，不写进 About）：
+         本模组的 GABP 镜像工具（121 个 rimworld.* / rimbridge.*）依赖 RimBridgeServer，
+         数据查询与操作注入类工具依赖 RIMAPI。显式声明的收益是玩家在模组列表里
+         能直接看到"要装什么才能拿到全部工具"；代价是二者任一被停用都会连坐本模组。
+         快速测试（start_quick_test）不依赖这两个模组。 -->
     <li>
       <packageId>brrainz.rimbridgeserver</packageId>
       <displayName>RimBridgeServer</displayName>
+      <steamWorkshopUrl>https://steamcommunity.com/sharedfiles/filedetails/?id=3727949765</steamWorkshopUrl>
     </li>
-    <!-- RIMAPI Steam Workshop: https://steamcommunity.com/sharedfiles/filedetails/?id=3593423732 -->
     <li>
-      <packageId>redeyedev.rimapi</packageId>
-      <displayName>RimWorld API (RIMAPI)</displayName>
+      <packageId>RedEyeDev.RIMAPI</packageId>
+      <displayName>RIMAPI</displayName>
+      <steamWorkshopUrl>https://steamcommunity.com/sharedfiles/filedetails/?id=3593423732</steamWorkshopUrl>
     </li>
   </modDependencies>
 </ModMetaData>

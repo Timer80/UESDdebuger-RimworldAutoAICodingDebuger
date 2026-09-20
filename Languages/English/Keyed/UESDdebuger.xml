@@ -79,8 +79,10 @@
   <UESDdebuger.ToolDesc.search_debug_actions>[Debug] Search DebugActions by keyword</UESDdebuger.ToolDesc.search_debug_actions>
   <UESDdebuger.ToolDesc.get_map_structure>[Map] Read map structure data</UESDdebuger.ToolDesc.get_map_structure>
   <UESDdebuger.ToolDesc.search_map_structure>[Map] Search map structure by keyword</UESDdebuger.ToolDesc.search_map_structure>
+  <UESDdebuger.ToolDesc.post_map_marker>[Map] Place a coordinate cursor on the map (hellsphere-cannon style, colour configurable, left-click to dismiss)</UESDdebuger.ToolDesc.post_map_marker>
   <UESDdebuger.ToolDesc.status>[Debug] View debug session status</UESDdebuger.ToolDesc.status>
   <UESDdebuger.ToolDesc.attach>[Debug] Connect to RimWorld's mono debug port</UESDdebuger.ToolDesc.attach>
+  <UESDdebuger.ToolDesc.reconnect>[Debug] Reconnect the debug session (auto rediscovers the port)</UESDdebuger.ToolDesc.reconnect>
   <UESDdebuger.ToolDesc.detach>[Debug] Safely detach the debug session</UESDdebuger.ToolDesc.detach>
   <UESDdebuger.ToolDesc.resume>[Debug] Resume VM execution</UESDdebuger.ToolDesc.resume>
   <UESDdebuger.ToolDesc.suspend>[Debug] Suspend the entire VM</UESDdebuger.ToolDesc.suspend>

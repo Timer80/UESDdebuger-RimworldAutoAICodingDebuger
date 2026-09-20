@@ -24,6 +24,13 @@ namespace UELoader
             if (!DiagnosticEnabled) return;   // P3-CS-3：Message 级交流日志默认关
             Write("Message", msg);
         }
+
+        /// <summary>
+        /// 生命周期/结果类日志（低频、非交流报告）：**不受 DiagnosticEnabled 门控**，始终写日志。
+        /// 用于热重载这类"用户需要看到结果"的少数事件（初始化、检测到变化、重打结果汇总）；
+        /// HTTP 逐请求日志仍走 Message 门控，避免刷屏。
+        /// </summary>
+        public static void Info(string msg) => Write("Message", msg);
         public static void Warning(string msg) => Write("Warning", msg);
         public static void Error(string msg) => Write("Error", msg);
 

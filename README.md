@@ -3,14 +3,14 @@
 RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）与代码级调试提供一体化能力，由三部分组成：
 
 - **游戏内 UnityExplorer**（UE 4.9.0，官方二进制零修改）：按 `F7` 随时呼出/隐藏，支持对象检视、C# 控制台、方法 Hook、场景/游戏对象浏览等；
-- **MCP 调试服务器**：让支持 MCP 的客户端（Trae / Claude / opencode 等）直接控制游戏——启动/关闭、读日志、进测试地图、执行 C#、管理 Hook、查询殖民地/世界数据、执行 DebugAction 等；连接 RimBridgeServer（GABP）后可用工具**高达 184 个**（含 121 个 `rimworld.*` / `rimbridge.*` 镜像）；
+- **MCP 调试服务器**：让支持 MCP 的客户端（Trae / Claude / opencode 等）直接控制游戏——启动/关闭、读日志、进测试地图、执行 C#、管理 Hook、查询殖民地/世界数据、执行 DebugAction、打地图坐标光标等；连接 RimBridgeServer（GABP）后**可调用工具总数 191 个**（本地 70 + 121 个 `rimworld.*` / `rimbridge.*` 镜像）；
 - **SDB 代码级调试器（McpRimDebug）**：通过 Mono Soft Debugger 协议直连真实游戏进程，提供断点、调用栈、局部变量、单步、求值、对象检查等 20 个调试工具。
 
 > **支持 RimWorld 1.5 / 1.6**
 >
 > **依赖**：
 > - [Harmony](https://steamcommunity.com/sharedfiles/filedetails/?id=2009463077)（**必须**）：模组修补框架，UnityExplorer 与游戏侧桥接均依赖；
-> - [RimBridgeServer](https://steamcommunity.com/sharedfiles/filedetails/?id=3727949765)（**推荐**）：提供 GABP 桥接，连接后 MCP 工具总数从 23 个增至 **184 个**（含 121 个 `rimworld.*` / `rimbridge.*` 镜像工具）；未安装时相关镜像工具不可用，其余功能不受影响；
+> - [RimBridgeServer](https://steamcommunity.com/sharedfiles/filedetails/?id=3727949765)（**推荐**）：提供 GABP 桥接，连接后**可调用**的 MCP 工具总数从 **70**（本地）增至 **191**（含 121 个 `rimworld.*` / `rimbridge.*` 镜像工具；菜单可见 188，差额是 3 个隐藏工具）；未安装时相关镜像工具不可用（菜单里仍会列出名字并标注"提供方未就绪"），其余功能不受影响；
 > - [RIMAPI](https://steamcommunity.com/sharedfiles/filedetails/?id=3593423732)（**可选**）：游戏数据查询与操作注入类工具（29 个）依赖，未安装时仅这些工具返回 `RIMAPI_NOT_READY`。
 ---
 
@@ -41,7 +41,6 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 
 独立于游戏运行的 MCP 服务器（bun/node，默认 stdio 本地接入，可选 SSE），工具按游戏阶段分级（`GAME_STOPPED` / `GAME_STARTING` / `MAIN_MENU` / `IN_GAME`），前置条件不满足时返回统一错误与引导。
 
-> **依赖 RIMAPI**：游戏数据查询与操作注入类工具（共 29 个，下表中标注 Ⓡ）依赖第三方模组 **RIMAPI**（Steam 创意工坊/独立发布，端口 `8765`，可用环境变量 `RIMAPI_BASE_URL` 覆盖）。未安装/未启用 RIMAPI 时，这些工具返回 `RIMAPI_NOT_READY` 错误并给出引导；其余工具（基础、UE 集成、DebugAction、Map 结构）不依赖 RIMAPI。
 
 #### 优先 stdio 启动（P1-MCP-4，单实例）
 
@@ -58,7 +57,7 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 
 #### 完整工具清单
 
-> 口径：连接 RimBridgeServer（GABP）后 `agg_list_tools` 实测工具**总数 184**（system 7 / unityexplorer 11 / mono 19 / meta 3 / bridge 16 / game_control 128）。默认压缩仅直接暴露 23 个，其余经 `agg_call_tool` 调用。下方「基础与进程控制」等小节用工具新名（原 `read_log`→`read_rimworld_log`、`tail_log`→`tail_rimworld_log`、`get_config`→`get_game_info`）。
+> 口径：连接 RimBridgeServer（GABP）后 `agg_list_tools` 实测工具**总数 185**（system 7 / unityexplorer 11 / mono 20 / meta 3 / bridge 16 / game_control 128）。默认压缩仅直接暴露 23 个，其余经 `agg_call_tool` 调用。下方「基础与进程控制」等小节用工具新名（原 `read_log`→`read_rimworld_log`、`tail_log`→`tail_rimworld_log`、`get_config`→`get_game_info`）。
 
 **基础与进程控制（7）**
 
@@ -68,7 +67,8 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 | `get_game_status` | 运行状态与阶段（多源探测：进程 / RIMAPI / UE） |
 | `read_rimworld_log` / `tail_rimworld_log` | 读取游戏日志末尾 N 行 / 实时最新日志 |
 | `get_game_info` | 获取当前配置与综合信息（三源合并：config + GABP + RIMAPI） |
-| `start_quick_test` | 主菜单即可用：快速进入官方 DevQuickTest 测试地图 |
+| `start_quick_test` | 主菜单即可用：快速进入官方 DevQuickTest 测试地图。**只依赖本模组的游戏内 HTTP 服务（`/trigger-quicktest`），不依赖 GABP/RimBridgeServer、RIMAPI 或 UE 是否进图**；失败时按 ports.json 自报状态区分「模组未加载 / 服务未启动 / token 过期」 |
+| `task_status` / `task_cancel` / `task_configure` | **长任务三件套**（配合 `rimworld.play_for{nonBlocking:true}` 做 10 分钟以上的后台性能采样）：秒级返回 `taskId` 不阻塞调用方；`task_status` 看进度/最近采样点(tps)/最近 DPA 快照/落盘路径，无参列出全部（含 MCP 进程重启打断的孤儿任务）；`task_cancel` 最迟一个采样周期内停止并按 `pauseOnFinish` 处理暂停；`task_configure` 中途改采样节奏（采样压到 1 s 的猝发测量时快照间隔强制联动压到 10 s，避免超出 DPA 2000 格环形缓冲而丢数据）。采样点全量落盘到 `docs/dpa/samples/<runId>.jsonl` |
 
 **聚合与元工具（3）**
 
@@ -147,6 +147,14 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 | `get_map_structure` | 按路径浏览 Map 结构（Grid/Manager/Component 等，含字段/属性/方法） |
 | `search_map_structure` | 搜索 Map 结构路径 |
 
+**地图坐标光标（1，需进入地图，经 UE 桥接，不依赖 RIMAPI/GABP）**
+
+> 把「AI 报的坐标数字」变成地图上一眼可见的准星——炼狱魔王炮风格的指示器（外环 + 四向刻线 + 贯穿十字 + 中心点）配地面坐标文字，解决「AI 报坐标、玩家对不上号」。**玩家鼠标左键点击光标即消除**（被窗口遮挡时那一次点击按 UI 点击处理，不会误消）。
+
+| 工具 | 说明 |
+|---|---|
+| `post_map_marker` | `action`：`set`（默认，打光标）/ `clear`（不给 `id` 则清全部）/ `recolor`（改色）/ `list`（列出当前光标）。`x`/`z` 为目标格坐标；`color` 支持 13 种英文名（red/orange/gold/yellow/lime/green/teal/cyan/blue/purple/magenta/pink/white/gray）、`#RRGGBB`（也接受 `RRGGBB` / `#RGB`）或 `"r,g,b"`，默认 `#FF4A1F`（炼狱魔王同款橙红）；`label` 为光标上方标题；`size` 边长 1–40 格（默认 8）；`ttl_seconds` 定时消失（0/省略=常驻）；`id` 可并存多个（上限 8），`set` 不给 `id` 时默认先清掉已有光标 |
+
 **RimBridgeServer（GABP）镜像工具（121 个，依赖 RimBridgeServer）**
 
 > 依赖 **RimBridgeServer**（[Steam 创意工坊](https://steamcommunity.com/sharedfiles/filedetails/?id=3727949765)）。MCP 服务器内置 GABP 客户端，自动从游戏日志发现并连接游戏内 RimBridgeServer 的 GABP 服务器（默认端口 5174），把 RBS 工具以 `rimworld.*` / `rimbridge.*` 前缀镜像进工具表（命名 `/` → `.`）。游戏需进入主菜单后才启动 GABP 服务器，并在日志打印端口与 token。连接状态见 `get_game_status` 的 `gabp` 字段。**13 个重叠能力的原生工具已删除**，由恢复暴露的 GABP 镜像承接为唯一入口（如 `get_colonists`→`rimworld.list_colonists`、`post_game_load`→`rimworld.load_game`、`execute_debug_action`→`rimworld.execute_debug_action` 等）。
@@ -219,8 +227,6 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 
 > 动态端口：Unity 调试端口每次运行随机，从 `Player.log` 自动解析（`status.debugPortFromLog`），不做 raw TCP 端口探测（避免触发 `DWP handshake failed` 导致游戏退出）。游戏本体无调试符号时，断点退化为方法入口断点、单步退化为指令级；带 PDB 的模组 DLL 无此限制。
 
-
-
 ## 设置
 
 游戏内 **选项 → Mod 设置 → UESDdebuger**：
@@ -228,6 +234,7 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 - 配置 `gamePath` / `logPath` / `steamPath` / `appId` / 启动超时；
 - 「重新探测并重置配置」：重新探测路径并写回 `MCP/config.json`；
 - 工具开关列表：逐个启用/禁用 MCP 工具（写回 `MCP/toolConfig.json`）。
+
 
 ## 许可与声明
 

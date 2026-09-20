@@ -2840,6 +2840,9 @@ namespace Mono.Debugger.Soft
 			closed = true;
 			disconnected = true;
 			DisconnectedEvent.Set ();
+			// P-mono-rst：与 TransportClose 一致的 RST 语义（Shutdown 唤醒阻塞读 + Linger0 Close 发 RST）。
+			// ForceDisconnect 后代理立即回收连接，不残留 CloseWait 半关闭占死会话槽。
+			TransportShutdown ();
 			TransportClose ();
 		}
 	}
@@ -2878,12 +2881,23 @@ namespace Mono.Debugger.Soft
 		
 		protected override void TransportClose ()
 		{
-			socket.Close ();
+			// P-mono-rst：优雅 FIN 关闭会让游戏侧 mono 调试代理把连接挂在 CloseWait
+			// 不回收（实测 2026-09-07，见 docs/superpowers/plans/2026-09-07-mono-attach-once-stale-halfclose.md），
+			// 占死调试会话槽导致后续 attach 握手无响应。
+			// 正确 RST 顺序：先设 Linger 0 再 Close——Close 在 Linger0 下直接发 RST（不发 FIN）。
+			// 绝不能先 Shutdown(Both)：那会先发 FIN，之后 Linger0 来不及产生 RST（实测残留 CloseWait）。
+			// 三重 try/catch 保证幂等（二次关闭安全）。
+			try { socket.LingerState = new LingerOption (true, 0); } catch { }
+			try { socket.Close (); } catch { }
 		}
 
 		protected override void TransportShutdown ()
 		{
-			socket.Shutdown (SocketShutdown.Both);
+			// detach 等优雅路径（先 VM_Dispose 协商完成）同样以 RST 收尾：Linger 0 + Close 发 RST，
+			// 让代理立即释放会话槽而非停在 CloseWait。语义与 TransportClose 幂等共存。
+			// Close 本身会唤醒阻塞在 Receive 上的接收线程（抛异常退出），无需先 Shutdown。
+			try { socket.LingerState = new LingerOption (true, 0); } catch { }
+			try { socket.Close (); } catch { }
 		}
 	}
 

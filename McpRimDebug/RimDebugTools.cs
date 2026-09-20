@@ -5,14 +5,14 @@ using ModelContextProtocol.Server;
 namespace McpRimDebug
 {
     /// <summary>
-    /// MCP 工具定义：会话管理 / 断点事件 / 观测 / 步进 / 求值与搜索，共 20 个工具。
+    /// MCP 工具定义：会话管理 / 断点事件 / 观测 / 步进 / 求值与搜索，共 21 个工具。
     /// 全部工具方法为静态方法组（method group），经 McpServerTool.Create 注册；
     /// 参数上的 [Description] 会进入 tools/list 的 JSON Schema 输入描述。
     /// 实现全部委托给 DebugSession 单例，返回统一 ToolResult 结构。
     /// </summary>
     public static class RimDebugTools
     {
-        /// <summary>把全部 20 个工具注册进 MCP 服务器的工具集合。</summary>
+        /// <summary>把全部 21 个工具注册进 MCP 服务器的工具集合。</summary>
         public static void Register(McpServerPrimitiveCollection<McpServerTool> collection)
         {
             Add(collection, "status",
@@ -21,6 +21,13 @@ namespace McpRimDebug
             Add(collection, "attach",
                 "连接 RimWorld 的 Mono Soft Debugger 端口（缺省取 MCP_RIMDBG_HOST/MCP_RIMDBG_PORT，未设置时为 127.0.0.1:56574；但游戏端口每次运行随机，请先用 status 查看 debugPortFromLog 并传入该端口），完成 DWP 握手并返回协议版本（应为 2.57）与 VM 版本",
                 (Func<string, int?, ToolResult>)Attach);
+            Add(collection, "reconnect",
+                "重连调试会话：**先检查连接是否真的断了**——已 Attached 且 socket 可用时直接短路返回 "
+                + "{ok:true, skipped:true, noop:true, detail:\"connection-alive\"}，并明确回报「连接实际未断」"
+                + "（这不是错误、未做任何改动）；会话处于 Attaching/Detaching 过渡态时拒绝且不动手。"
+                + "确实断连时才复位会话（不向死 VM 发命令），端口缺省按 ports.json（unityDebugPort）→ Player.log → 上次会话端点自动发现，然后 attach。"
+                + "用途：launch 后连接被抖动掉、或 attach 因代理会话槽占死失败后补一次连接（失败信息里带 portListening/diagnosis，便于判断该重试还是该重启游戏）",
+                (Func<string, int?, ToolResult>)Reconnect);
             Add(collection, "detach",
                 "安全断开调试会话：告知代理（VM_Dispose）后关闭连接，游戏继续运行，会话回到 Disconnected",
                 (Func<ToolResult>)Detach);
@@ -113,6 +120,14 @@ namespace McpRimDebug
         public static ToolResult Detach()
         {
             return DebugSession.Instance.Guard("detach", true, () => DebugSession.Instance.Detach());
+        }
+
+        [Description("重连调试会话（自动重取端口；旧会话不可用时先复位）")]
+        public static ToolResult Reconnect(
+            [Description("目标主机 IP（缺省沿用上次会话主机，否则取 MCP_RIMDBG_HOST / 127.0.0.1）")] string host = null,
+            [Description("SDB 调试端口（缺省自动发现：ports.json 的 unityDebugPort → Player.log → 上次会话端点）")] int? port = null)
+        {
+            return DebugSession.Instance.Guard("reconnect", true, () => DebugSession.Instance.Reconnect(host, port));
         }
 
         [Description("恢复整个 VM 运行")]

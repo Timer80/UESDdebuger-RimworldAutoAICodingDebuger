@@ -22,6 +22,14 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
 import { GabpClient } from './gabpClient.js';
+import {
+  resolveTimeoutMs,
+  timeoutOptsFor,
+  isInputDerivedTimeout,
+  readThresholds,
+} from './longTask/timeoutPolicy.js';
+import { createRunner } from './longTask/runner.js';
+import { appendRecord, readOrphans, filterOrphans } from './longTask/journal.js';
 
 const execAsync = promisify(exec);
 // P2-MCP-1：加超时上限与 maxBuffer 兜底，避免 exec 子进程无限期 hang 或 stdout 撑爆内存。
@@ -99,6 +107,25 @@ function readTokenFromFile() {
     return t && t.length >= 8 ? t : null;
   } catch { return null; }
 }
+// 读取 ports.json 全量诊断信息（端口/token/游戏内 HTTP 服务自报状态）。
+// 用途：游戏内服务不可达时给出**准确**归因（模组没加载 vs 服务没起来 vs token 过期），
+// 而不是把所有情况都说成"UE 未就绪"。
+// ueHttpStatus/ueHttpError 是 UELoader 侧后加的字段（旧版 DLL 没有 → 返回 null，仍可判读）。
+function readPortsFileInfo() {
+  try {
+    const data = JSON.parse(fs.readFileSync(UE_PORTS_FILE, 'utf-8'));
+    const port = Number(data && data.ueHttpPort);
+    return {
+      file: UE_PORTS_FILE,
+      ueHttpPort: Number.isInteger(port) && port > 0 && port <= 65535 ? port : null,
+      hasToken: typeof data?.token === 'string' && data.token.trim().length >= 8,
+      ueHttpStatus: typeof data?.ueHttpStatus === 'string' ? data.ueHttpStatus : null,
+      ueHttpError: typeof data?.ueHttpError === 'string' ? data.ueHttpError : null,
+      updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : null
+    };
+  } catch { return null; }
+}
+
 let authTokenCache = null;
 const AUTH_WARN_THROTTLE_MS = 30_000; // 无 token 告警节流：30s 内只打一次（简报步骤 1 的无 token WARN）
 let lastAuthWarnAt = 0;
@@ -125,6 +152,8 @@ function refreshUeEndpoint() {
 
 // P3-MCP-4：监听 ports.json 变更，文件被改/替换/删除重建时刷新端口与 token 缓存，下一请求自动用新值（无需重启）。
 // rename 事件后旧 watcher 失效，关闭并重新挂载，形成兜底。
+// 注意：GABP 重连不在此处触发（不做「盯游戏启动」）——断连自愈是惰性的：工具调用时
+// ensureConnected（见 ensureGabpConnected / callGABPTool / getGameStatus）。
 function watchPortsFile() {
   if (!fs.existsSync(UE_PORTS_FILE)) return;
   const onChange = () => { ueHttpPortCache = null; authTokenCache = null; log('INFO', 'ports.json 变更，已刷新端口/token 缓存（P3-MCP-4）'); };
@@ -138,8 +167,6 @@ function watchPortsFile() {
     });
   } catch (e) { log('WARN', `ports.json watch 失败: ${e.message}`); }
 }
-
-const UE_BASE_URL = getUeBaseUrl();
 
 // RIMAPI 基础 URL 配置
 const RIMAPI_BASE_URL = (process.env.RIMAPI_BASE_URL || 'http://localhost:8765').replace(/\/$/, '');
@@ -268,11 +295,14 @@ function loadToolConfig() {
     const parsed = JSON.parse(fs.readFileSync(TOOL_CONFIG_PATH, 'utf-8'));
     return {
       defaultEnabled: parsed.defaultEnabled !== false,
-      tools: (parsed && parsed.tools) || {}
+      tools: (parsed && parsed.tools) || {},
+      // _reserved：刻意保留但尚未发布的工具名（如 camera_follow_thing）。它们**不是工具**，
+      // 只登记在 toolConfig 里备将来实现；菜单/计数必须把它们排除，否则会被当成"陈旧键"或虚增总数。
+      reserved: new Set(Object.keys((parsed && parsed._reserved) || {}))
     };
   } catch (e) {
     log('WARN', `toolConfig.json 读取/解析失败，回退为全部启用: ${e.message}`);
-    return { defaultEnabled: true, tools: {} };
+    return { defaultEnabled: true, tools: {}, reserved: new Set() };
   }
 }
 
@@ -329,6 +359,9 @@ const ERROR_CODES = {
   MAP_NOT_LOADED: 'MAP_NOT_LOADED',
   RIMAPI_NOT_READY: 'RIMAPI_NOT_READY',
   UE_NOT_READY: 'UE_NOT_READY',
+  // 快速测试专用：游戏内 HTTP 服务（UELoader 提供）不可达/拒绝触发。
+  // 语义上**与 GABP/RimBridgeServer、RIMAPI、UnityExplorer 就绪无关**，单独一档以便调用方区分。
+  QUICKTEST_SERVICE_UNREACHABLE: 'QUICKTEST_SERVICE_UNREACHABLE',
   SERVICE_UNAVAILABLE: 'SERVICE_UNAVAILABLE'
 };
 
@@ -338,7 +371,21 @@ const STAGE_ERROR_GUIDANCE = {
   GAME_STARTING: { message: '游戏启动中', guidance: '游戏进程已存在但尚未就绪，等待 start_game 返回或稍后重试' },
   MAP_NOT_LOADED: { message: '游戏已运行但未进入地图/世界', guidance: '用 start_quick_test 快速进测试地图，或手动加载/创建殖民地后重试' },
   RIMAPI_NOT_READY: { message: '游戏运行中但 RIMAPI 模组未就绪', guidance: '确认游戏已启用 RIMAPI 模组并加载存档；或先 start_game 再重试' },
-  UE_NOT_READY: { message: 'UE 未就绪', guidance: 'UE 需进入游戏世界才初始化；用 start_quick_test 进地图后重试' },
+  // 注意：这条 guidance 曾写成「用 start_quick_test 进地图后重试」——自指（要用工具→先进图；要进图→先过工具检查），
+  // 且把「模组的游戏内 HTTP 服务没起来」误说成「UE 未初始化」，把排查引到 GABP/UE 方向。改为按实际通道描述。
+  UE_NOT_READY: {
+    message: '游戏内 HTTP 服务未响应（UESDdebuger 模组的服务未就绪）',
+    guidance: '该服务由 UESDdebuger 模组在游戏启动时提供（/unityexplorer/status 主菜单即可用，无需进图，也不需要 GABP/RimBridgeServer）：'
+      + '请确认本次游戏已启用 UESDdebuger 模组（ModsConfig），并检查 MCP/ports.json 的 ueHttpPort 是否与游戏实际监听端口一致。'
+  },
+  QUICKTEST_SERVICE_UNREACHABLE: {
+    message: '快速测试命令下发失败：游戏内 HTTP 服务未响应',
+    guidance: '快速测试只需要 UESDdebuger 模组的游戏内 HTTP 服务（/trigger-quicktest POST），'
+      + '**不依赖 GABP/RimBridgeServer，也不依赖 RIMAPI 或 UnityExplorer 是否进图**。'
+      + '请依次确认：1) UESDdebuger 在本次游戏的激活模组列表中（ModsConfig）；'
+      + '2) 游戏启动后重写了 MCP/ports.json（ueHttpPort/token 为本次会话值）；'
+      + '3) 没有残留的旧游戏进程占用 3001~3010 端口。'
+  },
   SERVICE_UNAVAILABLE: { message: 'MCP 服务不可用', guidance: '请检查 MCP 服务器是否正在运行' }
 };
 
@@ -490,6 +537,45 @@ async function getProcessStartTime(pid) {
   return ms;
 }
 
+// 探测 UE HTTP 状态（短超时，P2-MCP-5 可配 ueProbeTimeoutMs）。
+// forceRefresh=true 时强制从 ports.json 重读端口再探测——用于游戏由外部启动后重写
+// ports.json 的场景（模块级 UE_BASE_URL 缓存的是启动时的旧端口/fallback）。
+// 返回 { available, ueGame, base }；失败时 ueGame=null。
+async function probeUeStatus(forceRefresh = false) {
+  const base = getUeBaseUrl(forceRefresh);
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), config.timings?.ueProbeTimeoutMs ?? 3000);
+    const ueResp = await fetch(`${base}/unityexplorer/status`, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (ueResp.ok) {
+      const ueData = await ueResp.json();
+      // 兼容两种状态结构：{ data: { uiReady } } 或 { data: { status: { uiReady } } }
+      const ueStatus = (ueData.data && (ueData.data.status || ueData.data)) || {};
+      const available = ueData && ueData.success === true && ueData.data && ueStatus.uiReady === true;
+      // 游戏状态块（UESDdebuger UELoader 直读 Verse 静态字段，不依赖 RIMAPI）：
+      // 供 start_game（游戏初始化完成/主菜单就绪）与 start_quick_test（世界 tick 走动）判定
+      let ueGame = null;
+      if (ueStatus.game && typeof ueStatus.game === 'object') {
+        const g = ueStatus.game;
+        ueGame = {
+          programState: typeof g.programState === 'string' ? g.programState : null,
+          loading: g.loading === true,
+          inGame: g.inGame === true,
+          mainMenu: g.mainMenu === true,
+          gameTick: Number.isFinite(g.gameTick) ? g.gameTick : null,
+          paused: g.paused === true,
+          // 已激活模组（packageId）列表：供能力映射用（问题记录 §4）。旧版 DLL 无此字段 → null。
+          activePackageIds: Array.isArray(g.activePackageIds) ? g.activePackageIds.map(String) : null,
+          activeModCount: Number.isFinite(g.activeModCount) ? g.activeModCount : null
+        };
+      }
+      return { available, ueGame, base };
+    }
+  } catch (e) { /* 忽略 */ }
+  return { available: false, ueGame: null, base };
+}
+
 // 多源阶段探测（Task 1.2）：进程（tasklist）+ RIMAPI（8765）+ UE（3001）
 async function detectGameStage() {
   const proc = await findRimWorldProcess();
@@ -500,6 +586,7 @@ async function detectGameStage() {
   let mapCount = 0;
   let ueAvailable = false;
   let ueGame = null;
+  let ueReconnected = false;
 
   if (gamePid) {
     // RIMAPI 探测
@@ -510,32 +597,19 @@ async function detectGameStage() {
       mapCount = rimapiResult.data.map_count || 0;
     }
     // UE 探测（短超时，P2-MCP-5 可配 ueProbeTimeoutMs）
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), config.timings?.ueProbeTimeoutMs ?? 3000);
-      const ueResp = await fetch(`${UE_BASE_URL}/unityexplorer/status`, { signal: controller.signal });
-      clearTimeout(timeoutId);
-      if (ueResp.ok) {
-        const ueData = await ueResp.json();
-        // 兼容两种状态结构：{ data: { uiReady } } 或 { data: { status: { uiReady } } }
-        const ueStatus = (ueData.data && (ueData.data.status || ueData.data)) || {};
-        ueAvailable = ueData && ueData.success === true && ueData.data && ueStatus.uiReady === true;
-        // 游戏状态块（UESDdebuger UELoader 直读 Verse 静态字段，不依赖 RIMAPI）：
-        // 供 start_game（游戏初始化完成/主菜单就绪）与 start_quick_test（世界 tick 走动）判定
-        if (ueStatus.game && typeof ueStatus.game === 'object') {
-          const g = ueStatus.game;
-          ueGame = {
-            programState: typeof g.programState === 'string' ? g.programState : null,
-            loading: g.loading === true,
-            inGame: g.inGame === true,
-            mainMenu: g.mainMenu === true,
-            gameTick: Number.isFinite(g.gameTick) ? g.gameTick : null,
-            paused: g.paused === true
-          };
-        }
+    let ueProbe = await probeUeStatus(false);
+    ueAvailable = ueProbe.available;
+    ueGame = ueProbe.ueGame;
+    // P2-MCP-6：UE 不可达时强制从 ports.json 刷新端口重试一次——游戏由外部启动后重写了
+    // ports.json（随机端口），而模块级 UE_BASE_URL 缓存的是启动时的旧端口/fallback，首探必然失败。
+    if (!ueAvailable) {
+      const refreshed = await probeUeStatus(true);
+      if (refreshed.available) {
+        ueAvailable = true;
+        ueGame = refreshed.ueGame;
+        ueReconnected = true;
+        log('INFO', `detectGameStage: UE 首探失败，已从 ports.json 刷新端口重连成功（${refreshed.base}）`);
       }
-    } catch (e) {
-      ueAvailable = false;
     }
   }
 
@@ -583,7 +657,11 @@ async function detectGameStage() {
     ueMainMenu: ueGameAvailable ? ueGame.mainMenu : false,
     ueGameTick: ueGameAvailable ? ueGame.gameTick : null,
     uePaused: ueGameAvailable ? ueGame.paused : false,
-    ueLoading: ueGameAvailable ? ueGame.loading : false
+    ueLoading: ueGameAvailable ? ueGame.loading : false,
+    // 激活模组列表（仅本模组加载时可得；旧版 DLL/未加载 → null）
+    activePackageIds: ueGameAvailable ? (ueGame.activePackageIds ?? null) : null,
+    activeModCount: ueGameAvailable ? (ueGame.activeModCount ?? null) : null,
+    ueReconnected
   };
 }
 
@@ -706,7 +784,7 @@ async function callUnityExplorerAPI(endpoint, method = 'GET', body = null, opts 
   };
 
   try {
-    const url = `${UE_BASE_URL}${endpoint}`;
+    const url = `${getUeBaseUrl()}${endpoint}`;
     const response = await fetchWithTimeout(url, options);
     const data = await readJson(response);
 
@@ -732,14 +810,12 @@ async function callUnityExplorerAPI(endpoint, method = 'GET', body = null, opts 
       statusCode: response.status
     };
   } catch (error) {
-    // P1-MCP-3/Task4：AbortController 触发的超时一律返回 UE_TIMEOUT，绝不走连接错误重试。
-    if (error && error._aborted) {
-      return { success: false, errorCode: 'UE_TIMEOUT', error: `UE 请求超时(${timeoutMs}ms)`, statusCode: 0 };
-    }
-    // 连接类错误（fetch failed / ECONNREFUSED 等）：UE 端口可能已变化（ports.json 的 ueHttpPort），
-    // 强制重读刷新缓存后，用新端口重试一次
+    // 连接类错误（fetch failed / ECONNREFUSED 等）或超时（UE_TIMEOUT）：都可能是游戏由外部
+    // 启动后重写了 ports.json（随机端口），而本次请求用的是模块级 UE_BASE_URL 缓存的旧端口/fallback。
+    // 统一强制从 ports.json 刷新端口后重试一次；重试成功则标记 reconnected。
     const isConnError = /fetch failed|ECONNREFUSED|ECONNRESET|ENOTFOUND|network error|connection refused/i.test(String(error && error.message));
-    if (isConnError) {
+    const shouldRefreshPort = isConnError || (error && error._aborted);
+    if (shouldRefreshPort) {
       try {
         const retryUrl = `${getUeBaseUrl(true)}${endpoint}`;
         const retryResp = await fetchWithTimeout(retryUrl, options);
@@ -749,12 +825,17 @@ async function callUnityExplorerAPI(endpoint, method = 'GET', body = null, opts 
           data: retryData.data || retryData,
           error: retryData.error,
           errorCode: retryData.errorCode,
-          statusCode: retryResp.status
+          statusCode: retryResp.status,
+          reconnected: true
         };
       } catch (retryErr) {
         // 重试仍失败：以重试错误信息继续走原有错误处理
         error = retryErr;
       }
+    }
+    // 刷新端口重试仍超时：返回 UE_TIMEOUT（P1-MCP-3/Task4，不再走连接错误重试/阶段探测空等）
+    if (error && error._aborted) {
+      return { success: false, errorCode: 'UE_TIMEOUT', error: `UE 请求超时(${timeoutMs}ms)`, statusCode: 0 };
     }
     // 不再裸返回 HTTP_ERROR：经阶段探测生成可读错误（Task 2.3）
     try {
@@ -932,8 +1013,21 @@ async function startGame(useSteam = true, waitForNotification = true, timeout = 
         selfStartedPid = Number(data.pid);
         log('INFO', `start_game 桥接 launch 成功（pid=${data.pid}, autoAttached=${data.autoAttached}, debugPlayerWindowClosed=${data.debugPlayerWindowClosed}），resume 恢复游戏运行`);
         if (data.needResume || data.attached) {
-          const resumeRes = await callMonoTool('resume', {});
-          log('INFO', `start_game resume 结果: ${(resumeRes.content || []).map((c) => c.text || '').join('')}`);
+          let resumeRes = await callMonoTool('resume', {});
+          let resumeText = (resumeRes.content || []).map((c) => c.text || '').join('');
+          // 2026-09-19（问题记录 §2）：launch 报 attached 后连接可能立刻被抖动掉，resume 就撞上"未连接"。
+          // 这里自愈：先 reconnect（自动重取端口）再 resume 一次，仍失败才把原始错误报上去。
+          if (!/ok"\s*:\s*true|Ok"\s*:\s*true/.test(resumeText) && /未连接|无法 resume/.test(resumeText)) {
+            log('WARN', 'start_game resume 报未连接（launch 后连接抖动）：reconnect 后重试一次');
+            const rc = await callMonoTool('reconnect', {});
+            const rcText = (rc.content || []).map((c) => c.text || '').join('');
+            log('INFO', `start_game reconnect 结果: ${rcText}`);
+            if (/ok"\s*:\s*true|Ok"\s*:\s*true/.test(rcText)) {
+              resumeRes = await callMonoTool('resume', {});
+              resumeText = (resumeRes.content || []).map((c) => c.text || '').join('');
+            }
+          }
+          log('INFO', `start_game resume 结果: ${resumeText}`);
         }
       } else {
         bridgeFailedMsg = launchObj && (launchObj.message || launchObj.Message) || launchText || 'launch 未成功';
@@ -1118,6 +1212,11 @@ async function stopGame(force = false) {
 // （agentId / lastError / connectedAt，来自 gabpClient.status()）
 async function getGameStatus() {
   const detected = await detectGameStage();
+  // GABP 惰性断连自愈：get_game_status 也是「使用工具」——已连接零成本直通；
+  // 断连/未连接（如外部手动重启游戏后 token 滚动）先尝试重连，让状态面板反映最新连接。
+  if (gabpBridge && !gabpBridge.isConnected() && detected.running) {
+    try { await gabpBridge.ensureConnected(); } catch (e) { log('WARN', `GABP ensureConnected 异常: ${e.message}`); }
+  }
   const gabpStatus = gabpBridge ? gabpBridge.status() : null;
   // mono 调试器状态：原 status 工具信息并入（McpRimDebug 仍保留 status 协议工具，仅不再对外暴露）；
   // 桥接就绪时探测一次（探测失败不阻断，仅置 probeError）
@@ -1178,6 +1277,22 @@ async function getGameStatus() {
       + `。建议：break_list 查看断点，break_remove/break_clear 释放断点，resume 恢复游戏执行`;
   }
   mono.breakpointHint = breakpointHint;
+  // P2-MCP-6：UE 首探失败但已从 ports.json 刷新端口重连成功时，向调用方显式报告「重连成功」
+  const reconnected = detected.ueReconnected === true;
+  // 能力 → 提供方 → 是否加载 → 当前是否可用（问题记录 §4）：让调用方一眼看到"哪个能力为什么不好使"，
+  // 不必自己拼 activePackageIds 与 ModsConfig。
+  const capabilities = buildCapabilityReport({
+    activePackageIds: detected.activePackageIds,
+    // ueHttpReachable：游戏内状态端点可达（主菜单即可为 true，决定 start_quick_test 是否可用）
+    ueHttpReachable: detected.ueGameAvailable,
+    // ueAvailable：UE 界面就绪（uiReady，只有进图后才可能 true）
+    ueAvailable: detected.ueAvailable,
+    monoBridgeReady: mono.bridgeReady === true,
+    gabpConnected: !!(gabpStatus && gabpStatus.state === 'connected'),
+    gabpState: gabpStatus ? gabpStatus.state : 'disabled',
+    rimapiAvailable: detected.rimapiAvailable,
+    dpaRoundActive,
+  });
   return {
     running: detected.running,
     stage: detected.stage,
@@ -1190,6 +1305,11 @@ async function getGameStatus() {
     ue_game_paused: detected.uePaused,
     ue_game_loading: detected.ueLoading,
     ue_main_menu_ready: detected.ueMainMenu,
+    reconnected,
+    activeModCount: detected.activeModCount,
+    activePackageIds: detected.activePackageIds,
+    capabilities,
+    message: reconnected ? '检测到 UE 未连接，已从 ports.json 刷新端口并重连成功' : undefined,
     gabp: gabpStatus
       ? {
           state: gabpStatus.state,
@@ -1307,6 +1427,120 @@ async function tailLog(lines = 50) {
   }
 }
 
+// ---------- 快速测试触发链路（与 GABP 无关） ----------
+// 链路：MCP --POST /trigger-quicktest--> UESDdebuger 模组的游戏内 HTTP 服务（UELoader / UEHttpServer）。
+// 该服务在游戏的 Mod 构造函数里启动（主菜单即可用），与 GABP（RimBridgeServer）、RIMAPI、UnityExplorer UI
+// 是否就绪**没有任何关系**——这一点是被反复误判过的点，故单独成函数并把注释写在这里。
+
+// 下发一次快速测试命令。返回 null=成功；否则 { kind, reason, retriable, httpStatus?, payloadErrorCode?, message }。
+// kind 语义（决定上层怎么归因，别混）：
+//   'unreachable' —— 连不上/超时/5xx：游戏内服务不可达；
+//   'auth'        —— 401/403：服务在，但 token 不是本次会话的；
+//   'business'    —— 其它 4xx：服务在且正常应答，只是拒绝了这次请求（如已在游戏内 ALREADY_IN_GAME）。
+async function sendQuickTestTrigger() {
+  const modUrl = `${getUeBaseUrl()}/trigger-quicktest`;
+  // P1-MCP-3：trigger-quicktest 独立加 10s AbortController 兜底（触发失败/卡死不悬挂；slow 不适用，
+  // 该 fetch 仅下发命令码，真正等待进图由下方轮询负责，故这里给固定 10s 即可）。
+  const controller = new AbortController();
+  const triggerTimer = setTimeout(() => controller.abort(), 10000);
+  try {
+    let response;
+    try {
+      response = await fetch(modUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(getAuthToken() ? { 'Authorization': `Bearer ${getAuthToken()}` } : {})
+        },
+        body: JSON.stringify({ timestamp: new Date().toISOString() }),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(triggerTimer);
+    }
+
+    if (response.ok) return null;
+
+    // 读一次响应体拿游戏侧 errorCode/error（服务在，但请求被拒：已在地图内、鉴权失败等）
+    let payload = null;
+    try { payload = await response.json(); } catch (e) { /* 非 JSON 响应忽略 */ }
+    const payloadErrorCode = payload && typeof payload.errorCode === 'string' ? payload.errorCode : null;
+    const detail = payload && (payload.error || payload.message) ? `：${payload.error || payload.message}` : '';
+    const isAuth = response.status === 401 || response.status === 403;
+    const isBusiness = !isAuth && response.status >= 400 && response.status < 500;
+    return {
+      kind: isBusiness ? 'business' : (isAuth ? 'auth' : 'unreachable'),
+      reason: `HTTP ${response.status}`,
+      // 401/403（token 滚动）与 5xx（服务刚起/忙）刷新端点后值得重试；4xx 业务错误（如 ALREADY_IN_GAME）不重试
+      retriable: isAuth || response.status >= 500,
+      httpStatus: response.status,
+      payloadErrorCode,
+      message: `游戏内服务返回 ${response.status} ${response.statusText}${detail}（${modUrl}）`
+    };
+  } catch (fetchError) {
+    // 超时不重试（服务可能在，只是慢）；连接类错误（ECONNREFUSED/RST）刷新端口后重试一次
+    const aborted = fetchError && fetchError.name === 'AbortError';
+    return {
+      kind: 'unreachable',
+      reason: aborted ? 'timeout' : 'connect',
+      retriable: !aborted,
+      message: `游戏内服务未响应：${fetchError && fetchError.message ? fetchError.message : String(fetchError)}（${modUrl}）`
+    };
+  }
+}
+
+// 触发被游戏侧**正常拒绝**（服务在、HTTP 4xx 业务错误）→ 原样透出语义。
+// 典型：ALREADY_IN_GAME —— UELoader 的 TriggerQuickTest 只在主菜单可用（"快速测试"= 从主菜单进测试地图）。
+function buildQuickTestRejectedError(triggerErr) {
+  const code = triggerErr.payloadErrorCode || 'QUICKTEST_REJECTED';
+  const guidance = code === 'ALREADY_IN_GAME'
+    ? '已在游戏地图内：快速测试只用于「主菜单 → 进测试地图」。如需重来，先回主菜单（rimworld.go_to_main_menu）再调用；当前地图内可直接用其他工具。'
+    : '游戏内服务拒绝了本次快速测试请求；明细见 message/errorCode，可用 read_rimworld_log 查看游戏侧日志。';
+  return {
+    success: false,
+    errorCode: code,
+    currentStage: null,
+    requiredStage: [STAGES.MAIN_MENU],
+    message: triggerErr.message,
+    guidance
+  };
+}
+
+// 触发失败 → 可读且**归因正确**的错误（纯函数，便于单测：portsInfo 可注入）。
+// 关键点：不要说成"UE 未就绪"，也不要扯 GABP——ports.json 的自报状态能区分三种真实原因：
+//   1) ueHttpStatus=failed：模组加载了，但游戏内 HTTP 服务没起来（端口被占用/ACL 拒绝）；
+//   2) 有端口但连不上：模组本次没加载（ModsConfig 未启用）或 ports.json 是上一次会话留下的；
+//   3) 401：token 过期（ports.json 被重写而我们读到旧值）。
+function buildQuickTestServiceError(triggerErr, currentStage, portsInfo) {
+  const info = portsInfo === undefined ? readPortsFileInfo() : portsInfo;
+  const facts = [];
+  if (info) {
+    facts.push(`ports.json: ueHttpPort=${info.ueHttpPort ?? 'null'}, token=${info.hasToken ? '有' : '无'}`
+      + `, ueHttpStatus=${info.ueHttpStatus ?? '（旧版 DLL 无此字段）'}, updatedAt=${info.updatedAt ?? '未知'}`);
+    if (info.ueHttpStatus === 'failed') {
+      facts.push(`游戏内 HTTP 服务自报启动失败：${info.ueHttpError || '未提供原因'}`);
+    } else if (info.ueHttpStatus === 'running') {
+      facts.push('游戏内 HTTP 服务自报 running —— 若仍连不上，多为端口被上一次会话的残留进程占用，或本地网络策略拦截');
+    }
+    if (triggerErr.httpStatus === 401) {
+      facts.push('可能原因：ports.json 的 token 属上一次会话（游戏刚重启并已重写该文件），重试一次仍失败可稍后再试');
+    }
+    if (!info.ueHttpStatus && triggerErr.reason === 'connect') {
+      facts.push('未读到服务自报状态（多为本次游戏未启用 UESDdebuger 模组，ports.json 仍是上一次会话留下的文件）');
+    }
+  } else {
+    facts.push(`读不到 ${UE_PORTS_FILE}（游戏本次启动还没写下端口文件 → 通常意味着 UESDdebuger 模组未加载）`);
+  }
+  return stageError(
+    ERROR_CODES.QUICKTEST_SERVICE_UNREACHABLE,
+    currentStage,
+    // 快速测试本就用于「主菜单 → 进图」，所以允许阶段是主菜单或游戏中；
+    // 失败点是游戏内服务不可达，不是"阶段不对"（旧实现写死 [IN_GAME]，把排查方向带偏到"先进图"）。
+    [STAGES.MAIN_MENU, STAGES.IN_GAME],
+    `${triggerErr.message}；${facts.join('；')}`
+  );
+}
+
 // Start quick test and wait for map loaded（Task 4.3：新端点 + 轮询 inGame）
 async function startQuickTest(timeout = config.timings?.quickTestTimeoutMs ?? 120000) {
   try {
@@ -1320,42 +1554,35 @@ async function startQuickTest(timeout = config.timings?.quickTestTimeoutMs ?? 12
     mapLoadedNotified = false;
     mapLoadedNotifyTimestamp = null;
 
-    // Send HTTP command to UESDdebuger game mod to trigger quick test
-    const modUrl = `${UE_BASE_URL}/trigger-quicktest`;
-    
-    try {
-      // P1-MCP-3：trigger-quicktest 独立加 10s AbortController 兜底（触发失败/卡死不悬挂；slow 不适用，
-      // 该 fetch 仅下发命令码，真正等待进图由下方轮询负责，故这里给固定 10s 即可）。
-      const controller = new AbortController();
-      const triggerTimer = setTimeout(() => controller.abort(), 10000);
-      let response;
-      try {
-        response = await fetch(modUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(getAuthToken() ? { 'Authorization': `Bearer ${getAuthToken()}` } : {})
-          },
-          body: JSON.stringify({ timestamp: new Date().toISOString() }),
-          signal: controller.signal
-        });
-      } finally {
-        clearTimeout(triggerTimer);
-      }
-      
-      if (!response.ok) {
-        return stageError(ERROR_CODES.UE_NOT_READY, null, [STAGES.IN_GAME], `游戏内服务返回 ${response.status} ${response.statusText}`);
-      }
-      
-      console.log('Quick test command sent to RimWorld mod, waiting for map loading...');
-    } catch (fetchError) {
-      // 请求失败：经阶段探测生成可读错误
+    // 下发 /trigger-quicktest（UESDdebuger 游戏内 HTTP 服务）。
+    //
+    // 【2026-09-19 修复】此前这里直接用模块级缓存的 `${getUeBaseUrl()}` + `getAuthToken()` 打一发：
+    //   - 游戏由外部/重启过后，ports.json 里的端口与 token 都会滚动，而缓存里的旧值会把这一发打空
+    //     （表现是 "UE 未就绪（游戏内服务未响应）"，看起来像 GABP/UE 的问题，实际只是端口/token 过期）；
+    //   - 失败即返回，从不刷新重试。
+    // 现在与 callUnityExplorerAPI 的同款策略对齐：下发前先按 ports.json 刷新端点，连接类失败/401 刷新后重试一次，
+    // 并把失败归因说清楚（这条链路与 GABP/RimBridgeServer 无关，快速测试只需要本模组的服务）。
+    refreshUeEndpoint();                                  // 以本次游戏写下的 ueHttpPort/token 为准
+    let triggerErr = await sendQuickTestTrigger();
+    if (triggerErr && triggerErr.retriable) {
+      log('WARN', `quick test 触发失败（可重试：${triggerErr.reason}），刷新 ports.json 端点后重试一次`);
+      refreshUeEndpoint();
+      await new Promise(resolve => setTimeout(resolve, 300));
+      triggerErr = await sendQuickTestTrigger();
+    }
+    if (triggerErr) {
       const detected = await detectGameStage();
       if (!detected.running) {
         return stageError(ERROR_CODES.GAME_NOT_RUNNING, detected.stage, [STAGES.IN_GAME]);
       }
-      return stageError(ERROR_CODES.UE_NOT_READY, detected.stage, [STAGES.IN_GAME], `游戏内服务未响应：${fetchError.message}`);
+      // 服务在且正常应答、只是拒绝了这次请求（典型：已在游戏内 ALREADY_IN_GAME）→ 原样透出游戏侧语义，
+      // 不要误报成"服务不可达"。
+      if (triggerErr.kind === 'business') {
+        return buildQuickTestRejectedError(triggerErr);
+      }
+      return buildQuickTestServiceError(triggerErr, detected.stage);
     }
+    console.log('Quick test command sent to RimWorld mod, waiting for map loading...');
 
     // Wait for map loaded: 轮询 detectGameStage()，进图后需确认世界 tick 走动（不依赖 RIMAPI）。
     // 信号源：模组通知 / 阶段探测均可判定"已进图"；最终成功需 UE 游戏状态 gameTick 两次采样递增
@@ -1426,7 +1653,15 @@ async function startQuickTest(timeout = config.timings?.quickTestTimeoutMs ?? 12
       currentStage: finalDetected.stage,
       pid: finalDetected.gamePid || process.pid,
       elapsedTime: Date.now() - startTime,
-      guidance: '地图生成可能仍未完成，或游戏处于暂停（tick 未走动）；可调 get_game_status 查看当前阶段'
+      inGame: finalDetected.inGame === true,
+      paused: finalDetected.uePaused === true,
+      // 触发命令已经下发成功（否则在上面就返回 QUICKTEST_SERVICE_UNREACHABLE），所以这里是"进图/走 tick"阶段的问题，
+      // 与 GABP 无关。暂停态单独点出来：暂停时 tick 不走，会一直等到超时。
+      guidance: finalDetected.inGame
+        ? (finalDetected.uePaused
+          ? '已在游戏中但处于暂停（tick 未走动）：解暂停后重试，或用 get_game_status 确认阶段'
+          : '已在游戏中但世界 tick 未推进：地图可能仍在 FinalizeInit，稍后重试或调 get_game_status 查看阶段')
+        : '地图生成可能仍未完成（仍在加载/过渡），可用 get_game_status / read_rimworld_log 查看当前阶段与游戏内错误'
     };
     
   } catch (error) {
@@ -1439,10 +1674,10 @@ async function startQuickTest(timeout = config.timings?.quickTestTimeoutMs ?? 12
 
 // Tool definitions
 // ========== McpRimDebug（mono 调试器）桥接 ==========
-// 把 McpRimDebug（stdio 的 .NET MCP 服务器，20 个 mono 断点/求值工具）作为子进程内嵌转发，
+// 把 McpRimDebug（stdio 的 .NET MCP 服务器，21 个 mono 断点/求值工具）作为子进程内嵌转发，
 // 使 rimworld_DebugInEnvironment 这一个 SSE 服务器同时提供：游戏控制 + UE 工具 + mono 调试工具。
 const MONO_DEBUG_TOOL_NAMES = new Set([
-  'attach', 'detach', 'resume', 'suspend', 'launch',
+  'attach', 'detach', 'resume', 'suspend', 'launch', 'reconnect',
   'break_add', 'break_list', 'break_remove', 'break_clear', 'break_exception',
   'wait', 'step', 'threads', 'callstack', 'locals', 'inspect',
   'eval', 'find_types', 'find_methods'
@@ -1514,6 +1749,44 @@ async function initMonoBridge() {
     try { if (monoTransport) await monoTransport.close(); } catch (e2) { }
     monoClient = null;
     monoTransport = null;
+  }
+}
+
+// 断点懒清理（规格"断点交互"节）：游戏内 /hotreload/status 的 history[].affectedMethods
+// 命中当前断点时自动 break_remove，并记录清理数。任何失败静默（不阻塞断点工具本身）。
+let lastCleanupNote = null;
+async function lazyCleanupStaleBreakpoints() {
+  try {
+    const status = await callUnityExplorerAPI('/unityexplorer/hotreload/status', 'GET');
+    const affected = new Set();
+    const history = status && status.data && Array.isArray(status.data.history) ? status.data.history : [];
+    for (const rec of history) {
+      if (rec && Array.isArray(rec.affectedMethods)) {
+        for (const m of rec.affectedMethods) affected.add(m);
+      }
+    }
+    if (affected.size === 0) return;
+    const bpList = await callMonoTool('break_list', {});
+    const bpText = JSON.stringify(bpList || {});
+    const parsed = JSON.parse(bpText);
+    const items = parsed && Array.isArray(parsed.data) ? parsed.data
+      : (parsed && parsed.data && Array.isArray(parsed.data.breakpoints) ? parsed.data.breakpoints : []);
+    const removed = [];
+    for (const m of affected) {
+      for (const item of items) {
+        if (item && String(item.description || '').includes(m)) {
+          await callMonoTool('break_remove', { id: item.id ?? item.breakpointId ?? item.breakId });
+          removed.push(m);
+          break;
+        }
+      }
+    }
+    if (removed.length > 0) {
+      lastCleanupNote = `断点懒清理：已移除 ${removed.length} 个失效断点（目标方法被热重载替换）: ${removed.join(', ')}`;
+      log('INFO', '[HotReload] ' + lastCleanupNote);
+    }
+  } catch (e) {
+    log('WARN', `[HotReload] 断点懒清理失败（静默）: ${e.message}`);
   }
 }
 
@@ -1595,6 +1868,40 @@ const TOOLS = [
     }
   },
   {
+    name: 'task_status',
+    description: '[长任务] 查看后台长任务进度：无参列出全部（含随 MCP 进程重启中断的孤儿任务），传 taskId 看单个。返回累计进度、最近采样点(tps)、最近 DPA 快照、采样与日志文件路径。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: '任务 id（由 rimworld.play_for{nonBlocking:true} 返回）；省略则列出全部' }
+      }
+    }
+  },
+  {
+    name: 'task_cancel',
+    description: '[长任务] 取消后台长任务：最迟一个采样周期内停止，并按任务的 pauseOnFinish 处理游戏暂停状态。兜底做法是直接调 rimworld.pause_game{pause:true}——后台循环会识别为外部暂停并把任务记为 aborted。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: '要取消的任务 id' }
+      },
+      required: ['taskId']
+    }
+  },
+  {
+    name: 'task_configure',
+    description: '[长任务] 中途改采样节奏（进入/退出 1s 猝发测量）：只改在跑任务的参数，不重启任务、不碰游戏。采样间隔压到 taskBurstSampleIntervalMs 以下时快照间隔会强制联动压到 taskBurstSnapshotIntervalMs——否则会超出 DPA 2000 格环形缓冲（60fps 下约 33s 覆盖一圈）而丢数据。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: '目标任务 id' },
+        sampleIntervalMs: { type: 'number', description: '新的采样间隔（毫秒），如 1000 进入猝发' },
+        snapshotIntervalMs: { type: 'number', description: '新的 DPA 快照间隔（毫秒）' }
+      },
+      required: ['taskId']
+    }
+  },
+  {
     name: 'read_rimworld_log',
     description: '[RimWorld 日志文件] 读取 RimWorld 游戏日志文件（Player.log）末尾内容',
     inputSchema: {
@@ -1632,7 +1939,7 @@ const TOOLS = [
   },
   {
     name: 'start_quick_test',
-    description: 'Trigger quick test in RimWorld and wait for map loading completion',
+    description: 'Trigger quick test in RimWorld and wait for map loading completion（主菜单即可用：只需 UESDdebuger 模组的游戏内 HTTP 服务，不需要 GABP/RimBridgeServer、RIMAPI 或 UnityExplorer 就绪）',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2094,8 +2401,93 @@ const TOOLS = [
       },
       required: ['query']
     }
+  },
+  // ========== 热重载桥（HotReloadManager） ==========
+  {
+    name: 'hotreload_apply',
+    description: '[实验性·隐藏工具][热重载桥] 手动应用重编译的 mod DLL（mod 重打优先 / method detour 兜底）。空参=检测全部已变化 DLL；modId=按 packageId 指定。'
+      + ' **局限（使用前必读）**：字段布局变化的类型本轮整体不重载（需重启，或改侧表存储/把逻辑外移）；静态字段不延续；开放泛型与迭代器/异步状态机成员不覆盖；程序集不卸载（每轮驻留一个副本）。'
+      + ' 本工具**不出现在任何菜单/工具清单**中，仅可按名显式调用（agg_call_tool { tool: "hotreload_apply", args: {} }）。'
+      + ' 提示：XML/Defs 改动不需要本工具，用 rimworld.execute_debug_action path="Actions\\Hot reload Defs"。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        modId: { type: 'string', description: '可选：目标 mod 的 packageId（如 "text28.yourname"）。省略=检测全部已变化 DLL' }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'hotreload_watch',
+    description: '[实验性·隐藏工具][热重载桥] 自动监视开关：on/off。**默认 off（休眠）**——'
+      + '本工具定位为隐藏实验工具，不允许"DLL 更换就自动生效"：需显式调用本工具 {enabled:true} 才启用自动重载；'
+      + '或改用一次性手动 hotreload_apply。'
+      + ' 局限同 hotreload_apply（字段布局变化不覆盖/静态不延续/泛型与状态机不覆盖）。'
+      + ' 本工具不出现在任何菜单/清单，仅可按名显式调用。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        enabled: { type: 'boolean', description: 'true=开启自动监视（默认），false=关闭' }
+      },
+      required: ['enabled']
+    }
+  },
+  {
+    name: 'hotreload_status',
+    description: '[实验性·隐藏工具][热重载桥] 热重载状态：监视开关 / 已加载 mod 程序集（含 mtime）/ 最近重打记录'
+      + '（含 skipped{}/skippedByType 跳过原因分解与受影响方法，供断点懒清理）。本工具不出现在任何菜单/清单，仅可按名显式调用。',
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    }
   }
 ];
+
+// action 取值域在此声明（必须早于下面的 TOOLS.push 使用）
+const MAP_MARKER_ACTIONS = ['set', 'clear', 'recolor', 'list'];
+
+// 地图坐标光标工具：追加进 TOOLS（放在数组定义之后，避免改动上方 600 行的工具清单本体）
+TOOLS.push({
+  name: 'post_map_marker',
+  description: '[UE工具][需要进入地图] 在地图上打一个「坐标光标」—— 炼狱魔王炮风格的瞄准指示 + 地面坐标文字，'
+    + '让玩家一眼看到 AI 报的坐标到底在哪一格（解决"AI 报坐标、玩家对不上号"）。'
+    + '玩家鼠标左键点击光标即可消除。action：set（默认，打光标）/ clear（消除，不给 id 则清全部）/ '
+    + 'recolor（改颜色）/ list（列出当前光标）。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      action: {
+        type: 'string',
+        enum: MAP_MARKER_ACTIONS,
+        description: '动作，默认 set'
+      },
+      x: { type: 'integer', description: '目标格 X 坐标（action=set 必填；兼容别名 mapX/map_x）' },
+      z: { type: 'integer', description: '目标格 Z 坐标（action=set 必填；兼容别名 mapZ/map_z）' },
+      id: {
+        type: 'string',
+        description: '光标 id。给了 id 可同时并存多个（上限 8）；set 不给 id 时默认先清掉已有光标，只留新的这一个'
+      },
+      color: {
+        type: 'string',
+        description: '颜色：英文名（red/orange/gold/yellow/lime/green/teal/cyan/blue/purple/magenta/pink/white/gray）'
+          + '或 #RRGGBB（也接受 RRGGBB / #RGB）或 "r,g,b"。默认 #FF4A1F（炼狱魔王同款橙红）'
+      },
+      label: { type: 'string', description: '光标上方的标题文字（可选；坐标本身始终会显示）' },
+      size: { type: 'number', description: '光标边长（格），默认 8（与炼狱魔王炮指示器一致），范围 1-40' },
+      ttl_seconds: {
+        type: 'number',
+        description: '自动消失秒数；0/省略 = 一直保留直到玩家点击或 clear（别名 duration/seconds）'
+      },
+      map_id: { type: 'integer', description: '目标地图 ID（省略 = 当前地图；别名 mapId）' },
+      keep_existing: {
+        type: 'boolean',
+        description: 'action=set 时是否保留已有光标；默认 false（先清掉旧的，适合"就给我看这一个坐标"）'
+      }
+    }
+    // 注：这里原先声明 additionalProperties:false，但实测未声明的多余参数会被静默忽略（服务端不校验），
+    // 声明与行为不符，故去掉该声明（2026-09-20 发布前检查 nit）。
+  }
+});
 
 // ========== GABP（RimBridgeServer）桥接集成（spec §6/§7/§8） ==========
 
@@ -2125,66 +2517,121 @@ let gabpTools = []; // 连接后从 GabpClient 'tools-changed' 事件填充（�
 let gabpConsecutiveTimeout = 0;
 const GABP_TIMEOUT_RECOVER_THRESHOLD = (config?.rimBridge?.timeoutRecoverThreshold) || 3;
 
-// GABP 发现+连接轮询编排（spec §4.3 / §6.1）。
-// Task 1 遗留指针：connect() 重试不重新发现（token 每次游戏启动都会变，旧 token 会无限重试）。
-// 本函数承担轮询发现：周期性 discoverRimBridge()，发现新 port/token 后中止在途重试并重新 connect()；
-// 停止条件：disconnect（stop_game / 主动断开）时停止；意外断连（游戏退出/重启）后自动重新开始。
-const GABP_POLL_INTERVAL_MS = 5000;
-let gabpPollTimer = null;
-let gabpConnectTarget = null; // 已发起连接的端点 {port, token}，用于检测端点变化
+// ---------- 长任务运行器（2026-09-17） ----------
+// 采样数据与任务日志落在 docs/dpa/ 下（规格 §4）：
+//   docs/dpa/samples/<runId>.jsonl        —— 采样点 + DPA 快照，全量追加
+//   docs/dpa/tasks/<runId>.journal.jsonl  —— 任务生命周期与 checkpoint
+const LONG_TASK_DIR = path.join(__dirname, '..', 'docs', 'dpa');
+const LONG_TASK_SAMPLE_DIR = path.join(LONG_TASK_DIR, 'samples');
+const LONG_TASK_JOURNAL_DIR = path.join(LONG_TASK_DIR, 'tasks');
 
-function stopGabpPolling() {
-  if (gabpPollTimer !== null) {
-    clearTimeout(gabpPollTimer);
-    gabpPollTimer = null;
+// 采样文件同时承载两类记录，以 kind 区分，共用一条时间轴便于事后对齐：
+//   kind:"sample"   —— 每次心跳的 tick 采样点（atMs / ticksGame / tps），全量
+//   kind:"snapshot" —— 每次 DPA 快照（atMs / ticks / rows + payload），全量
+//
+// 为什么必须全量 append（而不是每轮覆盖或只留内存）：
+//   - DPA 的 Profiler 是 2000 格环形缓冲（Profiler.cs:15,82），60fps 下约 33 秒覆盖一圈，
+//     只有定期落盘才留得住全程数据；
+//   - 采样点若只留内存滚动窗口（taskSampleKeep，默认 200），1s 采样跑 1 小时
+//     会丢掉 3400/3600 个原始点。
+function appendSampleLine(file, record) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, `${JSON.stringify({ kind: 'sample', ...record })}\n`, 'utf-8');
+  } catch (e) {
+    log('WARN', `采样点落盘失败（不影响任务）: ${e.message}`);
   }
-  gabpConnectTarget = null;
 }
 
-async function scheduleDiscoverAndConnect() {
-  if (!gabpBridge || gabpBridge.state === 'disabled') return;
-  // config.rimBridge.autoConnect === false 时显式关闭自动发现+连接（spec §10）
-  const rb = config.rimBridge || {};
-  if (rb.autoConnect === false) return;
-  if (gabpBridge.isConnected()) return;
-  if (gabpPollTimer !== null) return; // 已在轮询
-  log('INFO', 'GABP 开始轮询发现+连接');
-  const poll = async () => {
-    gabpPollTimer = null;
-    if (!gabpBridge || gabpBridge.state === 'disabled' || gabpBridge.isConnected()) return;
-    try {
-      const discovered = gabpBridge.discoverRimBridge();
-      if (discovered) {
-        const changed = gabpConnectTarget === null ||
-          discovered.port !== gabpConnectTarget.port ||
-          discovered.token !== gabpConnectTarget.token;
-        if (changed) {
-          if (gabpConnectTarget !== null) {
-            // 端点变化：先中止旧 token 的在途重试并清空目标，下一轮再连新端点（避免与在途 connect 竞态）
-            log('WARN', `GABP 端点变化（port=${gabpConnectTarget.port} → ${discovered.port}），中止在途重试`);
-            gabpBridge.disconnect();
-            gabpConnectTarget = null;
-          } else {
-            gabpConnectTarget = { port: discovered.port, token: discovered.token };
-            log('INFO', `GABP 发起连接 port=${discovered.port}`);
-            gabpBridge.connect(discovered.port, discovered.token).catch((e) => {
-              log('WARN', `GABP connect 异常: ${e && e.message ? e.message : String(e)}`);
-            });
-          }
-        }
-      }
-    } catch (e) {
-      log('WARN', `GABP 轮询发现异常: ${e && e.message ? e.message : String(e)}`);
-    }
-    if (gabpBridge && !gabpBridge.isConnected() && gabpBridge.state !== 'disabled') {
-      gabpPollTimer = setTimeout(poll, GABP_POLL_INTERVAL_MS);
-    }
-  };
-  poll();
+function appendSnapshotLine(file, entry, payload) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, `${JSON.stringify({ kind: 'snapshot', ...entry, payload })}\n`, 'utf-8');
+  } catch (e) {
+    log('WARN', `DPA 快照落盘失败（不影响任务）: ${e.message}`);
+  }
 }
 
-// 启动 GABP 桥接（仿 startMonoBridge）：惰性——仅初始化 GabpClient 并注册事件，
-// 不主动起子进程/不主动连接（连接由 scheduleDiscoverAndConnect 触发）；失败不阻断主服务器（spec §6.1）
+const longTaskRunner = createRunner({
+  // 心跳必须走**游戏进程内的单次 GABP RPC**，且工具名要真实存在：
+  // rimworld/get_game_info（已用 rimbridge/list_capabilities 核实；实测单次约 8ms）。
+  // 曾经的 rimworld/get_game_status 并不存在，会让任务启动即失败。
+  // 也禁止改用 MCP 原生 get_game_status：它每次执行 detectGameStage()，
+  // 其中 findRimWorldProcess() 会 spawn 一个 tasklist 子进程，1s 一次 = 每小时 3600 次，
+  // 会污染被测对象本身。
+  call: async (name, args, opts) => {
+    if (!gabpBridge) return { ok: false, error: { code: -32603, message: 'GABP 桥接未初始化' } };
+    return gabpBridge.callTool(name, args || {}, opts || {});
+  },
+  now: () => Date.now(),
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  journalDir: LONG_TASK_JOURNAL_DIR,
+  sampleDir: LONG_TASK_SAMPLE_DIR,
+  journalAppend: (file, rec) => {
+    if (appendRecord(file, rec)) return true;
+    log('WARN', `任务日志写入失败: ${file}`);
+    return false;
+  },
+  appendSample: (file, record) => appendSampleLine(file, record),
+  appendSnapshot: (file, entry, payload) => appendSnapshotLine(file, entry, payload),
+});
+
+// 随进程重启中断的长任务处置结果（供 task_status 展示）
+let lastOrphanRecovery = [];
+
+/**
+ * 进程重启后的孤儿任务处置（规格 §4.2）。
+ * 默认只记账、不自动动游戏：自动暂停会让「下次启动」产生意外副作用，
+ * 交给用户经 task_status 见过账后再决定。需要自动兜底时置
+ * config.rimBridge.longTask.recoverRestorePause = true。
+ */
+async function recoverOrphanTasks() {
+  try {
+    const all = readOrphans(LONG_TASK_JOURNAL_DIR);
+    const orphans = filterOrphans(all, {
+      isAlive: (pid) => {
+        if (!Number.isFinite(pid) || pid === process.pid) return false;
+        try { process.kill(pid, 0); return true; } catch (e) { return false; }
+      },
+    });
+    if (orphans.length === 0) return [];
+
+    // 恢复探测前必须先确保 GABP 已连接。
+    // 否则必然失败：本函数在启动路径上被调用，此时 GABP 还处于 idle（惰性连接模式），
+    // 而 runner 的恢复探测直接调 gabpBridge.callTool，绕过了 ensureGabpConnected ——
+    // 真机实测结果就是 action 恒为 "probe-failed"，「重启后查账」拿不到任何游戏状态。
+    const ready = await ensureGabpConnected();
+    if (!ready.ok) {
+      log('WARN', `孤儿任务恢复：GABP 未就绪（${ready.error}），本次只记账、不探测游戏状态`);
+    }
+    const lt = readThresholds(config);
+    const restored = await longTaskRunner.recover(orphans, {
+      restorePause: lt.recoverRestorePause,
+      maxAgeMs: lt.recoverMaxAgeMs,
+      gabpReady: ready.ok,
+    });
+    log('WARN', `发现 ${orphans.length} 个随进程重启中断的长任务：`
+      + restored.map((r) => `${r.taskId}(${r.action})`).join(', ')
+      + '。详情见 task_status。');
+    lastOrphanRecovery = restored;
+    return restored;
+  } catch (e) {
+    log('WARN', `孤儿任务恢复失败: ${e.message}`);
+    return [];
+  }
+}
+
+// 【GABP 断连自愈设计 2026-09-08（终版：惰性按需重连）】
+// 背景：原中央调度（scheduleDiscoverAndConnect/stopGabpPolling/gabpPollTimer）被 stop_game
+// 清掉 timer 后无人唤醒 → 外部手动重启游戏后 GABP 永久不重连（日志实证 15h 无活动）。
+// 定案：不做后台轮询、不盯进程/游戏启停/ports.json；断连检测完全惰性——
+//   每次 GABP 工具调用路径（callGABPTool / get_game_status 的 GABP 探测）先调
+//   gabpBridge.ensureConnected()：已连接零成本直通；断连/未连接则 discover（重读
+//   Player.log 拿最新 token）+ 有限重连，成功即继续执行，失败返回「未连接/未就绪」。
+// 外部手动重启游戏后：下次调工具时 discover 到新 token → 自动连上。无任何后台活动。
+
+// 启动 GABP 桥接：惰性——仅初始化 GabpClient 并注册事件，不主动连接（首连也由
+// ensureConnected 按需触发）；失败不阻断主服务器（spec §6.1）。
 async function startGABPBridge() {
   try {
     if (gabpBridge) return;
@@ -2200,22 +2647,43 @@ async function startGABPBridge() {
     });
     gabpBridge.on('disconnected', (e) => {
       gabpTools = []; // 断连后镜像清单清空，工具列表回落
-      stopGabpPolling();
       const reason = e && e.reason ? e.reason : 'unknown';
-      log('INFO', `GABP 断开（reason=${reason}）`);
-      if (reason !== 'client disconnect') {
-        // 意外断连（游戏退出/重启，token 变化）→ 重新发现+连接（spec §4.3）
-        scheduleDiscoverAndConnect();
-      }
+      log('INFO', `GABP 断开（reason=${reason}）；下次工具调用将惰性重连`);
     });
     gabpBridge.on('error', (e) => {
       const err = e && e.error ? e.error : e;
       log('ERROR', `GABP error: ${err && err.message ? err.message : JSON.stringify(err)}`);
     });
-    log('INFO', `GABP 桥接初始化完成（state=${gabpBridge.state}）`);
+    log('INFO', `GABP 桥接初始化完成（state=${gabpBridge.state}，惰性重连模式）`);
   } catch (e) {
     log('ERROR', `GABP 桥接初始化失败（不阻断主服务器）: ${e && e.message ? e.message : String(e)}`);
   }
+}
+
+// 惰性断连检测 + 重连（工具调用路径入口）：已连接直通；断连/未连接尝试重连。
+// 返回 { ok: true } 或 { ok: false, error }（error 含区分「未发现（游戏未起/未就绪）」
+// 与「发现但连接失败」的可读信息，便于 guidance）。
+async function ensureGabpConnected() {
+  if (!gabpBridge) {
+    return { ok: false, error: 'GABP 桥接未初始化（rimBridge.enabled=false 或初始化失败）' };
+  }
+  if (gabpBridge.isConnected()) return { ok: true };
+  const prevState = gabpBridge.state;
+  const connected = await gabpBridge.ensureConnected();
+  if (connected) return { ok: true };
+  // 区分失败原因（读 bridge 状态：discover null → 未发现；attempts 失败 → 已发现连不上）
+  const st = gabpBridge.state;
+  const lastErr = gabpBridge.lastError || '';
+  if (/未发现|not found/i.test(lastErr) || st === 'idle') {
+    return {
+      ok: false,
+      error: 'GABP 未连接：日志中未发现 RimBridgeServer（游戏未启动，或 RimBridgeServer 尚未就绪——启动后约需 1 分钟）。请先启动/进入游戏后重试。',
+    };
+  }
+  return {
+    ok: false,
+    error: `GABP 连接失败（state=${st}，上次错误: ${lastErr || '未知'}）。RimBridgeServer 可能在启动中，请稍后重试。`,
+  };
 }
 
 // §6.4 结果归一化：保证 tools/call outcome 日志解析（{success:true|false}）与现有调用方契约兼容
@@ -2270,12 +2738,23 @@ async function callAreaAction(endpoint, areaId, toolName) {
 }
 
 // 调用 GABP 工具并归一化（§6.3/§6.4）；filterResult：可选本地结果过滤（tool-cleanup 后无调用方传参，保留兼容）
-// opts：透传给 gabpClient.callTool 的第三参，如 {slow:true} → 慢超时（requestTimeoutMs*2）
+// opts：透传给 gabpClient.callTool 的第三参：
+//   {slow:true}         → 慢超时（requestTimeoutMs*2）
+//   {timeoutMs:n}       → 显式超时（由 longTask/timeoutPolicy 按入参推导）
+//   {inputDerived:true} → 该超时是按入参推导来的，超时属预期内，不计入假死检测
+// 惰性断连自愈：每次 GABP 工具调用先 ensureConnected——已连接零成本直通；断连/未连接
+// （含外部手动重启游戏后 token 滚动）先重连，成功才发请求；连不上返回可读「未连接/未就绪」。
 async function callGABPTool(rbsName, args, filterResult, opts) {
-  if (!gabpBridge || !gabpBridge.isConnected()) {
-    return gabpErrorResponse(`GABP 未连接（state=${gabpBridge ? gabpBridge.state : 'disabled'}），无法调用 ${rbsName}`);
+  const ready = await ensureGabpConnected();
+  if (!ready.ok) {
+    return gabpErrorResponse(`GABP 调用 ${rbsName} 失败：${ready.error}`);
   }
-  const res = await gabpBridge.callTool(rbsName, args || {}, opts || {});
+  if (!gabpBridge) {
+    // 测试模式下（UESD_MCP_NO_START=1）桥接未初始化，给可读错误而不是 TypeError
+    return gabpErrorResponse(`GABP 调用 ${rbsName} 失败：GABP 桥接未初始化（rimBridge.enabled=false 或尚未连接）`);
+  }
+  const callOpts = opts || {};
+  const res = await gabpBridge.callTool(rbsName, args || {}, callOpts);
   if (res && res.ok) {
     gabpConsecutiveTimeout = 0; // 成功响应重置超时计数
     let data = res.result;
@@ -2287,14 +2766,20 @@ async function callGABPTool(rbsName, args, filterResult, opts) {
   // 透传 gabpClient 的错误（AuthenticationFailed / SessionNotEstablished 等语义）
   const err = res && res.error ? res.error : { code: -32603, message: String(res) };
   const errMsg = String((err && err.message) || err || '');
-  // GABP 假死检测：tools/call 请求超时（RimBridge 不响应但 TCP 未断）连续达阈值 -> 主动断开重连
-  if (/超时/.test(errMsg) || /-32001/.test(errMsg)) {
+  // GABP 假死检测：tools/call 请求超时（RimBridge 不响应但 TCP 未断）连续达阈值 -> 主动断开重连。
+  // 例外：入参推导出来的长档超时（如 play_for{durationMs:600000}）是预期内的——若它也计数，
+  // 阈值一到就 forceReconnect，会打断正在跑的长任务，且调用方会误判为 RimBridge 假死。
+  const isTimeout = /超时/.test(errMsg) || /-32001/.test(errMsg);
+  if (isTimeout && callOpts.inputDerived === true) {
+    log('DEBUG', `GABP 长档超时（预期内，不计入假死检测）：${rbsName}`);
+  } else if (isTimeout) {
     gabpConsecutiveTimeout++;
     if (gabpConsecutiveTimeout >= GABP_TIMEOUT_RECOVER_THRESHOLD) {
-      log('WARN', `GABP 连续 ${gabpConsecutiveTimeout} 次 tools/call 超时，判定 RimBridge 假死，主动断开并重新发现连接`);
+      log('WARN', `GABP 连续 ${gabpConsecutiveTimeout} 次 tools/call 超时，判定 RimBridge 假死，强制重连`);
       gabpConsecutiveTimeout = 0;
-      if (gabpBridge) { try { gabpBridge.disconnect(); } catch (e) { log('WARN', `GABP 断开异常: ${e.message}`); } }
-      scheduleDiscoverAndConnect();
+      if (gabpBridge) {
+        try { gabpBridge.forceReconnect(); } catch (e) { log('WARN', `GABP 强制重连异常: ${e.message}`); }
+      }
     } else {
       log('DEBUG', `GABP 请求超时计数 ${gabpConsecutiveTimeout}/${GABP_TIMEOUT_RECOVER_THRESHOLD}（${rbsName}）`);
     }
@@ -2324,12 +2809,87 @@ const AGG_META_TOOLS = [
   { name: 'mcp_help', description: '[元工具] 多级菜单查询工具用法：无参返回一级概览（6 个类别及计数）；传 path 逐级深入（如 path:"bridge/lua_script"、path:"game_control/game/gameplay/camera"）返回子组计数或工具列表；传 tool 返回单个工具的详细说明（参数schema/前置条件/调用示例/易错提示）。始终可用。', inputSchema: { type: 'object', properties: { tool: { type: 'string', description: '要查询的工具名（省略则返回菜单概览/子组）' }, path: { type: 'string', description: '菜单路径，/ 分隔（如 "bridge/lua_script"、"game_control/game/gameplay/debug_action"）' } }, additionalProperties: false } }
 ];
 
+// ========== 地图坐标光标（UEMapMarker） ==========
+// 用途：AI 报坐标时在地图上打一个可见光标 —— 把「(123, 45)」这种数字变成玩家一眼能看到的位置。
+// 视觉 = 自研 shader（ShaderProject/Assets/Shader/UECoordCursor.shader，AssetBundle 见
+// AssetBundles/uecoordcursor）：炼狱魔王炮（Diabolus 地狱球炮）风格的准星 + 雷达扫描 + 声纳脉冲，
+// 颜色由 _Color 完全控制。
+// 为什么不用游戏内置的 Mote_HellsphereCannon_Target：那个 shader 虽然声明了 _Color，像素着色器
+// 却从不读取它（输出恒为 ScanTex*ScanMask.r + MainTex），颜色烘焙在贴图里，**无法换色**。
+// action 取值域见文件上方的 MAP_MARKER_ACTIONS（在 TOOLS.push 之前声明）
+
+// 统一响应整形：失败时把 errorCode 一起吐出来，成功时直接给 data
+function mapMarkerResponse(r) {
+  if (!r || r.success !== true) {
+    const code = r && r.errorCode ? `（${r.errorCode}）` : '';
+    const extra = r && r.guidance ? `\n${r.guidance}` : '';
+    return {
+      content: [{ type: 'text', text: `❌ 坐标光标操作失败${code}: ${(r && r.error) || '未知错误'}${extra}` }],
+      isError: true
+    };
+  }
+  return { content: [{ type: 'text', text: JSON.stringify(r.data, null, 2) }] };
+}
+
 // ========== mcp_help 元数据（add-mcp-introspection-tool spec） ==========
 // 类别标注：system / unityexplorer / game_control（原 rimapi+debugaction 并入）/ mono(由 MONO_DEBUG_TOOL_NAMES 判定) / meta；
 // GABP 镜像（rimworld.*/rimbridge.*）由 isGabpMirrorName 兜底判定为 bridge（tool-menu-hierarchy spec）
+// ========== 隐藏工具（easter egg：不引导存在，仅显式按名调用） ==========
+// 热重载桥当前版本**不能满足需求**（字段布局变化/静态状态/泛型/迭代器状态机不覆盖），
+// 按决策先留着备将来用，但：
+//   - 从 mcp_help 菜单/路径浏览、agg_list_tools 列表中**一律隐藏**（不引导其存在）；
+//   - 只有明确按名调用（agg_call_tool { tool: "hotreload_apply", ... }）或显式查询
+//     （mcp_help tool="hotreload_apply"）才可达；
+//   - 任何一次调用/查询的响应都必须附带局限警告（见 hotreloadWrap）。
+const CONCEALED_TOOL_PREFIXES = ['hotreload_'];
+function isConcealedTool(name) {
+  const n = String(name || '');
+  return CONCEALED_TOOL_PREFIXES.some(p => n.startsWith(p));
+}
+
+// 使用该工具前必须知道的边界（每次响应都会附带，不依赖调用方自觉查阅）
+const HOTRELOAD_LIMITATIONS = [
+  '字段布局变化不覆盖：类型增删/改名/改类型字段 → 该类型本轮整体不重载（原子性保证不出现半新半旧），'
+    + '需重启，或把改动逻辑外移到普通方法 / 用侧表（ConditionalWeakTable）存新状态',
+  '静态字段不延续：detour 后访问的是新程序集影子类型的静态字段（零初始化），旧静态状态不会迁移',
+  '不覆盖范围：开放泛型类型的方法、编译器生成状态机（迭代器/异步）的成员、字段集合相同仅调换声明顺序的类型',
+  '程序集不卸载：每轮重载驻留一个副本（reloadCount 可见），大量重载后建议重启',
+  '本工具不重载自身（UELoader.dll）：本模组改动仍需重启游戏',
+];
+
+// 隐藏工具的响应包装：附加实验性标记、局限清单，并把"本轮未生效"的方法数点出来
+function hotreloadWrap(tool, result) {
+  const payload = (result && typeof result === 'object') ? result : { data: result };
+  payload.experimental = true;
+  payload.hiddenTool = true;
+  payload.notice = `实验性隐藏工具 ${tool}：当前版本无法覆盖字段布局变化/静态状态/泛型/迭代器状态机；`
+    + '被跳过的方法**本轮不生效**。仅显式调用可用，请勿在常规流程中依赖。'
+    + '自动监视默认**休眠**（不随 DLL 更换自动生效），需显式 hotreload_watch {enabled:true} 才启用。';
+  payload.limitations = HOTRELOAD_LIMITATIONS;
+  try {
+    const body = payload.data && typeof payload.data === 'object' ? payload.data : payload;
+    const rec = Array.isArray(body.results) && body.results.length ? body.results[0]
+      : (Array.isArray(body.history) && body.history.length ? body.history[body.history.length - 1] : null);
+    if (rec) {
+      const structure = rec.skipStructure || 0;
+      const failed = rec.detourFailed || 0;
+      if (structure > 0 || failed > 0) {
+        payload.notApplied = {
+          skipStructure: structure,
+          skipCompilerGenerated: rec.skipCompilerGenerated || 0,
+          detourFailed: failed,
+          hint: '以上方法本轮**没有换成新代码**：字段布局变化的类型需重启（或改侧表存储）；'
+            + '泛型/状态机成员不在覆盖范围。详见 skippedByType 字段。',
+        };
+      }
+    }
+  } catch (e) { /* 包装失败不影响原响应 */ }
+  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
+}
 const TOOL_CATEGORY = {
   // system
   start_game: 'system', stop_game: 'system', get_game_status: 'system',
+  task_status: 'system', task_cancel: 'system', task_configure: 'system',
   read_rimworld_log: 'system', tail_rimworld_log: 'system', get_game_info: 'system', start_quick_test: 'system',
   // unityexplorer
   inspect_type: 'unityexplorer', get_unityexplorer_status: 'unityexplorer',
@@ -2337,6 +2897,7 @@ const TOOL_CATEGORY = {
   create_hook: 'unityexplorer', toggle_hook: 'unityexplorer', delete_hook: 'unityexplorer',
   list_hooks: 'unityexplorer', execute_csharp_code: 'unityexplorer',
   reset_csharp_console: 'unityexplorer', add_using_directive: 'unityexplorer',
+  hotreload_apply: 'unityexplorer', hotreload_watch: 'unityexplorer', hotreload_status: 'unityexplorer',
   // rimapi（tool-cleanup：已删除 post_camera_change_zoom/post_camera_change_position/get_game_state/get_colonists/post_game_load/post_game_save/post_game_speed/get_version/get_mods_info/post_select/post_deselect）
   // tool-menu-hierarchy：rimapi 18 个并入 game_control 类别（game 下各子组）
   post_stream_start: 'game_control', post_stream_stop: 'game_control', post_stream_setup: 'game_control',
@@ -2347,6 +2908,8 @@ const TOOL_CATEGORY = {
   post_incident_execute: 'game_control', post_order_designate: 'game_control',
   get_colonists_detailed: 'game_control', get_colonist_detailed: 'game_control',
   post_ui_message: 'game_control', post_ui_dialog: 'game_control', post_dev_console: 'game_control',
+  // 地图坐标光标（UE 实现，自研 shader）：game/gameplay/marker
+  post_map_marker: 'game_control',
   // debugaction（tool-cleanup：已删除 list_debug_actions/get_debug_action_detail/execute_debug_action）
   // tool-menu-hierarchy：debugaction 4 个并入 game_control 类别（game/gameplay/debug_action 子组）
   get_debug_action_categories: 'game_control',
@@ -2359,7 +2922,8 @@ const TOOL_CATEGORY = {
 const TOOL_PRECONDITION = {
   start_game: '游戏未运行时可启动；已有 RimWorld 进程运行时会拒绝（端口冲突）',
   stop_game: '游戏运行中',
-  start_quick_test: '游戏已运行（主菜单或游戏中）'
+  start_quick_test: '游戏已运行（主菜单或游戏中）',
+  post_map_marker: '需进入地图（UE 实现，走游戏内 HTTP 服务；不依赖 RIMAPI/GABP）',
 };
 
 // 易错点与调用示例（运行时实测积累）
@@ -2375,11 +2939,34 @@ const TOOL_USAGE_NOTES = {
   get_map_plants: { example: '{ "mapId": 1 }', notes: '查询地图植物；兼容 map_id/mapId/mapID 参数名' },
   get_map_weather: { example: '{ "mapId": 1 }', notes: '查询地图天气；兼容 map_id/mapId/mapID 参数名' },
   get_map_animals: { example: '{ "mapId": 1 }', notes: '查询地图动物；兼容 map_id/mapId/mapID 参数名' },
+  task_status: { example: '{ "taskId": "t-8f31" }', notes: '无参列出全部任务（运行中/已完成/孤儿），传 taskId 看单个。孤儿任务 = MCP 进程曾重启打断，处置方式见返回值 action 字段；游戏若仍在跑，用 rimworld.pause_game{pause:true} 停' },
+  task_cancel: { example: '{ "taskId": "t-8f31" }', notes: '取消后最迟一个采样周期生效，并按任务启动时的 pauseOnFinish（restore/pause/keep）处理暂停状态。MCP 进程已死无法调用时，直接 rimworld.pause_game{pause:true} 亦可停住游戏' },
+  task_configure: { example: '{ "taskId": "t-8f31", "sampleIntervalMs": 1000, "snapshotIntervalMs": 10000 }', notes: '猝发测量用：压采样间隔必须同时压快照间隔，快照间隔需 < 33s（DPA 环形缓冲 2000 格覆盖一圈），否则丢数据；本工具已按阈值强制联动并回报 snapshotIntervalMsCoerced' },
   create_hook: { example: '{ "typeName": "Verse.Pawn", "methodName": "get_Label", "patchType": "Postfix" }', notes: '类型须带命名空间（Verse.Pawn，不是 RimWorld.Pawn 会报 TYPE_NOT_FOUND）；兼容 targetType/targetMethod/hookType 别名；patchCode 为可选自定义代码' },
   post_ui_message: { example: '{ "text": "Hello" }', notes: '参数为 text；兼容 message 别名' },
+  post_map_marker: {
+    example: '{ "x": 123, "z": 45, "color": "red", "label": "敌人集结点" }',
+    notes: '在地图上打一个炼狱魔王炮风格的坐标光标（自研 shader，非内置 mote），玩家左键点击即消除。'
+      + 'x/z 为地图格坐标（智能体报坐标时直接用）；color 支持英文名/#RRGGBB/"r,g,b"，默认 #FF4A1F；'
+      + 'size 默认 8 格；ttl_seconds>0 会自动消失，0/省略则一直留到被点击。'
+      + '不带 id 的 set 会先清掉已有光标（keep_existing:true 可保留）；最多并存 8 个。'
+      + 'clear 不给 id 即清全部；list 查看当前光标；recolor 改色。'
+      + '注意：内置的 Mote_HellsphereCannon_Target shader 声明了 _Color 却不读取它（颜色烘焙在贴图里），'
+      + '所以本工具用的是模组自带的自研 shader（ShaderProject/ + AssetBundles/uecoordcursor）。'
+      // 2026-09-20 补：命中判定会被 UI 遮挡挡住（UEMapMarker 里 GetWindowAt 是刻意保护），
+      // 且经 RimBridge click_cell 派发的点击在目标被遮挡时是"挂起待补投"，不是丢弃。
+      + '命中约束：光标被任何窗口盖住时，那一次点击会被判为"点了 UI"而**不会**消除光标；'
+      + '另外经 rimworld.click_cell 派发的点击在目标被遮挡时会**挂起、待遮挡消失后补投**，'
+      + '所以"点完立刻查没反应"不等于没生效（实测：窗口关掉后两次点击一起落地，看起来像一次点掉多个）。'
+      + '核对点击效果前先用 rimworld.get_ui_state 看 windows 与 mouseObscuredNow，确认目标格未被遮挡。'
+  },
   post_dev_console: { example: '{ "action": "message", "message": "..." }', notes: 'action 可选 message/clear；兼容 console/command 别名' },
   eval: { example: '{ "expression": "this.def.defName", "threadId": 14, "frameIndex": 0 }', notes: 'mono 迷你 C# 语法：this/局部变量/静态类型全名/字面量 + 成员链；不支持算术运算符；需 VM 挂起或自动挂起求值；threadId 可为 0 自动选择' },
-  attach: { example: '{ "port": 56574 }', notes: '游戏调试端口每次运行随机，先调 get_game_status 查看 debugPortFromLog 并传入该端口；mono 调试为一次性会话，detach/断开后如需再次调试需重启调试服务器（McpRimDebug）' },
+  attach: { example: '{ "port": 56574 }', notes: '游戏调试端口每次运行随机，先调 get_game_status 查看 debugPortFromLog 并传入该端口；'
+    + 'attach 失败信息里带 portListening/diagnosis：端口不在监听=代理没起来或端口过期（用 status 的 debugPortFromLog），'
+    + '端口在监听但握手无响应=代理会话槽被前次异常断开占死 → 需重启游戏（勿用裸 TCP 试连该端口，会触发 DWP handshake failed 终止游戏）' },
+  reconnect: { example: '{}', notes: '重连调试会话：端口缺省自动发现（ports.json unityDebugPort → Player.log → 上次会话端点）。'
+    + 'launch 后连接抖动导致 resume 报"未连接"时，先 reconnect 再 resume；也可用 { "port": 56235 } 显式指定端口' },
   post_stream_start: { example: '{ "output_frames": true, "out_dir": "C:/tmp/frames" }', notes: 'RIMAPI 端点 POST /api/v1/stream/start；成功后用 GET /api/v1/stream/status 验证 IsStreaming，未真正拉起返回 STREAM_NOT_READY。可选参数 output_frames(bool)：true 时随流抓帧，把 UDP 推流逐帧流式保存为 JPEG 序列到 out_dir（缺省 MCP/stream-capture/out）；再调 post_stream_stop 即停止抓帧并产出结果' },
   post_stream_stop: { example: '{}', notes: 'RIMAPI 端点 POST /api/v1/stream/stop；若此前 post_stream_start 开启了 output_frames，本调用会自动停止抓帧子进程并返回帧统计（capture 字段）' },
   post_stream_setup: { example: '{ "ip": "127.0.0.1", "port": 5007, "frame_width": 1920, "frame_height": 1080, "fps": 15, "quality": 30 }', notes: 'RIMAPI 端点 POST /api/v1/stream/setup，参数经 JSON body 传递，映射 RIMAPI StreamConfigDto(Address/Port/FrameWidth/FrameHeight/TargetFps/JpegQuality)' },
@@ -2389,16 +2976,27 @@ const TOOL_USAGE_NOTES = {
   find_methods: { example: '{ "query": "Tick", "limit": 50 }', notes: 'query 子串匹配方法名（大小写不敏感），limit 上限 200' },
   // 元工具（usage-hint-on-failure：失败响应自动附加调用范式时使用）
   agg_call_tool: { example: '{ "tool": "get_game_status", "args": {} }', notes: '聚合调用任意工具（含 toolConfig.json 中禁用的工具）：tool 为工具名，args 为该工具参数；单个工具的正确调用范式可经 mcp_help tool=<工具名> 查询' },
-  mcp_help: { example: '{ "tool": "create_hook" }', notes: '传 tool 查询单个工具用法（参数 schema/前置条件/调用示例/易错提示）；无参返回一级概览；传 path 逐级深入子组菜单' }
+  mcp_help: { example: '{ "tool": "create_hook" }', notes: '传 tool 查询单个工具用法（参数 schema/前置条件/调用示例/易错提示）；无参返回一级概览；传 path 逐级深入子组菜单' },
+  hotreload_apply: { example: '{}', notes: '空参=检测全部已变化 DLL 并重打；modId 可选（packageId）。VM 挂起（needResume=true）时会拒绝并提示先 resume。改 XML/Defs 用 rimworld.execute_debug_action path="Actions\\Hot reload Defs" 而非本工具' },
+  hotreload_watch: { example: '{ "enabled": true }', notes: '默认 **off（休眠）**：隐藏实验工具，不随 DLL 更换自动生效；显式 enabled:true 才启用自动重载' },
+  hotreload_status: { example: '{}', notes: 'history[].affectedMethods 供断点懒清理：break_* 工具会自动清掉命中最近重打方法列表的失效断点' }
 };
 
 // ========== 多级菜单（tool-menu-hierarchy spec） ==========
-// 一级类别 6 个：system / unityexplorer / mono / meta / bridge / game_control（合计 183 = 7+11+19+3+16+127）
-// TOOL_SUBGROUP：143 个工具 → 叶子子组路径（键为实际工具名：GABP 镜像带 rimworld./rimbridge. 前缀，
-// rimapi 与 debugaction 原生工具无前缀）。bridge = 16（lua_script 7 + ops 6 + wait 3）；
-// game_control = 127（game 下 9 子组；gameplay 下 8 孙组，合计 64）。
-// 类别归属见 toolCategory()：镜像 → bridge；TOOL_SUBGROUP 其余 → game_control。
+// 一级类别 6 个：system / unityexplorer / mono / meta / bridge / game_control。
+// 【2026-09-20 修复】这里**不要手写任何计数**：历史上手写的"合计 184 = 7+11+19+3+16+128"既与实现漂移，
+// 又被当成"工具总数"引用（README 也跟着写 184）。计数一律由 menuUniverseNames() / menuCountByCategory()
+// 现算——它按"每个名字恰好归一个桶"归属（menuCategoryOf）：有 TOOL_SUBGROUP → 取路径首段；
+// 否则用 toolCategory()。当前实测（GABP 未连接时）：菜单可见 188 = system 7 + unityexplorer 11 +
+// mono 20 + meta 3 + bridge 16 + game_control 131；连上 GABP 后**可调用**总数为 191（本地 70 + 121 镜像）。
+// TOOL_SUBGROUP：工具名 → 叶子子组路径（GABP 镜像带 rimworld./rimbridge. 前缀，原生工具无前缀）；
+// 非叶子子组（如 game_control/game/gameplay）的计数按前缀聚合，等于其孙组之和。
+// 注意：TOOL_SUBGROUP 里可能存在源码已无定义的陈旧键——menuUniverseNames() 只接受"注册表登记过"的名字，它们不会进菜单/计数。
 const TOOL_SUBGROUP = {
+  // ===== unityexplorer/hotreload 二级子组（3，热重载桥）=====
+  'hotreload_apply': 'unityexplorer/hotreload',
+  'hotreload_watch': 'unityexplorer/hotreload',
+  'hotreload_status': 'unityexplorer/hotreload',
   // ===== bridge 一级类别（16，rimbridge.*）=====
   // lua_script（7）
   'rimbridge.compile_lua': 'bridge/lua_script',
@@ -2420,7 +3018,11 @@ const TOOL_SUBGROUP = {
   'rimbridge.wait_for_long_event_idle': 'bridge/wait',
   'rimbridge.wait_for_operation': 'bridge/wait',
 
-  // ===== game_control 一级类别（127，game 下 9 子组）=====
+  // ===== game_control 一级类别（127，game 下 10 子组）=====
+  // long_task（3，2026-09-17）：长任务查询/取消/改节奏
+  task_status: 'game_control/game/long_task',
+  task_cancel: 'game_control/game/long_task',
+  task_configure: 'game_control/game/long_task',
   // state（19：18 镜像 + post_incident_execute）
   'rimworld.pause_game': 'game_control/game/state',
   'rimworld.play_for': 'game_control/game/state',
@@ -2515,6 +3117,8 @@ const TOOL_SUBGROUP = {
   'search_debug_actions': 'game_control/game/gameplay/debug_action',
   'get_map_structure': 'game_control/game/gameplay/debug_action',
   'search_map_structure': 'game_control/game/gameplay/debug_action',
+  // ===== marker（1，地图坐标光标：UE 实现，自研 shader）=====
+  'post_map_marker': 'game_control/game/gameplay/marker',
 
   // arch（14：13 镜像 + post_order_designate）
   'rimworld.list_architect_categories': 'game_control/game/arch',
@@ -2580,9 +3184,9 @@ const MENU_CATEGORIES = ['system', 'unityexplorer', 'mono', 'meta', 'bridge', 'g
 // bridge 二级子组（3）
 const MENU_BRIDGE_SUBGROUPS = ['lua_script', 'ops', 'wait'];
 // game_control → game 下 9 子组
-const MENU_GAME_CONTROL_SUBGROUPS = { game: ['state', 'gameplay', 'arch', 'mods', 'dpa', 'debugmenu', 'colonist', 'stream', 'world'] };
-// gameplay 下 8 孙组
-const MENU_GAMEPLAY_SUBGROUPS = ['camera', 'interact', 'query', 'selection', 'ui_panel', 'ui_notice', 'ui_dialog', 'debug_action'];
+const MENU_GAME_CONTROL_SUBGROUPS = { game: ['state', 'gameplay', 'arch', 'mods', 'dpa', 'debugmenu', 'colonist', 'stream', 'world', 'long_task'] };
+// gameplay 下 9 孙组（+marker：地图坐标光标）
+const MENU_GAMEPLAY_SUBGROUPS = ['camera', 'interact', 'query', 'selection', 'ui_panel', 'ui_notice', 'ui_dialog', 'debug_action', 'marker'];
 
 // 旧名 → 新路径（BREAKING 迁移提示）
 const MENU_PATH_MIGRATIONS = {
@@ -2592,14 +3196,9 @@ const MENU_PATH_MIGRATIONS = {
   'game_control/debugaction': 'game_control/game/gameplay/debug_action'
 };
 
-// 子组工具计数：value 等于 prefix 或以 prefix/ 开头（供非叶子子组聚合计数）
-function subgroupToolCount(prefix) {
-  let n = 0;
-  for (const v of Object.values(TOOL_SUBGROUP)) {
-    if (v === prefix || v.startsWith(prefix + '/')) n++;
-  }
-  return n;
-}
+// 子组工具计数：见下方 menuCountBySubgroup()（2026-09-20 起唯一实现）。
+// 旧版在此处直接遍历静态 TOOL_SUBGROUP 计数，会把源码里已不存在的陈旧键也算进去 → 概览虚增（194 vs 191）。
+// 现改为基于 menuUniverseNames() 的同一实现，语义保持"value 等于 prefix 或以 prefix/ 开头"的前缀聚合。
 
 // 解析多级菜单路径（/ 分隔）。返回：
 // { type:'subgroup', path, name, children:[{name,path,count}] } 或
@@ -2618,6 +3217,8 @@ function resolveMenuPath(pathStr) {
     return { error: `未知一级类别: ${category}；可用：${MENU_CATEGORIES.join('/')}` };
   }
   // 叶子类别（无子组）：system/unityexplorer/mono/meta → 工具列表
+  // 注意：unityexplorer 下的热重载桥（hotreload_*）是**隐藏工具**，不在任何菜单/列表中呈现
+  // （见文件顶部 isConcealedTool）；只可经 agg_call_tool 按名调用或 mcp_help tool=... 显式查询。
   if (['system', 'unityexplorer', 'mono', 'meta'].includes(category)) {
     if (segs.length === 1) return { type: 'tools', path: category, name: category, filter: { category } };
     return { error: `${category} 为叶子类别，无更细路径；完整路径: ${category}` };
@@ -2675,11 +3276,14 @@ function resolveMenuPath(pathStr) {
   return { error: `game_control/game/gameplay/${gp} 为叶子孙组，无更细路径；完整路径: game_control/game/gameplay/${gp}` };
 }
 
-// 工具名 → 启用状态与描述首行（叶子工具列表用；GABP 镜像未连接时 entries 无对应项，用占位描述）
+// 工具名 → 可用性三态与描述首行（叶子工具列表用；GABP 镜像未连接时 entries 无对应项，用占位描述，
+// 并明确标注"当前不可用 + 原因"——旧版一律标 [禁用]，让调用方以为"被策略禁用"而非"提供方没起"）
 function toolListLine(name) {
   const t = allToolEntries().find(e => e.name === name);
-  const desc = t ? String(t.description || '') : (TOOL_SUBGROUP[name] ? '（GABP 镜像，连接 RimBridgeServer 后自动出现）' : '');
-  return `- [${toolEnabledNow(name) ? '启用' : '禁用'}] ${name} ${String(desc).split(/\r?\n/)[0]}`;
+  const desc = t ? String(t.description || '') : (TOOL_SUBGROUP[name] ? '（RimBridgeServer 镜像工具）' : '');
+  const a = toolAvailability(name);
+  const suffix = a.state === 'exposed' ? '' : `（${a.reason}）`;
+  return `- ${toolAvailabilityTag(name)} ${name} ${String(desc).split(/\r?\n/)[0]}${suffix}`;
 }
 
 // 构建菜单节点输出（subgroup → 子组列表；tools → 工具名列表）
@@ -2698,20 +3302,14 @@ function buildMenuNode(node) {
     };
     return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
   }
-  // type === 'tools'
-  const names = allToolEntries()
-    .filter(t => {
-      if (node.filter && node.filter.category) return toolCategory(t.name) === node.filter.category;
-      if (node.filter && node.filter.subgroup) return TOOL_SUBGROUP[t.name] === node.filter.subgroup;
+  // type === 'tools'：与概览计数共用 menuUniverseNames() + menuCategoryOf()，避免"概览说 N、叶子只有 M"
+  // 或"某个工具在概览里算 system、在 system 叶子里又出现一次"（2026-09-20 修复）
+  const names = menuUniverseNames()
+    .filter((n) => {
+      if (node.filter && node.filter.category) return menuCategoryOf(n) === node.filter.category;
+      if (node.filter && node.filter.subgroup) return TOOL_SUBGROUP[n] === node.filter.subgroup;
       return false;
-    })
-    .map(t => t.name);
-  // 叶子节点应覆盖 TOOL_SUBGROUP 全量（GABP 未连接时 entries 缺镜像名，从 TOOL_SUBGROUP 补全）
-  if (node.filter && node.filter.subgroup) {
-    for (const [k, v] of Object.entries(TOOL_SUBGROUP)) {
-      if (v === node.filter.subgroup && !names.includes(k)) names.push(k);
-    }
-  }
+    });
   names.sort();
   const payload = {
     level: node.path.split('/').length,
@@ -2760,6 +3358,290 @@ function allToolEntries() {
   return entries;
 }
 
+// ========== 菜单/计数统一口径（2026-09-20 修复）==========
+// 修复前的三套口径互相矛盾（实测概览 194 vs 工具查询 191）：
+//   ① 概览的 bridge/game_control 计数走静态菜单表 TOOL_SUBGROUP 的条目数（含源码里已不存在的陈旧键）；
+//   ② 概览的其余类别走 allToolEntries().filter()；
+//   ③ 叶子列表还会无条件从 TOOL_SUBGROUP 补名字。
+// 现在统一到 menuUniverseNames()：可调用工具集（allToolEntries，含 mono 占位）∪ 注册表登记过的菜单键
+// （供 GABP 离线时仍能看到镜像名并标"提供方未就绪"），再排除隐藏工具与 _reserved 预留项。
+// 不改动 TOOL_SUBGROUP 的导航结构，但"名字已不在注册表里"的陈旧键不会再进入菜单/计数。
+function menuUniverseNames() {
+  const names = new Set(allToolEntries().map(t => t.name));
+  for (const n of Object.keys(TOOL_SUBGROUP)) {
+    const registered = Object.prototype.hasOwnProperty.call(toolConfig.tools, n);
+    if (registered && !toolConfig.reserved.has(n)) names.add(n);
+  }
+  return [...names].filter(n => !isConcealedTool(n));
+}
+
+// 菜单归属：每个名字**恰好**归入一个一级类别，避免重复计数。
+// 历史 bug（194 vs 191）：旧的概览对 bridge/game_control 用静态 TOOL_SUBGROUP 计数、其余用 toolCategory() 计数，
+// 而 task_status/task_cancel/task_configure 既按 toolCategory() 落在 system、又通过 subgroup 落在
+// game_control/game/long_task 里 —— 被数了两遍，虚增 3 个。
+function menuCategoryOf(name) {
+  const sub = TOOL_SUBGROUP[name];
+  if (sub) return sub.split('/')[0];   // bridge / game_control（菜单按子组导航）
+  return toolCategory(name);           // system / unityexplorer / mono / meta（叶子类别）
+}
+
+function menuCountByCategory(category) {
+  return menuUniverseNames().filter(n => menuCategoryOf(n) === category).length;
+}
+
+function menuCountBySubgroup(subgroupPath) {
+  // 前缀聚合：非叶子子组（如 game_control/game/gameplay）本身没有直属工具，
+  // 其计数应等于其所有孙组的和（旧实现 subgroupToolCount 就是这个语义，必须保留）。
+  return menuUniverseNames().filter(n => {
+    const v = TOOL_SUBGROUP[n];
+    return v === subgroupPath || (!!v && v.startsWith(subgroupPath + '/'));
+  }).length;
+}
+
+// 旧函数保留为薄封装，避免历史调用点语义漂移（全部改为走菜单宇宙）
+function subgroupToolCount(prefix) {
+  return menuCountBySubgroup(prefix);
+}
+
+// ========== 能力提供方 / 可用性归因（2026-09-19 工具链问题记录 §3、§4） ==========
+// 背景：清单与菜单里会出现 rimworld.* 镜像名（GABP 连接时注册、或从 TOOL_SUBGROUP 补全），
+// 一旦 GABP 断开，这些名字就不在调用集中了；调用方按清单去依赖它们，只会反复撞
+// "未知工具: rimworld.xxx"，而"相似工具"里没有它自己 —— 看起来像名字写错，实际是**提供方没启用**。
+// 这里把「名字对不对」和「提供方在不在」彻底分开表述。
+
+// 能力 → 提供方模组（packageId 与 ModsConfig/config 里的一致）。供不可用归因与 get_game_status 的能力映射共用。
+const CAPABILITY_PROVIDERS = [
+  { key: 'ue', label: 'UnityExplorer / 游戏内 HTTP 服务', packageId: 'UESDdebuger.debug.unityexplorer', enables: 'execute_csharp_code、inspect_type、start_quick_test 等本模组工具' },
+  { key: 'mono', label: 'mono 软调试（McpRimDebug 桥接）', packageId: null, enables: 'attach/break_*/eval/step 等 20 个调试工具（由 MCP 内嵌进程提供，不依赖游戏模组）' },
+  { key: 'gabp', label: 'RimBridgeServer（GABP 镜像工具）', packageId: 'brrainz.rimbridgeserver', enables: 'rimworld.* / rimbridge.* 全部镜像（load_game、execute_debug_action、dpa_* 等）' },
+  { key: 'rimapi', label: 'RIMAPI（游戏数据）', packageId: 'redeyedev.rimapi', enables: 'get_map_*、get_colonist* 等 RIMAPI 数据接口' },
+  { key: 'dpa', label: 'Dubs Performance Analyzer', packageId: 'dubwise.dubsperformanceanalyzer.steam', enables: 'rimworld.dpa_* 采样工具' },
+];
+
+// 已移除/改名的镜像名 → 正确用法（避免调用方在旧名字上打转）
+const REMOVED_MIRROR_HINTS = {
+  'rimbridge.get_bridge_status': 'bridge 状态已并入原生 get_game_status（不需要 GABP）',
+  'rimbridge.ping': '探活请用原生 get_game_status / 原生 get_game_info',
+  'rimworld.get_game_info': '请用原生 get_game_info（config + GABP + RIMAPI 三源合并，不需要 GABP）',
+};
+
+// 该名字是不是"GABP 镜像系列"的已知名字（toolConfig / 菜单收录过），与"当前是否注册"无关
+function isKnownGabpMirrorName(name) {
+  if (!isGabpMirrorName(name)) return false;
+  if (gabpToolNames().has(name)) return true;
+  if (toolConfig && toolConfig.tools && Object.prototype.hasOwnProperty.call(toolConfig.tools, name)) return true;
+  if (TOOL_SUBGROUP[name]) return true;
+  return false;
+}
+
+// 单个工具的可用性（三态；菜单与 agg_list_tools 共用同一判定，避免两处口径不一致）
+//   已暴露        —— 直接出现在工具列表，可直接调用
+//   经 agg_call_tool 可用 —— 未直接暴露（压缩列表），但仍可调用
+//   当前不可用    —— 提供方未就绪（GABP 未连接 / mono 桥未就绪/版本旧）→ 名字对但调不到（§3 问题记录的三态）
+// monoList 可注入（单测用）：默认取桥接当前清单 monoTools。
+function toolAvailability(name, monoList = monoTools) {
+  if (isGabpMirrorName(name) && !gabpToolNames().has(name)) {
+    const st = gabpBridge ? gabpBridge.state : 'disabled';
+    return { state: 'unavailable', reason: gabpBridge && gabpBridge.isConnected()
+      ? 'RimBridgeServer 已连接但未暴露该工具'
+      : `GABP 未连接(state=${st})` };
+  }
+  if (MONO_DEBUG_TOOL_NAMES.has(name) && !monoList.some(t => t.name === name)) {
+    // 真机验收时抓到的形态：桥接**就绪**，但便携副本 McpRimDebug 是旧版 → 新工具（如 reconnect）不在其清单里。
+    // 这时报"桥接未就绪"是错的，得让调用方知道是"版本旧、需重新发布"。
+    return {
+      state: 'unavailable',
+      reason: monoList.length > 0
+        ? 'McpRimDebug 桥接已就绪，但该工具不在其工具清单里（桥接副本版本较旧：重新 publish McpRimDebug 并重启 MCP 后可用）'
+        : 'mono 调试桥接未就绪（McpRimDebug 未启动）'
+    };
+  }
+  return isToolEnabled(name)
+    ? { state: 'exposed', reason: '已暴露，可直接调用' }
+    : { state: 'agg', reason: '经 agg_call_tool 调用' };
+}
+
+function toolAvailabilityTag(name) {
+  const a = toolAvailability(name);
+  if (a.state === 'exposed') return '[已暴露]';
+  if (a.state === 'agg') return '[经 agg_call_tool 可用]';
+  return `[当前不可用：${a.reason}]`;
+}
+
+// ---------- DPA 采样互斥（2026-09-19 工具链问题记录 §5） ----------
+// 现象：profiling 进行中再发一次 rimworld.dpa_patch_methods（中途追加目标）→ DPA 打
+//   [Analyzer] [CRITICAL] Caught analyzer trying to begin a new update cycle before finishing the previous one
+// 且**同窗口快照会缺行**（缺行 ≠ 该行归零，会污染采样结论）。RimBridgeServer/DPA 侧不拦，这里在 MCP 入口拦。
+// 状态来源：本层自己记账（patch_methods 成功 → 本轮进行中；dpa_stop / dpa_cleanup 成功 → 本轮结束；
+// 任何会换游戏会话的操作（start/stop_game、load_game、进/回主菜单）→ 状态随会话失效而清零）。
+let dpaRoundActive = false;
+
+// 会终止/更换游戏会话的操作：DPA 的插桩与 profiling 状态随之消失，本层记账一并清零
+const DPA_STATE_RESET_TOOLS = new Set([
+  'rimworld.dpa_stop', 'rimworld.dpa_cleanup',
+  'rimworld.load_game', 'rimworld.load_game_ready',
+  'rimworld.start_debug_game', 'rimworld.start_debug_game_ready',
+  'rimworld.go_to_main_menu',
+]);
+
+// dpa_patch_methods 前置互斥检查：返回 null=放行；否则给出可读拒绝（含逃逸口 force:true）
+function dpaPatchGuard(args) {
+  if (!dpaRoundActive) return null;
+  if (args && args.force === true) return null;
+  return {
+    errorCode: 'DPA_ROUND_ACTIVE',
+    message: 'rimworld.dpa_patch_methods 被拒绝：上一轮 patch_methods 仍在 profiling 中——期间再 patch 会触发 DPA '
+      + '[Analyzer] [CRITICAL]（begin a new update cycle before finishing the previous one），并让同窗口快照缺行（缺行 ≠ 归零）。',
+    guidance: '先结束本轮再追加目标：rimworld.dpa_stop（停止 profiling）或 rimworld.dpa_cleanup（清掉插桩）→ 再次 patch_methods；'
+      + '若确知要中途追加、并接受快照缺行风险，传 {"force": true}（该参数不会转发给游戏）。',
+  };
+}
+
+// 派发后按调用结果更新 DPA 记账（只认 success === true 的调用；解析失败不动状态）
+function noteDpaStateAfterCall(name, res) {
+  if (name !== 'rimworld.dpa_patch_methods' && !DPA_STATE_RESET_TOOLS.has(name)) return;
+  let ok = false;
+  try {
+    const text = res && res.content && res.content[0] && res.content[0].text;
+    ok = text ? JSON.parse(text).success === true : false;
+  } catch (e) { return; }
+  if (!ok) return;
+  if (name === 'rimworld.dpa_patch_methods') dpaRoundActive = true;
+  else dpaRoundActive = false;
+  log('DEBUG', `DPA 记账：${name} 成功 → dpaRoundActive=${dpaRoundActive}`);
+}
+
+// 能力 → 提供方 → 是否加载 → 当前是否可用（2026-09-19 工具链问题记录 §4 的建议：
+// 调用方不必自己拼 activePackageIds 与 ModsConfig，就能一眼判定"这个能力为什么不好使"）。
+// 纯函数，便于单测（输入可注入）。activePackageIds 为 null 表示读不到（游戏侧状态端点不可用）。
+function buildCapabilityReport(input) {
+  const src = input || {};
+  const ids = Array.isArray(src.activePackageIds) ? src.activePackageIds.map(s => String(s).toLowerCase()) : null;
+  const has = (pkg) => !!ids && pkg != null && ids.includes(String(pkg).toLowerCase());
+  const rows = [];
+  for (const p of CAPABILITY_PROVIDERS) {
+    const loaded = p.packageId === null ? null : (ids === null ? null : has(p.packageId));
+    let usable = false;
+    let note = null;
+    if (p.key === 'ue') {
+      // 本模组这一档必须区分两件事（真机验收时发现旧写法把两者混为一谈，等于又制造了一次"UE 未就绪"式误判）：
+      //   ueHttpReachable（游戏内状态端点可达；主菜单下就应为 true）→ 决定 start_quick_test 等能否用；
+      //   ueAvailable（UE 界面就绪 uiReady）→ 只有进图后才可能 true，主菜单下为 false 属正常。
+      const reachable = src.ueHttpReachable === true;
+      usable = reachable;
+      if (ids === null) note = '读不到激活模组列表（游戏侧状态端点不可用，通常意味着本模组未加载）';
+      else if (loaded === false) note = '未在激活列表：需在游戏内启用本模组，否则 UE/游戏内 HTTP 能力（含 start_quick_test）全部不可用';
+      else if (!reachable) note = '模组已加载但游戏内 HTTP 服务不可达：看 start_quick_test 的报错（含端口与 ports.json 归因）';
+      else if (src.ueAvailable !== true) note = '游戏内 HTTP 服务可用（start_quick_test 等主菜单即可用）；UE 界面/控制台需进入地图后才初始化，主菜单下 ue_available=false 属正常';
+    } else if (p.key === 'mono') {
+      usable = src.monoBridgeReady === true;
+      if (!usable) note = 'mono 调试桥接未就绪（McpRimDebug 未启动/初始化失败，见 MCP 日志）';
+    } else if (p.key === 'gabp') {
+      usable = src.gabpConnected === true;
+      if (!usable) note = loaded === false
+        ? 'RimBridgeServer 未在激活列表 → rimworld.*/rimbridge.* 镜像工具全部不可调用（名字正确，缺提供方）'
+        : `GABP 未连接（state=${src.gabpState ?? 'unknown'}）`;
+    } else if (p.key === 'rimapi') {
+      usable = src.rimapiAvailable === true;
+      if (!usable && loaded === false) note = 'RIMAPI 未在激活列表 → get_map_*/get_colonist* 等数据接口不可用';
+    } else if (p.key === 'dpa') {
+      usable = src.gabpConnected === true && loaded !== false;
+      if (!usable) note = loaded === false
+        ? 'Dubs Performance Analyzer 未在激活列表 → rimworld.dpa_* 无数据'
+        : 'dpa_* 需经 GABP 调用，当前 GABP 未连接';
+      else if (src.dpaRoundActive === true) note = '本轮 profiling 进行中：再次 dpa_patch_methods 会被 MCP 拒绝（先 stop/cleanup）';
+    }
+    rows.push({
+      capability: p.label,
+      provider: p.packageId,
+      providerLoaded: loaded,
+      usable,
+      enables: p.enables,
+      ...(note ? { note } : {}),
+    });
+  }
+  return rows;
+}
+
+// 已知镜像名但当前不可调用 → 精确归因；不认识的名字/已注册的名字返回 null（走通用未知工具/正常派发）
+function gabpMirrorUnavailable(name) {
+  if (typeof name !== 'string') return null;
+  // 已移除/改名的镜像名优先判定：它们已不在 toolConfig/TOOL_SUBGROUP 里，但旧调用方仍可能用，
+  // 必须给出"改用哪个原生工具"，而不是笼统的"未知工具"。
+  if (REMOVED_MIRROR_HINTS[name]) {
+    return {
+      errorCode: 'GABP_MIRROR_REMOVED',
+      message: `${name} 是已移除/改名的 GABP 镜像名`,
+      guidance: REMOVED_MIRROR_HINTS[name],
+    };
+  }
+  if (!isKnownGabpMirrorName(name)) return null;
+  if (gabpToolNames().has(name)) return null;
+  const connected = !!(gabpBridge && gabpBridge.isConnected());
+  const state = gabpBridge ? gabpBridge.state : 'disabled';
+  return {
+    errorCode: 'GABP_MIRROR_UNAVAILABLE',
+    module: 'RimBridgeServer（GABP）',
+    packageId: 'brrainz.rimbridgeserver',
+    state,
+    message: connected
+      ? `${name} 不在 RimBridgeServer 当前暴露的工具清单里（已连接，但该能力未注册：可能是 RimBridgeServer 版本不含此工具，或被移除集过滤）`
+      : `${name} 是 RimBridgeServer（GABP）镜像工具，当前不在可调用集中：GABP 未连接（state=${state}）`,
+    guidance: '**名字本身没错**，缺的是提供方：需要在游戏内启用 brrainz.rimbridgeserver，并等 MCP 连上'
+      + '（首次连接约需 1 分钟；游戏重启后 token 滚动会自动重连）。GABP 未连接时 rimworld.* / rimbridge.* 镜像全部不可调用；'
+      + '当前可调用集见 agg_list_tools（其输出会显式说明哪些镜像因提供方未就绪而缺席）。',
+  };
+}
+
+// agg_list_tools 输出：只列"当前可调用"的工具，并把标记语义写明（旧版的 [禁用] 会让人误以为"不可调用"）
+function aggListToolsText() {
+  const gabpConnected = !!(gabpBridge && gabpBridge.isConnected());
+  const gabpState = gabpBridge ? gabpBridge.state : 'disabled';
+  const lines = [];
+  lines.push('# 本列表 = 当前**可调用**的工具集（[已暴露]=直接出现在工具列表；[经 agg_call_tool 可用]=按名经聚合器调用）');
+  lines.push('# 提供方状态：'
+    + `GABP/RimBridgeServer=${gabpConnected ? '已连接' : `未连接(state=${gabpState})`}；`
+    + `mono 调试桥接=${monoTools.length > 0 ? '就绪' : '未就绪'}`);
+  if (!gabpConnected) {
+    const missing = Object.keys(toolConfig && toolConfig.tools ? toolConfig.tools : {})
+      .filter(n => isGabpMirrorName(n) && !gabpToolNames().has(n));
+    lines.push(`# 注意：GABP 未连接 → ${missing.length} 个 rimworld.*/rimbridge.* 镜像工具当前**不可调用**`
+      + (missing.length ? `（例：${missing.slice(0, 6).join('、')}${missing.length > 6 ? ' 等' : ''}）` : '')
+      + '。这些名字是正确的，失败原因是提供方模组未启用/未连接，不是名字写错；'
+      + '对应能力说明见 mcp_help tool=<名字> 的 precondition。');
+  }
+  // 隐藏工具（热重载桥等）一律不出现在可调用集清单里
+  const all = [...TOOLS, ...monoTools, ...AGG_META_TOOLS, ...gabpTools].filter(t => !isConcealedTool(t.name));
+  lines.push(`# 共 ${all.length} 个`);
+  for (const t of all) {
+    const extra = isGabpMirrorName(t.name) ? '（GABP 镜像）' : '';
+    lines.push(`- ${toolAvailabilityTag(t.name)} ${t.name}${extra} ${String(t.description || '').split(/\r?\n/)[0]}`);
+  }
+  return lines.join('\n');
+}
+
+// 未知工具的可读响应：区分「名字写错」与「提供方未就绪/能力已移除」，并给出相似工具建议
+function unknownToolText(target) {
+  const mirror = gabpMirrorUnavailable(target);
+  if (mirror) {
+    return JSON.stringify({
+      success: false,
+      errorCode: mirror.errorCode,
+      tool: target,
+      message: mirror.message,
+      guidance: mirror.guidance,
+      suggestions: suggestTools(target),
+    }, null, 2);
+  }
+  return JSON.stringify({
+    success: false,
+    errorCode: 'UNKNOWN_TOOL',
+    tool: target,
+    message: `未知工具: ${target}（可用工具请调用 agg_list_tools 或 mcp_help 查看）`,
+    suggestions: suggestTools(target),
+  }, null, 2);
+}
+
 // mcp_help 核心逻辑：无参=一级概览（多级菜单根），带 path=逐级深入，带 tool=详情
 function mcpHelpResult(args) {
   const target = args && args.tool;
@@ -2777,6 +3659,8 @@ function mcpHelpResult(args) {
       name: meta.name,
       category: toolCategory(meta.name),
       enabled,
+      // 三态可用性：区分「压缩列表隐藏但可调」与「提供方未就绪导致调不到」（§3 问题记录）
+      availability: toolAvailability(meta.name),
       description: meta.description,
       inputSchema: meta.inputSchema,
       precondition: toolPrecondition(meta.name),
@@ -2805,20 +3689,29 @@ function mcpHelpResult(args) {
     bridge: 'RimBridge 桥接基础（Lua/脚本/操作/等待）',
     game_control: '游戏内控制（状态/地图交互/UI/架构/Mod 等）'
   };
-  const categories = MENU_CATEGORIES.map(c => {
-    const count = (c === 'bridge') ? subgroupToolCount('bridge')
-      : (c === 'game_control') ? subgroupToolCount('game_control/game')
-      : entries.filter(t => toolCategory(t.name) === c).length;
-    return { path: c, name: c, count, desc: categoryDesc[c] || '' };
-  });
+  // 【2026-09-20 修复】全部计数走 menuUniverseNames()（唯一事实源），不再混用静态 TOOL_SUBGROUP 条目数
+  const categories = MENU_CATEGORIES.map(c => ({
+    path: c, name: c, count: menuCountByCategory(c), desc: categoryDesc[c] || ''
+  }));
   const total = categories.reduce((a, c) => a + c.count, 0);
   const bridge = {};
-  for (const s of MENU_BRIDGE_SUBGROUPS) bridge[s] = subgroupToolCount(`bridge/${s}`);
-  const gameSubgroups = MENU_GAME_CONTROL_SUBGROUPS.game.map(s => ({ name: s, count: subgroupToolCount(`game_control/game/${s}`) }));
+  for (const s of MENU_BRIDGE_SUBGROUPS) bridge[s] = menuCountBySubgroup(`bridge/${s}`);
+  const gameSubgroups = MENU_GAME_CONTROL_SUBGROUPS.game.map(s => ({
+    name: s, count: menuCountBySubgroup(`game_control/game/${s}`)
+  }));
+  const callableNames = allToolNames();
+  const concealedNames = [...callableNames].filter(isConcealedTool);
   const overview = {
     total,
     level: 'root',
-    note: '多级菜单：无参=一级概览；传 path 逐级深入（如 path:"bridge/lua_script"、path:"game_control/game/gameplay/camera"）；传 tool 返回单个工具详情；enabled=false 的工具需经 agg_call_tool 调用；工具名可带 rimworld./rimbridge./rigworld. 前缀（原生工具自动剥前缀路由，GABP 镜像名优先）',
+    // 明确区分"菜单可见"与"可调用总量"，防止再把菜单数当工具总数（历史上 194 就是这么被误读的）
+    menuVisible: total,
+    callableTotal: callableNames.size,
+    concealedCount: concealedNames.length,
+    note: '多级菜单：无参=一级概览；传 path 逐级深入（如 path:"bridge/lua_script"、path:"game_control/game/gameplay/camera"）；传 tool 返回单个工具详情（含 availability 三态）；'
+      + '叶子列表标记：[已暴露]=可直接调用；[经 agg_call_tool 可用]=压缩列表隐藏但仍可调用；[当前不可用：原因]=提供方未就绪（如 GABP 未连接），名字正确但调不到；'
+      + '工具名可带 rimworld./rimbridge./rigworld. 前缀（原生工具自动剥前缀路由，GABP 镜像名优先）；'
+      + `本概览的 total=${total} 是**菜单可见工具数**（已扣掉 ${concealedNames.length} 个隐藏工具），可调用总量为 ${callableNames.size}（callableTotal）。`,
     categories,
     bridge,
     game_control: { game: gameSubgroups.reduce((a, s) => a + s.count, 0), gameSubgroups }
@@ -2908,6 +3801,15 @@ const TOOL_ARG_ALIASES = {
   post_order_designate: { order: 'type' },
   // UI 消息：message → text
   post_ui_message: { message: 'text' },
+  // 坐标光标：智能体习惯用的坐标参数名 → x/z；时长/颜色/地图 id 的常见别名一并归一
+  post_map_marker: {
+    mapX: 'x', map_x: 'x', cellX: 'x', cell_x: 'x', posX: 'x', pos_x: 'x',
+    mapZ: 'z', map_z: 'z', cellZ: 'z', cell_z: 'z', posZ: 'z', pos_z: 'z',
+    mapId: 'map_id', colour: 'color', tint: 'color',
+    text: 'label', title: 'label', name: 'label',
+    duration: 'ttl_seconds', ttl: 'ttl_seconds', seconds: 'ttl_seconds', ttlSeconds: 'ttl_seconds',
+    keepExisting: 'keep_existing', replace: 'keep_existing'
+  },
   post_ui_dialog: { message: 'text' },
   // 开发者控制台：console → action，cmd → message
   post_dev_console: { console: 'action', command: 'action', cmd: 'message', content: 'message' },
@@ -3172,6 +4074,139 @@ function attachUsageOnFailure(name, args, result) {
   }
 }
 
+// ========== play_for 派发（2026-09-17 长任务支持） ==========
+
+// nonBlocking / sampleIntervalMs 等是**本层**参数，RimBridge 不认识它们，
+// 必须在转发前剥离，否则游戏侧会因未知参数报错。
+// samplePath：采样文件路径（同时装采样点与 DPA 快照）；snapshotPath 为旧名兼容。
+const PLAY_FOR_CONTROL_KEYS = [
+  'nonBlocking', 'sampleIntervalMs', 'snapshotIntervalMs', 'samplePath', 'snapshotPath',
+  'pauseOnFinish', 'snapshotArgs',
+];
+
+function splitPlayForArgs(args) {
+  const raw = args && typeof args === 'object' ? args : {};
+  const control = {};
+  const passthrough = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (PLAY_FOR_CONTROL_KEYS.includes(k)) control[k] = v;
+    else passthrough[k] = v;
+  }
+  return { control, passthrough };
+}
+
+/**
+ * play_for 派发：
+ *  - 单次阻塞（默认）：超时按 durationMs 推导；超过单次上界则**拒绝**并指引 nonBlocking。
+ *    拒绝而非静默 clamp：clamp 会造成「游戏侧照跑 2 小时、MCP 30 分钟就报超时」的信息黑洞，
+ *    而超时 ≠ 取消（游戏侧操作会继续），调用方看到失败却猜不到原因。
+ *  - nonBlocking:true：不推导超时，交给后台长任务，秒级返回 taskId。
+ */
+async function callPlayFor(args) {
+  const { control, passthrough } = splitPlayForArgs(args);
+  const t = readThresholds(config);
+
+  if (control.nonBlocking === true) {
+    const durationMs = Number(passthrough.durationMs);
+    if (!Number.isFinite(durationMs) || durationMs <= 0) {
+      return contentErrorResponse('INVALID_DURATION',
+        'nonBlocking 模式需要正整数 durationMs（游戏侧同样要求 durationMs > 0）。');
+    }
+    const pauseOnFinish = ['restore', 'pause', 'keep'].includes(control.pauseOnFinish)
+      ? control.pauseOnFinish
+      : 'restore';
+    const sampled = Number(control.sampleIntervalMs);
+    const snap = Number(control.snapshotIntervalMs);
+    const res = await longTaskRunner.start({
+      durationMs,
+      speed: typeof passthrough.speed === 'string' && passthrough.speed ? passthrough.speed : 'Normal',
+      sampleIntervalMs: Number.isFinite(sampled) && sampled > 0 ? sampled : t.taskSampleIntervalMs,
+      snapshotIntervalMs: Number.isFinite(snap) && snap > 0 ? snap : t.taskSnapshotIntervalMs,
+      // samplePath 是新名（文件同时装采样点与快照）；snapshotPath 作为旧名兼容
+      samplePath: typeof control.samplePath === 'string' && control.samplePath
+        ? control.samplePath
+        : (typeof control.snapshotPath === 'string' && control.snapshotPath ? control.snapshotPath : null),
+      pauseOnFinish,
+      snapshotArgs: control.snapshotArgs && typeof control.snapshotArgs === 'object' ? control.snapshotArgs : null,
+      burst: { sampleMs: t.taskBurstSampleIntervalMs, snapshotMs: t.taskBurstSnapshotIntervalMs },
+      keep: { samples: t.taskSampleKeep, snapshots: t.taskSnapshotKeep },
+      stallAbortMs: t.stallAbortMs,
+    });
+    if (res.success !== true) {
+      return contentErrorResponse(res.errorCode || 'TASK_START_FAILED', res.message || '长任务启动失败');
+    }
+    // _done 是内部句柄，不往外暴露（生产调用方靠 task_status 轮询）
+    const { _done, ...pub } = res;
+    return { content: [{ type: 'text', text: JSON.stringify(pub, null, 2) }] };
+  }
+
+  const durationMs = Number(passthrough.durationMs);
+  if (Number.isFinite(durationMs) && durationMs > 0) {
+    const needed = durationMs + t.playForOverheadMs;
+    if (needed > t.maxSingleCallTimeoutMs) {
+      return contentErrorResponse('MAX_SINGLE_CALL_TIMEOUT_EXCEEDED',
+        `durationMs=${durationMs} 需要 ${needed}ms 超时，超过单次调用上界 ${t.maxSingleCallTimeoutMs}ms。`
+        + '两条出路：①改 nonBlocking:true 走后台长任务（推荐：单次调用秒级返回，可查进度/取消/中途改节奏）；'
+        + '②调大 config.json 的 rimBridge.longTask.maxSingleCallTimeoutMs（注意各 IDE 客户端对单个 tool 调用常自带超时，需一并调整）。');
+    }
+  }
+  const opts = timeoutOptsFor('rimworld/play_for', passthrough, config);
+  return callGABPTool('rimworld/play_for', passthrough, undefined, opts);
+}
+
+// ========== 长任务工具（2026-09-17） ==========
+
+async function handleTaskStatus(args) {
+  const taskId = args?.taskId;
+  if (taskId) {
+    const one = longTaskRunner.get(taskId);
+    if (!one) {
+      const orphan = (lastOrphanRecovery || []).find((o) => o.taskId === taskId);
+      return contentErrorResponse('TASK_NOT_FOUND',
+        `未找到任务 ${taskId}。`
+        + (orphan ? `该任务在 MCP 进程重启时中断（处置：${orphan.action}，日志：${orphan.journalPath}）。` : '')
+        + '若 MCP 进程曾重启，任务状态会丢失但游戏可能仍在跑——请用 rimworld.pause_game{pause:true} 兜底停游戏，'
+        + '再调 task_status{} 查看孤儿任务列表。');
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(one, null, 2) }] };
+  }
+  const all = longTaskRunner.list();
+  const orphans = lastOrphanRecovery || [];
+  return {
+    content: [{
+      type: 'text',
+      text: JSON.stringify({
+        tasks: all,
+        orphanRecoveries: orphans,
+        running: all.filter((t) => t.state === 'running').length,
+      }, null, 2),
+    }],
+  };
+}
+
+async function handleTaskCancel(args) {
+  const taskId = args?.taskId;
+  if (!taskId) return contentErrorResponse('INVALID_PARAMS', '缺少参数 taskId');
+  const res = longTaskRunner.stop(taskId);
+  if (res.success !== true) {
+    return contentErrorResponse(res.errorCode || 'TASK_CANCEL_FAILED', res.message || '取消失败');
+  }
+  return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+}
+
+async function handleTaskConfigure(args) {
+  const taskId = args?.taskId;
+  if (!taskId) return contentErrorResponse('INVALID_PARAMS', '缺少参数 taskId');
+  const res = longTaskRunner.configure(taskId, {
+    sampleIntervalMs: Number(args?.sampleIntervalMs),
+    snapshotIntervalMs: Number(args?.snapshotIntervalMs),
+  });
+  if (res.success !== true) {
+    return contentErrorResponse(res.errorCode || 'TASK_CONFIGURE_FAILED', res.message || '改节奏失败');
+  }
+  return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+}
+
 // Tool handler function
 async function handleToolCall(name, args) {
   const originalName = name;
@@ -3191,9 +4226,35 @@ async function handleToolCall(name, args) {
     args.type = 'pawn';
   }
 
-  // mono 调试工具 → 转发 McpRimDebug
+  // mono 调试工具 → 转发 McpRimDebug（断点工具前先做懒清理：清掉命中最近热重载方法列表的失效断点）
   if (MONO_DEBUG_TOOL_NAMES.has(name)) {
+    if (['break_list', 'break_add', 'break_remove', 'break_clear', 'wait', 'step'].includes(name)) {
+      await lazyCleanupStaleBreakpoints();
+    }
     return callMonoTool(name, args);
+  }
+
+  // ---------- 长任务工具（2026-09-17） ----------
+  // 注意：这三个**不是** GABP 镜像工具，必须在 isGabpMirrorName 块之前返回，
+  // 否则会落到 GABP 连接性检查与 switch 的 default（Unknown tool）。
+  // 它们读的是 MCP 本地任务状态，游戏没连上也要能查账。
+  if (name === 'task_status') return handleTaskStatus(args);
+  if (name === 'task_cancel') return handleTaskCancel(args);
+  if (name === 'task_configure') return handleTaskConfigure(args);
+
+  // ---------- play_for：长任务支持（2026-09-17） ----------
+  // **必须排在 isGabpMirrorName 块之前**：该块开头有 GABP 连接性检查（未连接直接返回
+  // GABP_ERROR），而 play_for 的单次上界校验与 nonBlocking 分支都发生在 MCP 本地，
+  // 不该因为游戏没连上而看不到。也正因为如此，连接性检查在下面 play_for 分支内自行做。
+  if (name === 'rimworld.play_for') {
+    // 主线程错误分类（检查表缺陷 1）：RimBridge 端 get_realtimeSinceStartup 仅主线程可调。
+    const r = await callPlayFor(args);
+    const text = JSON.stringify(r);
+    if (/get_realtimeSinceStartup can only be called from the main thread/.test(text)) {
+      return contentErrorResponse('PLAY_FOR_MAIN_THREAD',
+        'rimworld.play_for 当前不可用：RimBridge 端调用 Unity get_realtimeSinceStartup 需在主线程执行（C# 端缺陷）。建议改用 step_game_ticks 逐帧推进，或等待 RimBridge mod 修复。');
+    }
+    return r;
   }
 
   // GABP 路由（spec §6.3）：镜像工具 → 直接转发 gabpBridge.callTool；
@@ -3211,10 +4272,17 @@ async function handleToolCall(name, args) {
       return await callAreaAction(endpoint, areaId, name);
     }
     if (!gabpBridge || !gabpBridge.isConnected()) {
-      return gabpErrorResponse(`GABP 未连接（state=${gabpBridge ? gabpBridge.state : 'disabled'}），镜像工具 ${name} 需 RimBridgeServer 连接`);
+      // 归因写清"名字没错、缺的是提供方"（§3 问题记录：旧文案让人以为调用方式有问题）
+      const mirror = gabpMirrorUnavailable(name);
+      return gabpErrorResponse(mirror
+        ? `${mirror.message}。${mirror.guidance}`
+        : `GABP 未连接（state=${gabpBridge ? gabpBridge.state : 'disabled'}），镜像工具 ${name} 需 RimBridgeServer 连接`);
     }
     if (!gabpToolNames().has(name)) {
-      return gabpErrorResponse(`未知 GABP 镜像工具: ${name}（可用镜像见 agg_list_tools / mcp_help）`);
+      const mirror = gabpMirrorUnavailable(name);
+      return gabpErrorResponse(mirror
+        ? `${mirror.message}。${mirror.guidance}（当前镜像清单见 agg_list_tools / mcp_help path:"bridge"）`
+        : `未知 GABP 镜像工具: ${name}（可用镜像见 agg_list_tools / mcp_help）`);
     }
     // 修复 2（fix-debug-server-defects）：start_debug_game_ready 已加载幂等短路——
     // 殖民地已加载（playable=true）时直接返回 ready，不转发 RimBridge（避免 30s 超时）。
@@ -3230,16 +4298,8 @@ async function handleToolCall(name, args) {
       }
       log('INFO', `start_debug_game_ready 未短路（status=${info ? info.status : 'probe-failed'}），继续转发 RimBridge`);
     }
-    // play_for 主线程错误分类（检查表缺陷 1）：RimBridge 端 get_realtimeSinceStartup 仅主线程可调。
-    if (name === 'rimworld.play_for') {
-      const r = await callGABPTool('rimworld/play_for', args);
-      const text = JSON.stringify(r);
-      if (/get_realtimeSinceStartup can only be called from the main thread/.test(text)) {
-        return contentErrorResponse('PLAY_FOR_MAIN_THREAD',
-          'rimworld.play_for 当前不可用：RimBridge 端调用 Unity get_realtimeSinceStartup 需在主线程执行（C# 端缺陷）。建议改用 step_game_ticks 逐帧推进，或等待 RimBridge mod 修复。');
-      }
-      return r;
-    }
+    // ---------- play_for：长任务支持（2026-09-17） ----------
+    // 已在 isGabpMirrorName 块之前处理（见 handleToolCall 开头），此处不再重复分支。
     // area 一致性标注（检查表缺陷 3）：create 后 RimBridge list_areas 可能延迟。
     if (name === 'rimworld.create_allowed_area') {
       const r = await callGABPTool('rimworld/create_allowed_area', args);
@@ -3267,18 +4327,41 @@ async function handleToolCall(name, args) {
     // 镜像名 → RBS 原名：rimworld.dpa_status → rimworld/dpa_status（与 toMCPTool 的 /→. 互逆）
     // P1-MCP-3.1：load_game / save_game / execute_debug_action 属慢操作（载入/保存序列化、在游戏线程执行调试动作），
     // 传 {slow:true} → gabpClient 慢超时（requestTimeoutMs * 2）。
+    // 2026-09-17：先按入参推导（T3，如 step_game_ticks{timeoutMs}、play_for{durationMs}），
+    // 无推导结果时回退到既有慢档/默认档判定。
     const _rbs = name.replace(/\./g, '/');
+    const _derived = timeoutOptsFor(_rbs, args, config);
     const _slow = /^(rimworld|rimbridge)\.(load_game|save_game|execute_debug_action)$/.test(name);
-    return callGABPTool(_rbs, args, undefined, _slow ? { slow: true } : null);
+    const _opts = _derived || (_slow ? { slow: true } : null);
+    // §5：profiling 中禁止再 patch（快照缺行 + DPA CRITICAL）；force:true 可显式放行
+    if (name === 'rimworld.dpa_patch_methods') {
+      const blocked = dpaPatchGuard(args);
+      if (blocked) {
+        log('WARN', `dpa_patch_methods 被互斥拒绝（dpaRoundActive=true）`);
+        return contentErrorResponse(blocked.errorCode, `${blocked.message}\n${blocked.guidance}`);
+      }
+      // force 是本层控制参数，不转发给游戏（避免 RimBridge 侧因未知参数报错）
+      const fwdArgs = { ...(args || {}) };
+      delete fwdArgs.force;
+      const r = await callGABPTool(_rbs, fwdArgs, undefined, _opts);
+      noteDpaStateAfterCall(name, r);
+      return r;
+    }
+    const _r = await callGABPTool(_rbs, args, undefined, _opts);
+    noteDpaStateAfterCall(name, _r);
+    return _r;
   }
 
   switch (name) {
     case 'start_game': {
       const timeout = args?.timeout ?? config.startTimeout ?? 180000;
       const result = await startGame(args?.useSteam ?? true, args?.waitForNotification ?? true, timeout);
+      dpaRoundActive = false;   // 新会话：DPA 插桩/profiling 状态随旧进程消失（§5 记账清零）
       if (result && result.success) {
-        // 成功路径末尾：触发 GABP 后台轮询发现+连接（spec §6.1）
-        scheduleDiscoverAndConnect();
+        // 成功路径末尾：游戏进程已存在，主动试一次 GABP 重连（ensureConnected 有限尝试，
+        // 失败无妨——后续工具调用仍会惰性重连）。RimBridgeServer 启动约 65s 延迟，
+        // 此刻可能尚未 discover 到，属正常。
+        if (gabpBridge) { try { void gabpBridge.ensureConnected(); } catch (e) { log('WARN', `GABP ensureConnected 异常: ${e.message}`); } }
       }
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
@@ -3287,10 +4370,11 @@ async function handleToolCall(name, args) {
 
     case 'stop_game': {
       const result = await stopGame(args?.force ?? false);
-      // 停止 GABP 发现/连接轮询并断开（spec §6.1）；游戏进程退出后 socket RST/close 由 gabpClient 处理
-      stopGabpPolling();
+      dpaRoundActive = false;   // 游戏结束：DPA 记账清零（§5）
+      // 主动停游戏：断开 GABP 连接（游戏进程退出后 socket RST/close 由 gabpClient 处理）。
+      // 无后台监督可停——后续 GABP 工具调用时若游戏已重启，ensureConnected 会重新发现连接。
       if (gabpBridge) {
-        gabpBridge.disconnect();
+        try { gabpBridge.disconnect(); } catch (e) { log('WARN', `GABP 断开异常: ${e.message}`); }
       }
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
@@ -3477,6 +4561,42 @@ async function handleToolCall(name, args) {
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
       };
+    }
+    // ===== UE 工具：热重载桥（HotReloadManager）——**隐藏工具**（见 isConcealedTool） =====
+    // 仅在明确按名调用时可达；响应一律附 hotreloadWrap 的实验性/局限警告
+    case 'hotreload_apply': {
+      // 挂起防护：VM 被断点/step 挂起时拒绝（防"忘了 resume 还热重载"）
+      if (monoClient) {
+        try {
+          const st = await monoClient.callTool({ name: 'status', arguments: {} });
+          const text = JSON.stringify(st || {});
+          // 精确匹配 needResume 的值：旧实现 /needResume/.test && /true/.test 会命中载荷里任意 true 字段
+          // （attached / bridgeReady / portOpen ...）→ mono 一连接就恒判"挂起"，hotreload_apply 永远被误拒
+          const mNeedResume = text.match(/"needResume"\s*:\s*(true|false)/);
+          const needResume = mNeedResume ? mNeedResume[1] === 'true' : false;
+          if (needResume) {
+            return contentErrorResponse('VM_SUSPENDED',
+              '游戏处于挂起状态（存在未 resume 的断点/step）。请先调用 resume 恢复游戏再热重载。');
+          }
+        } catch (e) { /* mono 未就绪则跳过挂起检查，不阻塞热重载 */ }
+      }
+      const result = await callUnityExplorerAPI('/unityexplorer/hotreload/apply', 'POST', {
+        modId: args?.modId ?? null
+      });
+      return hotreloadWrap('hotreload_apply', result);
+    }
+    case 'hotreload_watch': {
+      const result = await callUnityExplorerAPI('/unityexplorer/hotreload/watch', 'POST', {
+        enabled: args?.enabled === true
+      });
+      return hotreloadWrap('hotreload_watch', result);
+    }
+    case 'hotreload_status': {
+      const result = await callUnityExplorerAPI('/unityexplorer/hotreload/status', 'GET');
+      if (lastCleanupNote && result && result.data) {
+        result.data.lastCleanupNote = lastCleanupNote;
+      }
+      return hotreloadWrap('hotreload_status', result);
     }
     // ===== UE 工具 case 结束 =====
 
@@ -3864,6 +4984,60 @@ async function handleToolCall(name, args) {
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
 
+    // ========== 地图坐标光标（UEMapMarker，UE 实现 + 自研 shader） ==========
+    // 端点：POST /mapmarker/set | /mapmarker/clear | /mapmarker/recolor，GET /mapmarker/list
+    // 全部经 UEHttpHandler.RunOnMain 在主线程执行（创建 Material/DrawMesh 是 Unity 主线程专属）。
+    case 'post_map_marker': {
+      const action = String(args?.action || 'set').toLowerCase();
+
+      if (action === 'list') {
+        return mapMarkerResponse(await callUnityExplorerAPI('/mapmarker/list', 'GET'));
+      }
+
+      if (action === 'clear' || action === 'clear_all') {
+        const body = {};
+        if (args?.id) body.id = args.id;
+        if (args?.map_id !== undefined) body.mapId = args.map_id;
+        return mapMarkerResponse(await callUnityExplorerAPI('/mapmarker/clear', 'POST', body));
+      }
+
+      if (action === 'recolor') {
+        if (!args?.id) {
+          return { content: [{ type: 'text', text: '❌ action=recolor 需要 id（用 action=list 看现有光标 id）' }], isError: true };
+        }
+        return mapMarkerResponse(await callUnityExplorerAPI('/mapmarker/recolor', 'POST', {
+          id: args.id,
+          color: args.color === undefined ? '' : String(args.color)
+        }));
+      }
+
+      if (action !== 'set') {
+        return {
+          content: [{ type: 'text', text: `❌ 未知 action: ${action}（可用 ${MAP_MARKER_ACTIONS.join(' / ')}）` }],
+          isError: true
+        };
+      }
+
+      if (!Number.isInteger(args?.x) || !Number.isInteger(args?.z)) {
+        return {
+          content: [{ type: 'text', text: '❌ action=set 需要整数 x 与 z（地图格坐标）。'
+            + '正确调用范式: agg_call_tool { tool: "post_map_marker", args: { x: 123, z: 45, color: "red" } }' }],
+          isError: true
+        };
+      }
+
+      const body = { x: args.x, z: args.z };
+      if (args.id !== undefined) body.id = String(args.id);
+      if (args.color !== undefined) body.color = String(args.color);
+      if (args.label !== undefined) body.label = String(args.label);
+      if (args.size !== undefined && !Number.isNaN(Number(args.size))) body.size = Number(args.size);
+      if (args.ttl_seconds !== undefined && !Number.isNaN(Number(args.ttl_seconds))) body.ttlSeconds = Number(args.ttl_seconds);
+      if (args.map_id !== undefined) body.mapId = args.map_id;
+      if (args.keep_existing === true) body.keepExisting = true;
+
+      return mapMarkerResponse(await callUnityExplorerAPI('/mapmarker/set', 'POST', body, { slow: true }));
+    }
+
     case 'search_map_structure': {
       const queryParams = new URLSearchParams();
       queryParams.append('query', args.query);
@@ -3908,10 +5082,7 @@ function createServer() {
         if (!isToolEnabled('agg_list_tools')) {
           result = { content: [{ type: 'text', text: 'agg_list_tools 已禁用' }], isError: true };
         } else {
-          const all = [...TOOLS, ...monoTools, ...AGG_META_TOOLS, ...gabpTools];
-          result = {
-            content: [{ type: 'text', text: all.map(t => `- ${isToolEnabled(t.name) ? '[启用]' : '[禁用]'} ${t.name} ${String(t.description || '').split(/\r?\n/)[0]}`).join('\n') }]
-          };
+          result = { content: [{ type: 'text', text: aggListToolsText() }] };
         }
       } else if (name === 'agg_call_tool') {
         const target = args && args.tool;
@@ -3924,7 +5095,7 @@ function createServer() {
         } else {
           const resolved = resolveToolAlias(target);
           if (!allToolNames().has(resolved)) {
-            result = { content: [{ type: 'text', text: `未知工具: ${target}（可用工具请调用 agg_list_tools 查看）` }], isError: true };
+            result = { content: [{ type: 'text', text: unknownToolText(target) }], isError: true };
           } else {
             const innerArgs = (args && args.args) || {};
             // 修复 1（fix-debug-server-defects，缺口 B）：agg 路径已 resolve 别名（原始名在 target 中），
@@ -3970,13 +5141,10 @@ function createServer() {
       let resp;
       const um = errMsg.match(/Unknown tool[:：]?\s*([^\s]+)/i);
       if (um) {
-        // 未知工具（handleToolCall 默认分支抛出的 "Unknown tool: xxx"）→ 附相似工具建议 + 首选 usage
+        // 未知工具（handleToolCall 默认分支抛出的 "Unknown tool: xxx"）→ 区分「名字写错」与
+        // 「提供方未就绪 / 能力已移除」，并附相似工具建议 + 首选 usage（§3 问题记录）
         const unk = um[1];
-        resp = {
-          success: false,
-          error: `未知工具: ${unk}（可用工具请调用 agg_list_tools 或 mcp_help 查看）`,
-          suggestions: suggestTools(unk)
-        };
+        resp = JSON.parse(unknownToolText(unk));
         if (Array.isArray(resp.suggestions) && resp.suggestions.length > 0) {
           resp.usage = buildUsageHint(resp.suggestions[0].name);
         }
@@ -4194,10 +5362,11 @@ async function main() {
     log('INFO', 'stdio transport connected; waiting for MCP messages on stdin');
     // 内嵌启动 McpRimDebug（mono 调试工具转发），失败不阻断主服务器
     await startMonoBridge();
-    // 惰性初始化 GABP 桥接，随后触发发现+连接（使独立 server 也能连游戏内 RBS），失败不阻断主服务器
+    // 惰性初始化 GABP 桥接（首连/断连自愈由工具调用时 ensureConnected 按需触发），失败不阻断主服务器
     await startGABPBridge();
-    scheduleDiscoverAndConnect();
-    watchPortsFile();   // P3-MCP-4：stdio 分支挂载 ports.json watcher
+    watchPortsFile();   // P3-MCP-4：stdio 分支挂载 ports.json watcher（UE 端口/token 缓存刷新）
+    // 长任务恢复：GABP 可用才谈得上探测游戏状态（恢复逻辑本身对失败是容错的）
+    void recoverOrphanTasks();
     return;
   }
 
@@ -4224,14 +5393,68 @@ async function main() {
 
     // 内嵌启动 McpRimDebug（mono 调试工具转发），失败不阻断主服务器
     startMonoBridge();
-    // 惰性初始化 GABP 桥接，随后触发发现+连接（使独立 server 也能连游戏内 RBS），失败不阻断主服务器
+    // 惰性初始化 GABP 桥接（首连/断连自愈由工具调用时 ensureConnected 按需触发），失败不阻断主服务器
     startGABPBridge();
-    scheduleDiscoverAndConnect();
-    watchPortsFile();   // P3-MCP-4：SSE 分支挂载 ports.json watcher
+    watchPortsFile();   // P3-MCP-4：SSE 分支挂载 ports.json watcher（UE 端口/token 缓存刷新）
+    // 长任务恢复：GABP 可用才谈得上探测游戏状态（恢复逻辑本身对失败是容错的）
+    void recoverOrphanTasks();
   });
 }
 
-main().catch((err) => {
-  log('ERROR', `Fatal startup error: ${err && err.stack ? err.stack : String(err)}`);
-  process.exit(1);
-});
+// 测试守卫（2026-09-17）：被 import（而非直接执行）时不启动服务器。
+// 不给守卫的话，任何对 index.js 的单元测试都会监听 3000 端口并启动 mono/GABP 桥接，无法测试。
+if (process.env.UESD_MCP_NO_START === '1') {
+  // 测试模式：只导出可测函数，不启动任何服务
+} else {
+  main().catch((err) => {
+    log('ERROR', `Fatal startup error: ${err && err.stack ? err.stack : String(err)}`);
+    process.exit(1);
+  });
+}
+
+// 供测试导入（生产路径不依赖这些导出）
+export {
+  handleToolCall,
+  splitPlayForArgs,
+  callPlayFor,
+  longTaskRunner,
+  recoverOrphanTasks,
+  callGABPTool,
+  handleTaskStatus,
+  handleTaskCancel,
+  handleTaskConfigure,
+  startQuickTest,
+  sendQuickTestTrigger,
+  buildQuickTestServiceError,
+  buildQuickTestRejectedError,
+  readPortsFileInfo,
+  // 2026-09-19 工具链问题记录（§3 清单/可调用集归因、§4 能力映射）：纯函数，供单测直接断言
+  aggListToolsText,
+  unknownToolText,
+  toolAvailability,
+  gabpMirrorUnavailable,
+  buildCapabilityReport,
+  // 地图坐标光标：别名归一与工具说明，供单测直接断言（无需起游戏）
+  normalizeToolArgs,
+  mcpHelpResult,
+  // 2026-09-20 计数口径修复：菜单/计数单一事实源，供一致性测试直接断言
+  allToolNames,
+  menuUniverseNames,
+};
+
+// 测试钩子：仅供集成测试使用，生产路径不依赖。
+//  - createServer：走真实 tools/list 校验对外可见性
+//  - config：允许测试临时压低 requestTimeoutMs 等阈值
+//  - setGabpBridge：允许注入假桥接（构造真实超时/失败路径，不必起真游戏）
+//  - dpa*：§5 DPA 互斥记账的状态机（单测直接驱动"patch 成功 → 再 patch → stop"序列）
+export const _testHooks = {
+  createServer,
+  config,
+  setGabpBridge: (b) => { gabpBridge = b; },
+  getGabpConsecutiveTimeout: () => gabpConsecutiveTimeout,
+  dpaPatchGuard,
+  noteDpaStateAfterCall,
+  isDpaRoundActive: () => dpaRoundActive,
+  resetDpaState: () => { dpaRoundActive = false; },
+};
+

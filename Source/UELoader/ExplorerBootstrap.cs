@@ -53,6 +53,10 @@ namespace UELoader
                 // ClearAreaResponse 在读线程同步改主线程状态导致的连接僵死。RimBridgeServer 未启用时静默跳过。
                 RimBridgeAreaMarshallingPatch.Install();
 
+                // DPA 无窗口 profiling 桥：patch 入口 ExecutePatch 尾部自动激活类别 Active，
+                // 修复 RBS 头less dpa_* 在 DPA 窗口未开时 rows 恒空。DPA 未启用时静默跳过。
+                DpaHeadlessBridge.Install();
+
                 // UEHttpHandler 运行时初始化（日志流订阅 + 主线程调度器）。
                 // 必须在主线程执行（UEMainThreadDispatcher.EnsureInitialized 会 new GameObject），
                 // 因此由本方法（SceneManager.sceneLoaded 回调，主线程）调用，而非 Mod 构造函数。
@@ -80,6 +84,27 @@ namespace UELoader
 
                 // 官方初始化入口（UE 4.9.0 自带的 IExplorerLoader 实现，零修改二进制）
                 ExplorerStandalone.CreateInstance(OnUELog, modulesPath);
+
+                // 热重载桥：监视 mod DLL 变化（主线程，FileSystemWatcher 本身不依赖主线程，
+                // 但保持与其他初始化一致放在 Initialize 内）。失败不影响 UE。
+                try
+                {
+                    HotReloadManager.Initialize();
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning($"[UELoader] HotReloadManager.Initialize failed: {ex.GetType().Name}: {ex.Message}");
+                }
+
+                // 相机跟随：挂载 LateUpdate MonoBehaviour（每帧同步相机到锁定目标）。失败不影响 UE。
+                try
+                {
+                    CameraFollowManager.Initialize();
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning($"[UELoader] CameraFollowManager.Initialize failed: {ex.GetType().Name}: {ex.Message}");
+                }
 
                 Initialized = true;
                 Log.Message("[UELoader] UnityExplorer initialized. Press F7 to toggle the UI (default master toggle).");

@@ -8,7 +8,6 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Mono.Debugger.Soft;
@@ -196,6 +195,15 @@ namespace McpRimDebug
         const int LaunchAttachSettleMs = 3000;
         /// <summary>自动 attach 失败后的重试次数（间隔 2s，应对 agent 就绪窗口内的瞬时失败）。</summary>
         const int LaunchAttachRetries = 2;
+        // ---- launch 后连接存活确认（2026-09-19 MCP 工具链问题记录 §2）----
+        // 现象：launch 报 attached=true，但紧接着的连接抖动会让会话立刻掉线，调用方的 resume 撞上"未连接"。
+        // 处理：attach 成功后短暂确认会话仍在，掉了就重连（最多 LaunchLivenessReattaches 次）。
+        /// <summary>存活确认的轮次（每轮间隔 LaunchLivenessIntervalMs，合计约 2.1s）。</summary>
+        const int LaunchLivenessChecks = 3;
+        /// <summary>存活确认轮询间隔（毫秒）。</summary>
+        const int LaunchLivenessIntervalMs = 700;
+        /// <summary>存活确认期间允许的重连次数。</summary>
+        const int LaunchLivenessReattaches = 2;
 
         // ---- 全局命令锁：所有 VM socket 操作经此串行化 ----
         readonly object commandLock = new object();
@@ -452,7 +460,7 @@ namespace McpRimDebug
                     return ToolResult.OkResult(
                         "已连接 " + host + ":" + p + "，协议 " + v.MajorVersion + "." + v.MinorVersion
                         + "，VM " + v.VMVersion + "；attach 后需 resume 游戏才运行（wait-for-managed-debugger=1）。"
-                        + "注意：本会话为一次性调试会话，detach/断开后如需再次调试，请重启调试服务器（McpRimDebug）",
+                        + "detach/断开后可再次 attach（RST 关闭已避免代理侧半关闭残留）",
                         data);
                 }
                 catch (Exception ex)
@@ -468,8 +476,51 @@ namespace McpRimDebug
                         if (state == SessionState.Attaching)
                             state = SessionState.Disconnected;
                     }
-                    return ToolResult.ErrorResult("attach 失败: " + FriendlyError(ex, "无法连接 " + host + ":" + p)
-                        + "；mono 调试为一次性会话，重连需重启调试服务器（McpRimDebug）");
+                    // P-mono-rst：区分失败类型给准确诊断，不再笼统提示"重启调试服务器"。
+                    // 握手超时/连上无响应 = 游戏 mono 代理会话槽可能被前次异常断开占死（半关闭
+                    // 连接未回收），客户端无法复活，需重启游戏；TCP 拒绝 = 端口未开/代理未启动。
+                    //
+                    // 2026-09-19（MCP 工具链问题记录 §1）：补"端口监听表探测"这一层事实——
+                    // 端口到底在不在监听，决定了该往哪查；并把结论写进**消息主体**（不再只躺在 usage 里）。
+                    // 注意：这里用的是**监听表探测**（ProbeTcpPort，不建连接）——mono 调试代理收到裸 TCP
+                    // 连接但 DWP 握手失败时会中止游戏进程，所以"connect 试连式洁净性探测"是被明令禁止的。
+                    bool portListening = ProbeTcpPort(host, p);
+                    bool handshakeDead = ex is TimeoutException
+                        || (ex is System.IO.IOException && ex.Message.IndexOf("Handshake", StringComparison.OrdinalIgnoreCase) >= 0);
+                    string diagnosis;
+                    string hint;
+                    if (!portListening)
+                    {
+                        diagnosis = "port-not-listening";
+                        hint = "端口 " + p + " 当前**不在监听**：游戏可能未以调试模式启动（boot.config wait-for-managed-debugger=1）、"
+                            + "调试代理尚未起来，或端口号取自上一次运行。先调 status 看 debugPortFromLog（Unity 端口每次运行随机）后重试";
+                    }
+                    else if (handshakeDead || ex is TimeoutException)
+                    {
+                        diagnosis = "proxy-session-stuck";
+                        hint = "端口 " + p + " **在监听但拒绝新会话/不响应 DWP 握手**：mono 调试代理的会话槽很可能被上一次异常断开遗留的"
+                            + "半关闭连接占死（客户端无法复活该代理）——请**重启游戏**；若刚发生过异常断开，可先结束残留的 McpRimDebug/dotnet 调试器进程"
+                            + "（不要用裸 TCP 去试连这个端口：握手不完会触发 DWP handshake failed 直接终止游戏进程）";
+                    }
+                    else
+                    {
+                        diagnosis = "connect-failed";
+                        hint = "请确认游戏调试代理已启动（用 status 查看 debugPortFromLog）且端口未被占用；"
+                            + "若刚发生过异常断开，可先结束残留的 McpRimDebug/dotnet 调试器进程后重试；"
+                            + "也可用 reconnect 让本服务自动重取端口并重连";
+                    }
+                    var failData = new Dictionary<string, object>
+                    {
+                        ["host"] = host,
+                        ["port"] = p,
+                        ["portListening"] = portListening,
+                        ["diagnosis"] = diagnosis,
+                        ["errorType"] = ex.GetType().Name,
+                        ["residualDebuggerProcesses"] = CountDebuggerProcesses(),
+                        ["debugPortFromLog"] = DiscoverDebugPortFromPortsFile() ?? DiscoverDebugPortFromLog(),
+                    };
+                    return ToolResult.ErrorResult(
+                        "attach 失败: " + FriendlyError(ex, "无法连接 " + host + ":" + p) + "；" + hint, failData);
                 }
             }
         }
@@ -526,7 +577,26 @@ namespace McpRimDebug
             lock (stateLock)
             {
                 if (state != SessionState.Attached || vm == null)
-                    return ToolResult.ErrorResult("未连接，无法 resume");
+                {
+                    // 2026-09-19（问题记录 §2）：失败信息必须自带"当前状态 + 上次端点 + 上次断开原因"，
+                    // 否则调用方只能看到"未连接，无法 resume"，无从判断该重试还是该放弃。
+                    string ep = (!string.IsNullOrEmpty(sessionHost) && sessionPort != 0) ? sessionHost + ":" + sessionPort : null;
+                    var failData = new Dictionary<string, object>
+                    {
+                        ["state"] = state.ToString(),
+                        ["lastEndpoint"] = ep,
+                        ["lastDisconnectReason"] = lastDisconnectReason,
+                        ["debugPortFromLog"] = DiscoverDebugPortFromPortsFile() ?? DiscoverDebugPortFromLog(),
+                        ["residualDebuggerProcesses"] = CountDebuggerProcesses(),
+                    };
+                    return ToolResult.ErrorResult(
+                        "未连接，无法 resume（当前状态 " + state
+                        + (ep != null ? "，上次端点 " + ep : "")
+                        + (string.IsNullOrEmpty(lastDisconnectReason) ? "" : "，上次断开原因：" + lastDisconnectReason) + "）。"
+                        + "处理：先 reconnect（自动重取端口并重连）或 attach(host, status.debugPortFromLog)，然后再 resume；"
+                        + "若刚 launch 就断开、且 reconnect 仍连不上，多为代理会话槽被占死 → 需重启游戏",
+                        failData);
+                }
                 target = vm;
             }
 
@@ -595,6 +665,150 @@ namespace McpRimDebug
                 }
             }
             finally { ExitCommandLock(); }
+        }
+
+        // ---------------------------------------------------------------- reconnect
+
+        /// <summary>
+        /// 重连（2026-09-19 MCP 工具链问题记录 §2）：把当前会话复位（旧会话已不可用时不再向死 VM 发命令），
+        /// 端口缺省时按 ports.json（unityDebugPort）→ Player.log → 上次会话端点的顺序自动发现，然后 attach。
+        /// 用途：launch 后连接被抖动掉、或 attach 因代理会话槽占死失败后，调用方不必重启 MCP 就能补一次连接。
+        /// </summary>
+        public ToolResult Reconnect(string host, int? port)
+        {
+            SessionState st;
+            string lastReason, lastHost;
+            int lastPort;
+            lock (stateLock)
+            {
+                st = state;
+                lastReason = lastDisconnectReason;
+                lastHost = sessionHost;
+                lastPort = sessionPort;
+            }
+
+            // 【2026-09-20 修复】连接没断就不要动它。
+            // 旧行为：st != Disconnected 即 ResetSession()，会把**健康**的 Attached 会话拆掉，
+            // 随后 attach 又因游戏侧单会话槽被占而失败，最终只能重启游戏（实测事故与 TCP 现场见
+            // docs/2026-09-20-发布前检查报告.md §3-1）。
+            // 注意：短路必须给出一句人能读懂的话并标注 noop——只回 {ok:true,skipped:true}
+            // 会被调用方误读成"MCP 出错但被吞了"。
+            if (st == SessionState.Attached && IsSessionSocketAlive(sessionSocket))
+            {
+                return ToolResult.OkResult(
+                    "连接实际未断：会话已是 Attached（" + lastHost + ":" + lastPort + "，socket 可用），"
+                    + "本次 reconnect 未做任何改动、也未触碰调试端口。这不是错误、无需处理；"
+                    + "要确认连接状态请调 status。",
+                    new Dictionary<string, object>
+                    {
+                        ["skipped"] = true,
+                        ["noop"] = true,
+                        ["detail"] = "connection-alive",
+                        ["message"] = "连接实际未断（Attached " + lastHost + ":" + lastPort + "），无需 reconnect",
+                        ["state"] = st.ToString(),
+                        ["host"] = lastHost,
+                        ["port"] = lastPort,
+                        ["attached"] = true,
+                    });
+            }
+            if (st == SessionState.Attaching || st == SessionState.Detaching)
+            {
+                // 过渡态不动手：此时既不该复位也不该 attach，交给调用方稍后重试
+                return ToolResult.ErrorResult(
+                    "reconnect 被拒：会话正处于 " + st + " 过渡态，请稍后重试（本次未做任何改动）",
+                    new Dictionary<string, object>
+                    {
+                        ["skipped"] = true,
+                        ["noop"] = true,
+                        ["state"] = st.ToString(),
+                    });
+            }
+
+            if (st != SessionState.Disconnected)
+            {
+                // 旧会话已不可用：直接复位（不发 Detach——向已死的 VM 写命令只会再等一个超时）
+                ResetSession();
+            }
+
+            string h = FirstNonEmpty(host, !string.IsNullOrEmpty(lastHost) ? lastHost : DefaultHost());
+            int? target = port;
+            string source = "explicit";
+            if (!target.HasValue)
+            {
+                int? fromPorts = DiscoverDebugPortFromPortsFile();
+                int? fromLog = DiscoverDebugPortFromLog();
+                if (fromPorts.HasValue) { target = fromPorts; source = "ports.json"; }
+                else if (fromLog.HasValue) { target = fromLog; source = "Player.log"; }
+                else if (lastPort != 0) { target = lastPort; source = "last-session"; }
+            }
+            if (!target.HasValue || target.Value <= 0)
+            {
+                return ToolResult.ErrorResult(
+                    "reconnect 失败：拿不到调试端口（ports.json 无 unityDebugPort、Player.log 无 \"Starting managed debugger on port\" 行）。"
+                    + "请先调 status 查看 debugPortFromLog，再用 attach(host, port) 显式指定");
+            }
+
+            ToolResult at = Attach(h, target);
+            var data = at != null && at.Data != null
+                ? new Dictionary<string, object>(at.Data)
+                : new Dictionary<string, object>();
+            data["reconnected"] = at != null && at.Ok;
+            data["port"] = target.Value;
+            data["portSource"] = source;
+            if (!string.IsNullOrEmpty(lastReason))
+                data["lastDisconnectReason"] = lastReason;
+
+            if (at != null && at.Ok)
+            {
+                return ToolResult.OkResult(
+                    "已重连 " + h + ":" + target.Value + "（端口来源：" + source + "）"
+                    + (string.IsNullOrEmpty(lastReason) ? "" : "；上次断开原因：" + lastReason)
+                    + "。attach 后需 resume 游戏才运行（wait-for-managed-debugger=1）", data);
+            }
+            return ToolResult.ErrorResult(
+                "reconnect 失败（端口 " + target.Value + "，来源 " + source + "）：" + (at != null ? at.Message : "attach 未返回结果"), data);
+        }
+
+        /// <summary>
+        /// socket 是否仍可用（供 reconnect 短路判断）。三条判据：
+        /// ① 已连接；② 读侧没有"对端已关闭"信号（Poll(Read) 为真且 Available==0 即收到 FIN）；
+        /// ③ 没有错误态。判不准时一律返回 false —— 宁可误判为"断"（照旧走重连），
+        /// 也不要误判为"活"而挡住一次必要的重连。
+        /// </summary>
+        static bool IsSessionSocketAlive(Socket s)
+        {
+            if (s == null || !s.Connected) return false;
+            try
+            {
+                if (s.Poll(0, SelectMode.SelectRead) && s.Available == 0) return false;
+                if (s.Poll(0, SelectMode.SelectError)) return false;
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        /// <summary>本机在跑的调试器进程数（含本进程）：>1 往往意味着上一会话残留的 McpRimDebug/dotnet 调试器。</summary>
+        static int CountDebuggerProcesses()
+        {
+            int n = 0;
+            try
+            {
+                n += Process.GetProcessesByName("McpRimDebug").Length;
+                foreach (Process p in Process.GetProcessesByName("dotnet"))
+                {
+                    // 便携模式：runtime/dotnet/dotnet.exe 承载 McpRimDebug.dll（读主模块名判定，权限不足则跳过）
+                    try
+                    {
+                        var mi = p.MainModule;
+                        if (mi != null && !string.IsNullOrEmpty(mi.FileName)
+                            && mi.FileName.IndexOf("McpRimDebug", StringComparison.OrdinalIgnoreCase) >= 0)
+                            n++;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return n;
         }
 
         // ---------------------------------------------------------------- launch
@@ -753,6 +967,29 @@ namespace McpRimDebug
             };
             if (at.Ok)
             {
+                // §2（问题记录）：attach 成功后连接可能立刻被抖动掉（游戏启动期代理重连），
+                // 调用方的 resume 就会撞上"未连接，无法 resume"。返回前做一次短暂存活确认 + 自愈重连。
+                int reattaches = 0;
+                for (int i = 0; i < LaunchLivenessChecks; i++)
+                {
+                    Thread.Sleep(LaunchLivenessIntervalMs);
+                    SessionState now;
+                    lock (stateLock) { now = state; }
+                    if (now == SessionState.Attached) continue;
+                    if (reattaches >= LaunchLivenessReattaches) break;
+                    reattaches++;
+                    ToolResult again = Attach(host, targetPort);
+                    at = again;
+                    data["attached"] = again.Ok;
+                    data["needResume"] = again.Ok;
+                    if (!again.Ok) break;
+                }
+                if (reattaches > 0)
+                {
+                    data["reattached"] = at.Ok;
+                    data["reattachCount"] = reattaches;
+                    Console.Error.WriteLine("[DebugSession] launch 后连接抖动，已自动重连 {0} 次（成功={1}）", reattaches, at.Ok);
+                }
                 lock (stateLock)
                 {
                     if (vm != null)
@@ -764,8 +1001,17 @@ namespace McpRimDebug
                 // 主动关闭 Unity 的 "Debug (Player)" 告知窗（不会随 attach 自动消失，实测已确认）
                 bool windowClosed = DismissDebugPlayerWindow(proc.Id);
                 data["debugPlayerWindowClosed"] = windowClosed;
+                if (!at.Ok)
+                {
+                    data["autoAttachError"] = at.Message;
+                    return ToolResult.OkResult(
+                        "已启动游戏 PID=" + proc.Id + "（调试端口 " + targetPort + " 已开放），但 attach 后在存活确认期间掉线且重连失败: "
+                        + at.Message + "。可调 reconnect（自动重取端口）或 attach(host, " + targetPort + ") 再试",
+                        data);
+                }
                 return ToolResult.OkResult(
                     "已启动游戏 PID=" + proc.Id + " 并自动连接调试端口 " + targetPort
+                    + (reattaches > 0 ? "（连接曾抖动，已自动重连 " + reattaches + " 次）" : "")
                     + (windowClosed ? "（Unity 的 Debug(Player) 告知窗已自动关闭）"
                                     : "（未找到 Debug(Player) 告知窗，若仍显示请手动点确定）")
                     + "。游戏当前挂起，请调用 resume 让游戏开始运行",
@@ -1078,11 +1324,12 @@ namespace McpRimDebug
             return ToolResult.ErrorResult(reason + "，可重新 attach");
         }
 
-        /// <summary>超时强制断开：Shutdown 打断接收线程阻塞读，使挂起的命令线程被唤醒并抛 VMDisconnectedException。
-        /// P3-MD-8（双重关闭语义）：socket.Shutdown 与 target.ForceDisconnect（及其内部对本 socket 的 Close）
-        /// 是幂等安全组合——此处先 Shutdown 唤醒阻塞读，再调 ForceDisconnect 让代理端正式终止并内部 Close 连接；
-        /// 即使本连接已被事件循环的 VMDisconnect 路径或后续 detach 二次关闭，二次 Close 抛出的异常均被忽略，
-        /// 连接对象的生命周期统一由 HandleDisconnect 结束时把 vm/sessionSocket 置 null 收束。</summary>
+        /// <summary>超时强制断开：强制代理终止会话并使挂起命令线程被唤醒抛 VMDisconnectedException。
+        /// P-mono-rst（修正 P3-MD-8）：不再先 socket.Shutdown(Both)——那会先发 FIN，使后续
+        /// ForceDisconnect 的 Linger0+Close 无法产生 RST（实测残留 CloseWait 占死代理会话槽）。
+        /// ForceDisconnect 内部走 TransportShutdown（Linger0 + Close 发 RST），Close 本身会唤醒
+        /// 阻塞在 Receive 上的接收线程抛异常退出，挂起命令随之 VMDisconnectedException 释放命令锁。
+        /// 二次关闭异常均被忽略；连接对象生命周期由 HandleDisconnect 置 null 收束。</summary>
         void ForceDisconnectForTimeout(string reason)
         {
             VirtualMachine target;
@@ -1092,8 +1339,7 @@ namespace McpRimDebug
                 target = vm;
                 s = sessionSocket;
             }
-            try { if (s != null) s.Shutdown(SocketShutdown.Both); } catch { }
-            // ForceDisconnect 内部会对本连接 socket 执行 Close；与上面的 Shutdown 是幂等组合（二次关闭异常被忽略）
+            // 仅 ForceDisconnect（内部 Linger0+Close 发 RST，唤醒阻塞读并释放代理会话槽）
             try { if (target != null) target.ForceDisconnect(); } catch { }
             HandleDisconnect(reason);
         }
@@ -1270,27 +1516,19 @@ namespace McpRimDebug
             return null;
         }
 
-        // P3-MD-4：端口行正则提为常量并注明来源。
-        // Unity mono 调试代理在 Player.log 首行打印（boot.config wait-for-managed-debugger=1 触发）：
+        // Unity mono 调试代理在 Player.log 第 3 行打印（boot.config wait-for-managed-debugger=1 触发）：
         //   "Starting managed debugger on port XXXX"
-        const string DebugPortPattern = @"Starting managed debugger on port (\d+)";
+        // 端口行永远在文件头部（偏移 ~50 字节），读头窗 4KB 即可 100% 覆盖。
+        const string DebugPortPrefix = "Starting managed debugger on port ";
 
         /// <summary>
         /// 从 Unity Player.log 解析游戏自报的调试端口（"Starting managed debugger on port XXXX"）。
-        /// 端口每次运行随机且为本次运行的最新值，故取最后一个匹配；文件可能被游戏独占，
+        /// 端口每次运行随机且为本次运行的最新值；文件可能被游戏独占，
         /// 以 FileShare.ReadWrite|Delete 打开（读不到/无匹配时返回 null）。
         ///
-        /// 查找策略（P2-MD-1：尾窗优先，未命中全文件扫描兜底）：
-        /// - **尾窗快速命中**：先读尾部 64KB，用 RightToLeft 在尾窗内取最后一个匹配，命中即 parse 返回
-        ///   （省 IO 的主路径，覆盖端口行仍落在尾窗内的情况）；
-        /// - **全文件扫描兜底**：尾窗未命中时，读整个日志文件并行 Regex.Matches，取**最后一次**匹配返回。
-        ///   这覆盖了端口行打印在 **首行** 而日志已增长到尾窗不含该行的场景（游戏启动早期）——
-        ///   该场景下不再丢命中（原实现会返回 null）。
-        ///
-        /// 已知限制（务必牢记，勿误解返回值）：
-        /// - 端口每次运行随机，多个匹配取最后一个（文件被游戏覆盖写，通常只有一个匹配）；
-        /// - 全文件扫描会读整个文件（日志可达数 MB），仅在尾窗未命中时触发，属必要的 IO 取舍。
-        /// 调用方优先级：ports.json（游戏侧 UELoader 写入）> 本函数 > 默认端口 56574。
+        /// 查找策略：读头部 4KB（端口行在 Player.log 第 3 行，偏移 ~50 字节，永远在头窗内）。
+        /// 找不到 → 返回 null（游戏未启动到调试代理阶段）。
+        /// 调用方优先级：ports.json（游戏侧 UELoader 写入）&gt; 本函数 &gt; 默认端口 56574。
         /// </summary>
         internal static int? DiscoverDebugPortFromLog()
         {
@@ -1299,44 +1537,38 @@ namespace McpRimDebug
                 return null;
             try
             {
-                const int TailBytes = 64 * 1024;
+                const int HeadBytes = 4 * 1024;
+                string head;
                 using (var fs = new FileStream(logPath, FileMode.Open, FileAccess.Read,
                     FileShare.ReadWrite | FileShare.Delete))
                 {
                     if (fs.Length <= 0)
                         return null;
-                    long start = Math.Max(0, fs.Length - TailBytes);
-                    fs.Seek(start, SeekOrigin.Begin);
-                    byte[] buf = new byte[fs.Length - start];
-                    int n = fs.Read(buf, 0, buf.Length);
-                    string tail = System.Text.Encoding.UTF8.GetString(buf, 0, n);
-                    Match m = Regex.Match(tail, DebugPortPattern,
-                        RegexOptions.RightToLeft | RegexOptions.Multiline);
-                    if (m.Success)
-                        return ParsePort(m);
+                    int len = (int)Math.Min(fs.Length, HeadBytes);
+                    byte[] buf = new byte[len];
+                    int n = fs.Read(buf, 0, len);
+                    head = System.Text.Encoding.UTF8.GetString(buf, 0, n);
                 }
 
-                // P2-MD-1 兜底：尾窗未命中 → 全文件扫描，取最后一次匹配（覆盖端口行在首行的情况）。
-                Match last = null;
-                using (var fs = new FileStream(logPath, FileMode.Open, FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete))
-                using (var reader = new StreamReader(fs, System.Text.Encoding.UTF8))
-                {
-                    foreach (Match im in Regex.Matches(reader.ReadToEnd(), DebugPortPattern, RegexOptions.Multiline))
-                        last = im;
-                }
-                return last != null ? ParsePort(last) : null;
+                int idx = head.IndexOf(DebugPortPrefix, StringComparison.Ordinal);
+                if (idx < 0)
+                    return null;
+
+                // 提取前缀后面的连续数字
+                int numStart = idx + DebugPortPrefix.Length;
+                int numEnd = numStart;
+                while (numEnd < head.Length && char.IsDigit(head[numEnd]))
+                    numEnd++;
+                if (numEnd == numStart)
+                    return null;
+
+                string portStr = head.Substring(numStart, numEnd - numStart);
+                return int.TryParse(portStr, out int port) && port > 0 ? port : (int?)null;
             }
             catch
             {
                 return null;
             }
-        }
-
-        /// <summary>从已命中的端口匹配里抽取端口号；解析失败返回 null。</summary>
-        static int? ParsePort(Match m)
-        {
-            return int.TryParse(m.Groups[1].Value, out int p) ? p : (int?)null;
         }
 
         /// <summary>把异常转成可读文本；VMDisconnectedException 统一措辞。</summary>

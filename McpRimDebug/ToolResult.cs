@@ -22,9 +22,13 @@ namespace McpRimDebug
             return new ToolResult { Ok = true, Message = message, Data = data };
         }
 
-        public static ToolResult ErrorResult(string message)
+        /// <summary>
+        /// 错误结果。data 可选（2026-09-19 新增）：失败也要能带结构化诊断
+        /// （如 attach 失败时的 port / portListening / diagnosis），调用方不必解析文案。
+        /// </summary>
+        public static ToolResult ErrorResult(string message, Dictionary<string, object> data = null)
         {
-            return new ToolResult { Ok = false, Message = message };
+            return new ToolResult { Ok = false, Message = message, Data = data };
         }
     }
 }

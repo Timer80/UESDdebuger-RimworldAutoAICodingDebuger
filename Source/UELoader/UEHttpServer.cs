@@ -27,6 +27,11 @@ namespace UELoader
 
         static string rootDir; // 模组根目录（写 MCP/ports.json 用，由 Start(rootDir) 保存）
 
+        // 游戏内 HTTP 服务的启动结果自报（写进 ports.json，供 MCP 侧准确归因）。
+        // 背景：服务没起来时，MCP 侧只能看到 "Unable to connect"，历史上被误判成 "UE 未就绪 / 需要 GABP"，
+        // 排查方向被带偏。这里把失败事实与原因落到端口文件里，MCP 直接读得到。
+        static string startError; // null=正常启动（或尚未尝试）；非 null=失败原因
+
         static HttpListener listener;
         static Thread listenerThread;
         static volatile bool running;
@@ -115,9 +120,13 @@ namespace UELoader
 
                 if (!running)
                 {
-                    // 探测范围耗尽：记录可读日志（含 ACL 提示），不抛异常
-                    UEHttpLog.Error($"[UEHttp] 未能在 {PortStart}~{PortStart + PortTryCount - 1} 找到可用端口，UE HTTP 服务未启动");
+                    // 探测范围耗尽：记录可读日志（含 ACL 提示），不抛异常。
+                    // 关键：这里仍然写一次 ports.json（ueHttpStatus=failed + 原因），让 MCP 侧能区分
+                    // 「模组没加载（文件不存在/是上次会话的）」与「模组加载了但服务起不来」。
+                    startError = $"未能在 {PortStart}~{PortStart + PortTryCount - 1} 找到可用端口（被占用或缺少 URL ACL 授权）";
+                    UEHttpLog.Error($"[UEHttp] {startError}，UE HTTP 服务未启动");
                     UEHttpLog.Message("[UEHttp] 若端口被其他模组占用（如 RimworldMCPDebug 的 MCPNotifier 也监听 3001），请只启用一个此类模组；若提示 Access Denied，请以管理员身份运行，或用 netsh http add urlacl 为对应端口授权");
+                    WritePortsFile();
                     return;
                 }
 
@@ -133,6 +142,7 @@ namespace UELoader
                 // P0-CS-1：每次游戏启动随机生成 token（不落盘即不可预测，保证会话内鉴权可用）
                 authToken = Guid.NewGuid().ToString("N"); // 64 个 hex，无特殊字符，安全放进 JSON 与 Header
 
+                startError = null;
                 // 启动成功后立即写端口文件（unityDebugPort 此刻可能尚未打印到 Player.log，
                 // 进场景后由 RefreshPortsFile() 补写刷新）。
                 WritePortsFile();
@@ -140,7 +150,9 @@ namespace UELoader
             catch (Exception ex)
             {
                 running = false;
+                startError = $"启动异常：{ex.GetType().Name}: {ex.Message}";
                 UEHttpLog.Error($"[UEHttp] Failed to start UE HTTP server: {ex.GetType().Name}: {ex.Message}");
+                WritePortsFile();
             }
         }
 
@@ -157,9 +169,15 @@ namespace UELoader
 
         /// <summary>
         /// 把实际端口写入模组端口文件 {rootDir}/MCP/ports.json：
-        /// { "ueHttpPort": &lt;int&gt;, "unityDebugPort": &lt;int|null&gt;, "updatedAt": "&lt;ISO8601&gt;" }。
+        /// { "ueHttpPort": &lt;int&gt;, "token": "&lt;hex&gt;", "unityDebugPort": &lt;int|null&gt;,
+        ///   "ueHttpStatus": "running"|"failed", "ueHttpError": "&lt;失败原因，成功时为空串&gt;",
+        ///   "updatedAt": "&lt;ISO8601&gt;" }。
         /// MCP 侧（UESDdebuger/MCP/index.js）与 McpRimDebug 均读取该文件以适配动态端口。
         /// 写入失败仅记日志，不阻断游戏启动。
+        ///
+        /// ueHttpStatus/ueHttpError（2026-09-19 新增）：服务**没起来**时也要写这份文件——
+        /// 否则 MCP 侧只能看到 "Unable to connect"，历史上被误判成「UE 未就绪 / 需要 GABP」。
+        /// 有了这两个字段，MCP 可以明确区分「模组没加载（文件是上次会话的）」与「模组加载了但端口起不来」。
         ///
         /// 鉴权设计说明（P0-CS-1，待实现，勿删除本注释）:
         /// 已拍板方案 = 游戏侧每次启动生成随机 token 并写入本文件的 token 字段，
@@ -172,9 +190,9 @@ namespace UELoader
         {
             try
             {
-                if (string.IsNullOrEmpty(rootDir) || !running)
+                if (string.IsNullOrEmpty(rootDir))
                 {
-                    UEHttpLog.Warning("[UEHttp] rootDir 为空或服务未启动，跳过端口文件写入");
+                    UEHttpLog.Warning("[UEHttp] rootDir 为空，跳过端口文件写入");
                     return;
                 }
 
@@ -183,14 +201,20 @@ namespace UELoader
 
                 // 手写 JSON 保证格式精确（Unity JsonUtility 对 null 序列化与字段名大小写不友好）
                 int? unityPort = DiscoverUnityDebugPort();
+                string status = running ? "running" : "failed";
+                string errText = running ? "" : JsonEscape(startError ?? "游戏内 HTTP 服务未启动（原因未记录）");
                 string json = "{ \"ueHttpPort\": " + ActualPort
                     + ", \"token\": \"" + (authToken ?? "") + "\""
                     + ", \"unityDebugPort\": " + (unityPort.HasValue ? unityPort.Value.ToString() : "null")
+                    + ", \"ueHttpStatus\": \"" + status + "\""
+                    + ", \"ueHttpError\": \"" + errText + "\""
                     + ", \"updatedAt\": \"" + DateTime.Now.ToString("yyyy-MM-dd'T'HH:mm:sszzz") + "\" }";
 
                 string file = Path.Combine(dir, "ports.json");
                 File.WriteAllText(file, json);
-                UEHttpLog.Message($"[UEHttp] ports.json 已写入 {file}（ueHttpPort={ActualPort}，unityDebugPort={(unityPort.HasValue ? unityPort.Value.ToString() : "null")}）");
+                UEHttpLog.Message($"[UEHttp] ports.json 已写入 {file}（ueHttpPort={ActualPort}，ueHttpStatus={status}"
+                    + $"，unityDebugPort={(unityPort.HasValue ? unityPort.Value.ToString() : "null")}"
+                    + (running ? "" : $"，ueHttpError={errText}") + "）");
             }
             catch (Exception ex)
             {
@@ -199,8 +223,20 @@ namespace UELoader
         }
 
         /// <summary>
+        /// JSON 字符串转义（手写 JSON 用）：错误信息可能含引号/反斜杠/换行，直接拼进 ports.json 会写出坏 JSON。
+        /// 只做必要替换，保证任何输入都能产出合法 JSON 单行字符串。
+        /// </summary>
+        static string JsonEscape(string s)
+        {
+            if (string.IsNullOrEmpty(s))
+                return "";
+            return s.Replace("\\", "/").Replace("\"", "'").Replace("\r", " ").Replace("\n", " ").Replace("\t", " ");
+        }
+
+        /// <summary>
         /// 重新写一次端口文件：进场景（SceneManager.sceneLoaded）后调用，此时 Unity 调试代理端口
-        /// 通常已打印到 Player.log，可刷新 unityDebugPort 字段。服务未启动或 rootDir 未知时跳过。
+        /// 通常已打印到 Player.log，可刷新 unityDebugPort 字段。rootDir 未知时跳过；
+        /// 服务未起来（running=false）时也写——把失败状态刷新给 MCP 侧（见 WritePortsFile 注释）。
         ///
         /// 注意：Unity 调试端口由 boot.config 的 wait-for-managed-debugger=1 触发，**每次运行随机**，
         /// 打印在 Player.log 的**首行**（"Starting managed debugger on port XXXX"）。游戏运行越久，
@@ -210,7 +246,7 @@ namespace UELoader
         /// </summary>
         public static void RefreshPortsFile()
         {
-            if (!running || string.IsNullOrEmpty(rootDir))
+            if (string.IsNullOrEmpty(rootDir))
                 return;
             WritePortsFile();
         }
@@ -452,6 +488,44 @@ namespace UELoader
                                 GetQueryString(request, "query"),
                                 GetQueryString(request, "category"))));
                         break;
+                    // ---------- 地图坐标光标（UEMapMarker；自研 shader，见 ShaderProject/） ----------
+                    case "mapmarker/set":
+                        result = PostGuard(request, () => UEHttpHandler.RunOnMain(() =>
+                            UEMapMarker.Set(
+                                GetString(body, "id"),
+                                GetIntOrNull(body, "x"),
+                                GetIntOrNull(body, "z"),
+                                GetString(body, "color"),
+                                GetFloatOrNull(body, "size"),
+                                GetString(body, "label"),
+                                GetFloatOrNull(body, "ttlSeconds"),
+                                GetIntOrNull(body, "mapId"),
+                                GetBool(body, "keepExisting"))));
+                        break;
+                    case "mapmarker/clear":
+                        result = PostGuard(request, () => UEHttpHandler.RunOnMain(() =>
+                            UEMapMarker.Clear(GetString(body, "id"), GetIntOrNull(body, "mapId"))));
+                        break;
+                    case "mapmarker/recolor":
+                        result = PostGuard(request, () => UEHttpHandler.RunOnMain(() =>
+                            UEMapMarker.Recolor(GetString(body, "id"), GetString(body, "color"))));
+                        break;
+                    case "mapmarker/list":
+                        result = GetGuard(request, () => UEHttpHandler.RunOnMain(() =>
+                            UEMapMarker.List()));
+                        break;
+                    // ---------- 热重载桥（HotReloadManager） ----------
+                    case "unityexplorer/hotreload/apply":
+                        result = PostGuard(request, () => UEHttpHandler.RunOnMain(() =>
+                            HotReloadManager.ApplyReload(GetString(body, "modId"))));
+                        break;
+                    case "unityexplorer/hotreload/watch":
+                        result = PostGuard(request, () => UEHttpHandler.RunOnMain(() =>
+                            HotReloadManager.SetWatch(GetBool(body, "enabled"))));
+                        break;
+                    case "unityexplorer/hotreload/status":
+                        result = GetGuard(request, () => HotReloadManager.GetStatus());
+                        break;
                     default:
                         result = new Dictionary<string, object>
                         {
@@ -524,6 +598,16 @@ namespace UELoader
                     if (method == "DELETE")
                         return "hookId=" + GetString(body, "hookId");
                     return null;
+                case "unityexplorer/hotreload/apply":
+                    return "modId=" + GetString(body, "modId");
+                case "unityexplorer/hotreload/watch":
+                    return "enabled=" + GetBool(body, "enabled");
+                case "mapmarker/set":
+                    return $"id={GetString(body, "id")},x={GetIntOrNull(body, "x")},z={GetIntOrNull(body, "z")},color={GetString(body, "color")}";
+                case "mapmarker/clear":
+                    return "id=" + GetString(body, "id");
+                case "mapmarker/recolor":
+                    return $"id={GetString(body, "id")},color={GetString(body, "color")}";
                 default:
                     return null;
             }
@@ -621,6 +705,22 @@ namespace UELoader
                 if (v is int i) return i;
                 if (v is double d) return (int)d;
                 if (v is string s && int.TryParse(s, out int p)) return p;
+            }
+            return null;
+        }
+
+        static float? GetFloatOrNull(Dictionary<string, object> body, string key)
+        {
+            if (body != null && body.TryGetValue(key, out object v) && v != null)
+            {
+                if (v is long l) return l;
+                if (v is int i) return i;
+                if (v is double d) return (float)d;
+                if (v is float f) return f;
+                if (v is string s
+                    && float.TryParse(s, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out float p))
+                    return p;
             }
             return null;
         }

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <RootNamespace>HotReloadTests</RootNamespace>
+    <AssemblyName>HotReloadTests</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 直接 link 被测源码，避免测试工程引用 UELoader 程序集（其依赖 Verse/Unity） -->
+    <Compile Include="..\UELoader\HotReloadValidator.cs" Link="HotReloadValidator.cs" />
+    <!-- 被测源码已改为纯反射（不再用 Mono.Cecil），故无需 Cecil 引用 -->
+    <Reference Include="0Harmony">
+      <HintPath>..\UELoader\lib\0Harmony.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

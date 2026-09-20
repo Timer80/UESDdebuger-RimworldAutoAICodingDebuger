@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -294,34 +294,15 @@ namespace UELoader
                 cfg["appId"] = AppId;
                 cfg["startTimeout"] = StartTimeoutMs;
 
-                // 手写紧凑 JSON（保持与 MCP 侧读取兼容；UELightJson 无缩进）
-                var sb = new StringBuilder(256);
-                sb.Append("{\n");
-                bool first = true;
-                foreach (var kv in cfg)
-                {
-                    if (!first) sb.Append(",\n");
-                    first = false;
-                    sb.Append("  \"").Append(UELightJson.Escape(kv.Key)).Append("\": ");
-                    object v = kv.Value;
-                    if (v is string str)
-                        sb.Append('"').Append(UELightJson.Escape(str)).Append('"');
-                    else if (v is bool b)
-                        sb.Append(b ? "true" : "false");
-                    else if (v is int || v is long || v is short || v is byte ||
-                             v is uint || v is ulong || v is ushort || v is sbyte)
-                        sb.Append(Convert.ToInt64(v, System.Globalization.CultureInfo.InvariantCulture)
-                            .ToString(System.Globalization.CultureInfo.InvariantCulture));
-                    else if (v is double d)
-                        sb.Append(d.ToString("R", System.Globalization.CultureInfo.InvariantCulture));
-                    else if (v == null)
-                        sb.Append("null");
-                    else
-                        sb.Append('"').Append(UELightJson.Escape(v.ToString())).Append('"');
-                }
-                sb.Append("\n}");
-
-                File.WriteAllText(file, sb.ToString(), new UTF8Encoding(false));
+                // 复用 UELightJson.Serialize（2026-09-17 修）：
+                // 原手写拼接只认标量，嵌套对象（timings / rimBridge）会落到 ToString() 分支，
+                // 被写成 "System.Collections.Generic.Dictionary`2[System.String,System.Object]"，
+                // 导致 MCP 侧 config.rimBridge 恒为字符串、rimBridge.requestTimeoutMs 与
+                // rimBridge.longTask.* 等配置永远读不到（超时上界、采样间隔只能吃硬编码默认值）。
+                // UELightJson.Serialize 已能递归处理 IDictionary/IEnumerable（UELightJson.cs:93-120），
+                // UELoaderSettings.WriteProjectConfigs 也早已在用同一实现——统一到它，避免两个写入方分叉。
+                // 代价：输出由两空格缩进变为单行紧凑（与 toolConfig.json 现形态一致），解析侧兼容两种格式。
+                File.WriteAllText(file, UELightJson.Serialize(cfg), new UTF8Encoding(false));
                 message = (string.IsNullOrEmpty(updated) ? "未探测到可更新的路径字段，已保留现有值" : "已更新:" + updated) + " → " + file;
                 return true;
             }

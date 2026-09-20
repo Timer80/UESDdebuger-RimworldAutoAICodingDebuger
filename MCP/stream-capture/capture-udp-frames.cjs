@@ -4,12 +4,12 @@
  * ------------------------------------
  * 监听 RIMAPI 的 UDP 视频流端口，把每个数据报里的 JPEG 帧保存成文件序列。
  *
- * 帧格式（实测）：
- *   offset 0..3 : "CAM2"            (ASCII 魔数)
- *   offset 4..7 : 4B 整数           (疑似帧序号/长度标记)
- *   offset 8    : 1B
- *   offset 9..  : JPEG 帧 (FFD8 .. FFD9)
- * 解析时不依赖前缀，直接扫描数据报内首个 FFD8 作为 JPEG 起点。
+ * 帧格式（RIMAPI UdpCameraStream，一帧可能被拆成多个数据报）：
+ *   "CAM"(3B) + 本块长度 int32LE(4B) + chunkIndex(1B) + totalChunks(1B) + JPEG负载
+ *
+ * 重组（reassemble.cjs）：
+ *   以 chunkIndex==0 开启新帧，累计各块，收齐 totalChunks 个块后拼出完整 JPEG 写盘。
+ *   非 CAM 数据报回退到扫描首个 FFD8 成帧（向后兼容旧单包流）。
  *
  * 运行：
  *   node capture-udp-frames.cjs [--host HOST] [--port PORT] [--out DIR]
@@ -29,6 +29,7 @@
 const dgram = require('dgram');
 const fs = require('fs');
 const path = require('path');
+const { FrameReassembler } = require('./reassemble.cjs');
 
 function parseArgs(argv) {
   const args = { host: '127.0.0.1', port: 5007, out: null, stopMark: null,
@@ -48,13 +49,6 @@ function parseArgs(argv) {
   return args;
 }
 
-function findJPEGStart(buf) {
-  for (let i = 0; i < buf.length - 1; i++) {
-    if (buf[i] === 0xFF && buf[i + 1] === 0xD8) return i;
-  }
-  return -1;
-}
-
 function finish(socket, resolve, reason) {
   try { socket.close(); } catch (_) {}
   process.stderr.write(`[capture] stopped: ${reason}\n`);
@@ -70,6 +64,7 @@ async function main() {
     try { fs.unlinkSync(stopMark); } catch (_) {}
   }
 
+  const reassembler = new FrameReassembler({ timeoutMs: 400 });
   const socket = dgram.createSocket('udp4');
   let frames = 0;
   let startTime = Date.now();
@@ -82,16 +77,14 @@ async function main() {
 
     socket.on('message', (msg) => {
       lastPacketAt = Date.now();
-      const off = findJPEGStart(msg);
-      if (off < 0) {
-        process.stderr.write(`[warn] datagram ${msg.length}B no JPEG SOI\n`);
-        return;
-      }
-      const jpg = msg.subarray(off);
+      const res = reassembler.push(msg);
+      if (res.type === 'dropped') return;
+      if (res.type === 'pending') return;
+      // completed：res.jpg 是一张完整 JPEG（重组或旧单包）
       frames++;
-      const name = 'frame_' + String(frames).padStart(6, '0') + '.jpg';
+      const name = 'frame_' + String(frames).padStart(7, '0') + '.jpg';
       const file = path.join(args.out, name);
-      fs.writeFileSync(file, jpg);
+      fs.writeFileSync(file, res.jpg);
       saved.push(file);
       if (frames % 50 === 0) process.stderr.write(`[capture] ${frames} frames\n`);
       if (frames >= args.maxFrames) {
@@ -101,6 +94,9 @@ async function main() {
     });
 
     socket.bind(args.port, args.host, () => {
+      // 必须在 bind 之后设置才生效。增大 UDP 接收缓冲区：RIMAPI 一帧拆成多个
+      // ~60KB chunk 会在同步循环里连发，默认 SO_RCVBUF(64KB) 装不下多块，导致大帧丢包。
+      try { socket.setRecvBufferSize(8 * 1024 * 1024); } catch (_e) { /* 平台不支持时忽略 */ }
       process.stderr.write(`[capture] listening udp ${args.host}:${args.port} -> ${args.out}\n`);
     });
 
@@ -163,7 +159,11 @@ async function main() {
   process.stdout.write('\n[[CAPTURE_RESULT]]\n' + JSON.stringify(result, null, 2) + '\n');
 }
 
-main().catch((e) => {
-  process.stderr.write('[capture] FATAL: ' + (e && e.stack || e) + '\n');
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((e) => {
+    process.stderr.write('[capture] FATAL: ' + (e && e.stack || e) + '\n');
+    process.exit(1);
+  });
+}
+
+module.exports = { main };

@@ -79,8 +79,10 @@
   <UESDdebuger.ToolDesc.search_debug_actions>[Debug] 按关键词搜索 DebugAction</UESDdebuger.ToolDesc.search_debug_actions>
   <UESDdebuger.ToolDesc.get_map_structure>[Map] 读取地图结构数据</UESDdebuger.ToolDesc.get_map_structure>
   <UESDdebuger.ToolDesc.search_map_structure>[Map] 按关键词搜索地图结构</UESDdebuger.ToolDesc.search_map_structure>
+  <UESDdebuger.ToolDesc.post_map_marker>[Map] 在地图上打一个坐标光标（炼狱魔王炮风格，可指定颜色，玩家左键点击即消除）</UESDdebuger.ToolDesc.post_map_marker>
   <UESDdebuger.ToolDesc.status>[调试] 查看调试会话状态</UESDdebuger.ToolDesc.status>
   <UESDdebuger.ToolDesc.attach>[调试] 连接 RimWorld 的 mono 调试端口</UESDdebuger.ToolDesc.attach>
+  <UESDdebuger.ToolDesc.reconnect>[调试] 重连调试会话（自动重新发现端口）</UESDdebuger.ToolDesc.reconnect>
   <UESDdebuger.ToolDesc.detach>[调试] 安全断开调试会话</UESDdebuger.ToolDesc.detach>
   <UESDdebuger.ToolDesc.resume>[调试] 恢复 VM 运行</UESDdebuger.ToolDesc.resume>
   <UESDdebuger.ToolDesc.suspend>[调试] 挂起整个 VM</UESDdebuger.ToolDesc.suspend>

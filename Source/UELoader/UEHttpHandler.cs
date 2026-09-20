@@ -325,7 +325,8 @@ namespace UELoader
             };
 
             // 游戏状态块（不依赖 RIMAPI）：直读 Verse 静态字段，供 MCP 的 start_game
-            // （游戏初始化完成/主菜单就绪）与 start_quick_test（世界 tick 走动）判定。
+            // （游戏初始化完成/主菜单就绪）与 start_quick_test（世界 tick 走动）判定；
+            // 另含 activePackageIds（已激活模组列表），供 MCP 做能力→所需模组的可用性映射。
             // 注意：HTTP 线程直接读取纯静态字段/引用（主菜单时主线程调度器不可用，无法投递主线程）；
             // Find.TickManager 在 Current.Game 为 null 时会抛 NRE，必须先判空。各读取包 try/catch。
             var gameStatus = new Dictionary<string, object>
@@ -360,6 +361,27 @@ namespace UELoader
             {
                 UEHttpLog.Warning($"[UEHttp] GetStatus game block failed: {ex.Message}");
             }
+
+            // 已激活模组（packageId）列表 + 数量：供 MCP 侧做「能力 → 所需模组 → 是否加载」映射
+            // （2026-09-19 MCP 工具链问题记录 §4：调用方不必自己拼 activePackageIds 与 ModsConfig）。
+            // 注意：ModsConfig.ActiveModsInLoadOrder 读的是游戏启动后建立并缓存的列表，HTTP 线程读取安全；
+            // 任何失败只影响该字段，不影响整个状态响应。
+            try
+            {
+                var activeIds = new List<string>();
+                foreach (ModMetaData m in ModsConfig.ActiveModsInLoadOrder)
+                {
+                    if (m != null && !string.IsNullOrEmpty(m.PackageId))
+                        activeIds.Add(m.PackageId);
+                }
+                gameStatus["activePackageIds"] = activeIds;
+                gameStatus["activeModCount"] = activeIds.Count;
+            }
+            catch (Exception ex)
+            {
+                UEHttpLog.Warning($"[UEHttp] GetStatus active-mods block failed: {ex.Message}");
+            }
+
             status["game"] = gameStatus;
 
             // 主菜单下 UE 尚未初始化、主线程调度器也不可用（Mod 构造非主线程，见 UEHttpServer.Start 注释）。

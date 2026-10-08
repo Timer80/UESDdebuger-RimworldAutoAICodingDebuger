@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <RootNamespace>ConfigJsonTests</RootNamespace>
+    <AssemblyName>ConfigJsonTests</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 直接 link 被测源码：UELightJson 无 Verse/Unity 依赖，可脱离游戏编译 -->
+    <Compile Include="..\UELoader\UELightJson.cs" Link="UELightJson.cs" />
+  </ItemGroup>
+</Project>

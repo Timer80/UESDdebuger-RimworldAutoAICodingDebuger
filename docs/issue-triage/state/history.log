@@ -1,0 +1,31 @@
+#1	20261001-181437	new=[]	changed=[15]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261001-181437.md
+#1	20261001-181437	FALSE-POSITIVE	我自己的多行 🤖 批注；已修 Get-EntryHash 剥离规则
+#3	20261001-182103	new=[16]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261001-182103.md
+#4	20261001-182734	new=[]	changed=[16]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261001-182734.md
+#4	20261001-182734	FALSE-POSITIVE	删改条目原有行触发自唤醒；已定规则：批注必须纯追加
+#6	20261001-193436	new=[18,17]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261001-193436.md
+#7	20261001-200548	new=[]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261001-200548.md
+#8	20261001-200606	new=[19]	changed=[]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261001-200606.md
+#9	20261001-201005	new=[20]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261001-201005.md
+#10	20261001-210721	new=[]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261001-210721.md
+#11	20261001-210748	new=[21]	changed=[]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261001-210748.md
+#12	20261001-211558	new=[]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261001-211558.md
+#13	20261001-212044	new=[22]	changed=[]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261001-212044.md
+#14	20261001-213425	new=[🤖 Triage 台账]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261001-213425.md
+#15	20261001-215032	new=[]	changed=[🤖 Triage 台账]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261001-215032.md
+#16	20261002-010149	new=[]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261002-010149.md
+#17	20261002-013330	new=[]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261002-013330.md
+#18	20261002-013432	new=[26]	changed=[]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261002-013432.md
+#19	20261002-225632	new=[35,34,33,32,31,30,29,28]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261002-225632.md
+#20	20261002-234147	new=[]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261002-234147.md
+#21	20261002-234325	new=[36]	changed=[]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261002-234325.md
+#22	20261003-004558	new=[]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261003-004558.md
+#23	20261003-004729	new=[38,37]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261003-004729.md
+#24	20261003-010209	new=[39]	changed=[]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261003-010209.md
+#25	20261003-010344	new=[]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261003-010344.md
+#26	20261003-113414	new=[]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261003-113414.md
+#27	20261003-113417	new=[]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261003-113417.md
+#28	20261003-203131	new=[52,📡 [FYI · 跨项目协调 · **不是 issue 条目**] TEXT20 进入冷重启窗口,51,50,49]	changed=[索引]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261003-203131.md
+#29	20261003-204139	new=[48,47,46,45,44,43,42]	changed=[]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261003-204139.md
+#30	20261003-204723	new=[]	changed=[44,42]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261003-204723.md
+#31	20261003-205040	new=[]	changed=[42]	-> C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\docs\issue-triage\inbox\pending-20261003-205040.md

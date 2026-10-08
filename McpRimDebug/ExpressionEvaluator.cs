@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using Mono.Debugger.Soft;
 
@@ -363,6 +364,12 @@ namespace McpRimDebug
     /// </summary>
     public sealed class ExpressionEvaluator
     {
+        /// <summary>沿基类链向上查找字段/属性/方法时最多上溯的继承深度（防无底线循环被单边限制）。</summary>
+        const int MaxBaseTypeWalk = 24;
+
+        /// <summary>把根标识符折叠为静态类型全名时最多合并的连续成员段数（防把整条成员链误当类型名）。</summary>
+        const int StaticLookupSegmentsMax = 8;
+
         /// <summary>按文本求值（内部会解析）。</summary>
         public EvalResult Evaluate(EvalContext ctx, string expression)
         {
@@ -554,7 +561,7 @@ namespace McpRimDebug
             start = 0;
             var segs = new List<string> { rootName };
             int i = 0;
-            while (i < chain.Count && !chain[i].IsCall && segs.Count < 8)
+            while (i < chain.Count && !chain[i].IsCall && segs.Count < StaticLookupSegmentsMax)
             {
                 segs.Add(chain[i].Text);
                 i++;
@@ -695,7 +702,7 @@ namespace McpRimDebug
         {
             TypeMirror cur = type;
             int levels = 0;
-            while (cur != null && levels < 24)
+            while (cur != null && levels < MaxBaseTypeWalk)
             {
                 FieldInfoMirror f = null;
                 try { f = cur.GetField(name); }
@@ -715,7 +722,7 @@ namespace McpRimDebug
         {
             TypeMirror cur = type;
             int levels = 0;
-            while (cur != null && levels < 24)
+            while (cur != null && levels < MaxBaseTypeWalk)
             {
                 PropertyInfoMirror p = null;
                 try { p = cur.GetProperty(name); }
@@ -790,7 +797,7 @@ namespace McpRimDebug
             var candidates = new List<MethodMirror>();
             TypeMirror cur = type;
             int levels = 0;
-            while (cur != null && levels < 24)
+            while (cur != null && levels < MaxBaseTypeWalk)
             {
                 MethodMirror[] ms = null;
                 try { ms = cur.GetMethods(); }
@@ -851,9 +858,12 @@ namespace McpRimDebug
             return best;
         }
 
+        // arity（元数）= 方法的实参/参数个数。此为正确拼写（非 "arity" 的近义写法），
+        // 用于 SelectMethod 参数个数不匹配时的错误提示：列出各候选可能的参数个数，如 "0/1/2"。
+        // 此处对候选只做去重计数，Set 仅用于判重与去除重复 arity，无需有序容器 —— 用 HashSet + 显式排序即可。
         static string ArityText(List<MethodMirror> candidates)
         {
-            var set = new SortedSet<int>();
+            var set = new HashSet<int>();
             foreach (MethodMirror m in candidates)
             {
                 try { set.Add(m.GetParameters().Length); }
@@ -863,7 +873,7 @@ namespace McpRimDebug
             if (set.Count == 0)
                 return "未知";
             var parts = new List<string>();
-            foreach (int a in set)
+            foreach (int a in set.OrderBy(x => x))
                 parts.Add(a.ToString());
             return string.Join("/", parts.ToArray());
         }

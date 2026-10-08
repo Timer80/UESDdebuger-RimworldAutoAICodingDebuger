@@ -24,6 +24,17 @@ namespace McpRimDebug
     /// <summary>Task 3：断点与异常事件请求工具（break_add / break_list / break_remove / break_clear / break_exception）。</summary>
     public sealed partial class DebugSession
     {
+        // ---------------------------------------------------------------- 方法规格（methodSpec）分隔符常量
+        // P3-MD-2：把 method 规格解析中的字面分隔符集中为命名常量，避免各处魔法字符。
+        /// <summary>方法规格中「类型:方法」的类型/方法分隔符（如 "Verse.Thing:DoWork"）。</summary>
+        private const char SpecTypeSeparator = ':';
+        /// <summary>参数签名左括号（如 "DoWork(" 开始）。</summary>
+        private const char SpecParamOpen = '(';
+        /// <summary>参数签名右括号。</summary>
+        private const char SpecParamClose = ')';
+        /// <summary>参数列表内参数分隔逗号。</summary>
+        private const char ParamSeparator = ',';
+
         // ---------------------------------------------------------------- break_add
 
         /// <summary>
@@ -36,7 +47,9 @@ namespace McpRimDebug
             if (string.IsNullOrWhiteSpace(methodSpec))
                 return ToolResult.ErrorResult("method 参数不能为空（格式: 命名空间.类型名:方法名，如 Verse.Thing:DoWork）");
 
-            lock (commandLock)
+            if (!TryEnterCommandLock(out string busy))
+                return ToolResult.ErrorResult(busy);
+            try
             {
                 VirtualMachine target;
                 lock (stateLock)
@@ -50,9 +63,17 @@ namespace McpRimDebug
                 {
                     MethodMirror method = FindMethod(target, methodSpec);
                     if (method == null)
-                        return ToolResult.ErrorResult("未找到方法: " + methodSpec
+                    {
+                        // 诊断辅助：FindMethod 仅精确匹配声明方法，若方法由基类声明（继承），提示改用直接声明类型
+                        string baseHint = FindInheritedDeclaringType(target, methodSpec);
+                        string msg = "未找到方法: " + methodSpec
                             + "。类型名请使用完整形式（与 Assembly.GetType 一致，如 Verse.Thing:DoWork）；"
-                            + "若方法是重载，请附带参数签名，如 Verse.Thing:DoWork(System.String)");
+                            + "若方法是重载，请附带参数签名，如 Verse.Thing:DoWork(System.String)";
+                        if (baseHint != null)
+                            msg += "；该方法继承自 " + baseHint + "，请使用直接声明该方法的类型设置断点（如 "
+                                + baseHint + ":" + MethodNameOf(methodSpec) + "）";
+                        return ToolResult.ErrorResult(msg);
+                    }
 
                     long ilOffset;
                     string desc;
@@ -85,6 +106,7 @@ namespace McpRimDebug
                             Method = method,
                             Request = req,
                         };
+                        breakpointsAddedTotal++; // 统计：break_add 累计成功次数
                     }
 
                     var data = new Dictionary<string, object>
@@ -108,6 +130,7 @@ namespace McpRimDebug
                     return ToolResult.ErrorResult("break_add 失败: " + FriendlyError(ex, "设置断点"));
                 }
             }
+            finally { ExitCommandLock(); }
         }
 
         // ---------------------------------------------------------------- break_list
@@ -152,7 +175,9 @@ namespace McpRimDebug
                     return ToolResult.ErrorResult("断点 #" + id + " 不存在");
             }
 
-            lock (commandLock)
+            if (!TryEnterCommandLock(out string busy))
+                return ToolResult.ErrorResult(busy);
+            try
             {
                 try
                 {
@@ -167,8 +192,13 @@ namespace McpRimDebug
                 {
                     return ToolResult.ErrorResult("break_remove 失败: " + FriendlyError(ex, "禁用断点"));
                 }
-                lock (breakpointsLock) { breakpoints.Remove(id); }
+                lock (breakpointsLock)
+                {
+                    breakpoints.Remove(id);
+                    breakpointsRemovedTotal++; // 统计：break_remove 累计释放次数
+                }
             }
+            finally { ExitCommandLock(); }
             return ToolResult.OkResult("断点 #" + id + " 已移除（" + entry.Description + "）");
         }
 
@@ -185,7 +215,9 @@ namespace McpRimDebug
             }
             lock (breakpointsLock) { all = new List<BreakpointEntry>(breakpoints.Values); }
 
-            lock (commandLock)
+            if (!TryEnterCommandLock(out string busy))
+                return ToolResult.ErrorResult(busy);
+            try
             {
                 foreach (BreakpointEntry e in all)
                 {
@@ -197,8 +229,13 @@ namespace McpRimDebug
                     }
                     catch { /* 单个断点禁用失败不阻断整体清空 */ }
                 }
-                lock (breakpointsLock) { breakpoints.Clear(); }
+                lock (breakpointsLock)
+                {
+                    breakpoints.Clear();
+                    breakpointsRemovedTotal += all.Count; // 统计：break_clear 按清空数量累计释放
+                }
             }
+            finally { ExitCommandLock(); }
             return ToolResult.OkResult("已清空 " + all.Count + " 个断点");
         }
 
@@ -215,7 +252,9 @@ namespace McpRimDebug
             if (!c && !u)
                 return ToolResult.ErrorResult("caught 与 uncaught 不能同时为 false（否则无异常事件可触发）");
 
-            lock (commandLock)
+            if (!TryEnterCommandLock(out string busy))
+                return ToolResult.ErrorResult(busy);
+            try
             {
                 VirtualMachine target;
                 lock (stateLock)
@@ -269,6 +308,7 @@ namespace McpRimDebug
                     return ToolResult.ErrorResult("break_exception 失败: " + FriendlyError(ex, "创建异常事件请求"));
                 }
             }
+            finally { ExitCommandLock(); }
         }
 
         // ---------------------------------------------------------------- 查找辅助
@@ -281,7 +321,7 @@ namespace McpRimDebug
         {
             string typePart = null;
             string methodPart = spec.Trim();
-            int colon = methodPart.IndexOf(':');
+            int colon = methodPart.IndexOf(SpecTypeSeparator);
             if (colon >= 0)
             {
                 typePart = methodPart.Substring(0, colon).Trim();
@@ -292,11 +332,11 @@ namespace McpRimDebug
 
             string methodName = methodPart;
             string paramSig = null;
-            int lp = methodPart.IndexOf('(');
+            int lp = methodPart.IndexOf(SpecParamOpen);
             if (lp >= 0)
             {
                 methodName = methodPart.Substring(0, lp).Trim();
-                if (methodPart.EndsWith(")"))
+                if (methodPart.EndsWith(SpecParamClose + ""))
                     paramSig = methodPart.Substring(lp + 1, methodPart.Length - lp - 2).Trim();
             }
             if (methodName.Length == 0)
@@ -338,6 +378,70 @@ namespace McpRimDebug
             return null;
         }
 
+        /// <summary>解析 spec 中的方法名部分（去掉 "类型:" 前缀与参数签名）。</summary>
+        static string MethodNameOf(string spec)
+        {
+            string name = (spec ?? string.Empty).Trim();
+            int colon = name.IndexOf(SpecTypeSeparator);
+            if (colon >= 0)
+                name = name.Substring(colon + 1).Trim();
+            int lp = name.IndexOf(SpecParamOpen);
+            if (lp >= 0)
+                name = name.Substring(0, lp).Trim();
+            return name;
+        }
+
+        /// <summary>诊断辅助（仅错误路径调用）：FindMethod 未命中时，沿基类链查找该方法是否由基类声明，
+        /// 返回直接声明该方法的类型全名；类型不存在或方法非继承时返回 null。</summary>
+        static string FindInheritedDeclaringType(VirtualMachine target, string spec)
+        {
+            string trimmed = (spec ?? string.Empty).Trim();
+            int colon = trimmed.IndexOf(SpecTypeSeparator);
+            if (colon <= 0)
+                return null;
+            string typePart = trimmed.Substring(0, colon).Trim();
+            string methodName = MethodNameOf(trimmed);
+            if (typePart.Length == 0 || methodName.Length == 0)
+                return null;
+
+            List<TypeMirror> candidates = new List<TypeMirror>();
+            foreach (bool ignoreCase in new[] { false, true })
+            {
+                try
+                {
+                    IList<TypeMirror> byName = target.GetTypes(typePart, ignoreCase);
+                    if (byName != null)
+                        candidates.AddRange(byName);
+                }
+                catch { }
+                if (candidates.Count > 0)
+                    break;
+            }
+
+            foreach (TypeMirror t in candidates)
+            {
+                if (!TypeNameMatches(t, typePart))
+                    continue;
+                TypeMirror baseType = t.BaseType;
+                int guard = 0;
+                while (baseType != null && guard++ < 64)
+                {
+                    try
+                    {
+                        foreach (MethodMirror m in baseType.GetMethods())
+                        {
+                            if (string.Equals(m.Name, methodName, StringComparison.Ordinal))
+                                return baseType.FullName;
+                        }
+                    }
+                    catch { }
+                    baseType = baseType.BaseType;
+                }
+                break;
+            }
+            return null;
+        }
+
         /// <summary>类型全名精确匹配；允许用户省略命名空间前缀（末段匹配）。</summary>
         static bool TypeNameMatches(TypeMirror t, string typePart)
         {
@@ -365,8 +469,8 @@ namespace McpRimDebug
 
         static string ExtractParams(string fullName)
         {
-            int lp = fullName.IndexOf('(');
-            int rp = fullName.LastIndexOf(')');
+            int lp = fullName.IndexOf(SpecParamOpen);
+            int rp = fullName.LastIndexOf(SpecParamClose);
             if (lp < 0 || rp <= lp)
                 return null;
             return fullName.Substring(lp + 1, rp - lp - 1);
@@ -381,7 +485,7 @@ namespace McpRimDebug
         {
             if (s.Length == 0)
                 return s;
-            string[] parts = s.Split(',');
+            string[] parts = s.Split(ParamSeparator);
             var res = new StringBuilder();
             for (int i = 0; i < parts.Length; i++)
             {
@@ -390,7 +494,7 @@ namespace McpRimDebug
                 if (dot >= 0)
                     p = p.Substring(dot + 1);
                 if (i > 0)
-                    res.Append(',');
+                    res.Append(ParamSeparator);
                 res.Append(p);
             }
             return res.ToString();

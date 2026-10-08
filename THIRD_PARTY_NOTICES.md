@@ -19,10 +19,10 @@
 | `Assemblies/MonoMod.*.dll` | **MIT** | MonoMod（0x0ade） |
 | `McpRimDebug/SdbClient/` | **MIT/X11** | vendored Mono.Debugger.Soft（mono 项目，协议 2.57，内容保持上游原样） |
 | `McpRimDebug` 依赖：ModelContextProtocol SDK 2.1.0、Mono.Cecil 0.10.4 | **MIT** | NuGet 依赖 |
+| `Source/UELoader/lib/0Harmony.dll` | **MIT** | brrainz（Lib.Harmony）0Harmony **v2.3.3**，本项目**编译期引用副本（`Private=false`，不部署到 `Assemblies/`）**；运行期真身由第三方模组 `brrainz.harmony` 提供。版本/SHA 见 `Source/UELoader/lib/README.md` |
 | `MCP/` 依赖：`@modelcontextprotocol/sdk`、`express`、`cors`、`hono` 等 | **MIT** | npm 依赖（各自保留版权声明，见 `MCP/node_modules/*/LICENSE`） |
-| `UE_official/`、`.staging/ue/` | **GPL-3.0 / LGPL-2.1 / MIT** | 官方 UE 发行版暂存存档（含 zips、Runtime 目录），仅供本地构建参考，不作为模组分发内容 |
-| `_decomp/` | **禁止分发** | 反编译的 RimWorld 游戏源码（Ludeon 专有），仅本地参考，严禁外发 |
-| `未分类文件/`、`调试文件覆盖/` | **禁止分发** | 游戏本体可执行文件副本（`RimWorldWin64.exe`、`UnityPlayer.dll`、`boot.config`）与调试覆盖文件，严禁外发 |
+| `UE_official/`、`.staging/ue/` | **GPL-3.0 / LGPL-2.1 / MIT** | 官方 UE 发行版暂存存档（含 zips、Runtime 目录），仅供本地构建参考，不作为模组分发内容（当前工作区不含，本地参考物） |
+| `_decomp/`、`未分类文件/`、`调试文件覆盖/` | **禁止分发** | 反编译游戏源码 / 游戏本体副本 / 调试覆盖文件，仅本地参考，严禁外发（当前工作区不含，本地参考物） |
 
 ## 2. GPL-3.0（覆盖游戏内模组部分）
 
@@ -44,6 +44,7 @@ UniverseLib 1.5.1（见 `Source/UniverseLib-official/UniverseLib-1.5.1/LICENSE`�
 
 - Mono.Cecil / MonoMod：见各二进制随附声明；
 - Mono.Debugger.Soft（vendored）：Copyright (C) 2006 Novell, Inc 及后续贡献者；
+- 0Harmony（本项目 `Source/UELoader/lib/0Harmony.dll` 编译副本）：Copyright (C) brrainz（Lib.Harmony，`brrainz.harmony`），MIT 授权；仅作编译期引用，不上线到 `Assemblies/`；
 - ModelContextProtocol SDK：Copyright Microsoft；
 - 其余 npm 包：见 `MCP/node_modules/*/LICENSE`。
 
@@ -54,11 +55,12 @@ MIT 许可全文见 `McpRimDebug/LICENSE` 与 `MCP/LICENSE`。
 以下内容**不得**进入任何对外发布包（GitHub、Steam Workshop 等），否则构成对
 Ludeon Studios 版权及 RimWorld EULA 的违反：
 
-1. `_decomp/*.decompiled.cs` —— 反编译的游戏源码；
-2. `未分类文件/` —— `RimWorldWin64.exe`、`UnityPlayer.dll`、`WinPixEventRuntime.dll`、`boot.config`；
-3. `调试文件覆盖/` —— 游戏文件覆盖副本（`RimWorldWin64_Data/boot.config` 等）。
+1. `_decomp/*.decompiled.cs` —— 反编译的游戏源码（**本地参考物**，当前工作区不含/不提交）；
+2. `未分类文件/` —— `RimWorldWin64.exe`、`UnityPlayer.dll`、`WinPixEventRuntime.dll`、`boot.config`（游戏本体副本，**本地参考物**，当前工作区不含/不提交）；
+3. `调试文件覆盖/` —— 游戏文件覆盖副本（`RimWorldWin64_Data/boot.config` 等）（**本地参考物**，当前工作区不含/不提交）。
 
-以上路径已加入 `.gitignore`，且 `_decomp/` 已从 git 索引移除（仅保留本地工作区文件）。
+以上路径已加入 `.gitignore`；`_decomp/` 等含游戏本体的本地参考目录**不随源码树分发**（当前发布树仅含运行必需 + 重编译源码）。
+`release-nonessential-archive/` 为本项目「非运行必需项归档」目录（测试脚本、审查文档、运行日志、AI 工具链等），**仅本地留存、不参与上传/发布**，不入发布包。
 
 ## 6. RimWorld 模组合规提示
 
@@ -83,3 +85,5 @@ UnityExplorer 4.9.0 与 UniverseLib 1.5.1 随包源码均**经过本地重编译
 - `Source/UniverseLib-official/MODIFICATIONS.md`（UniverseLib，LGPL-2.1）
 
 源码内对应位置以 `<!-- UESDdebuger recompile: ... -->` 注释标注。
+
+> **补充（P1-BD-1）**：为解除对其它模组路径的编译依赖，项目在 `Source/UELoader/lib/0Harmony.dll` 放置了 **brrainz 0Harmony v2.3.3 的编译副本**（`Private=false`，`DontCopyLocal`，**不部署到 `Assemblies/`**）。它与上述「UE 重编译面使用 Lib.Harmony 2.3.3」保持同一运行版本对称；运行期真身由 `brrainz.harmony` 模组加载，仓库内此副本绝不参与运行装载。副本来源版本与 SHA-256 见 `Source/UELoader/lib/README.md`。

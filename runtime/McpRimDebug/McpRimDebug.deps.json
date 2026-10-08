@@ -6,7 +6,7 @@
   "compilationOptions": {},
   "targets": {
     ".NETCoreApp,Version=v10.0": {
-      "McpRimDebug/0.8.0.0": {
+      "McpRimDebug/0.9.0.0": {
         "dependencies": {
           "ModelContextProtocol": "2.1.0",
           "Mono.Cecil": "0.10.4"
@@ -170,7 +170,7 @@
     }
   },
   "libraries": {
-    "McpRimDebug/0.8.0.0": {
+    "McpRimDebug/0.9.0.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

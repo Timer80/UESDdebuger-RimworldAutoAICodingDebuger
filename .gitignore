@@ -70,3 +70,11 @@ ShaderProject/*.log
 ShaderProject/*.unitypackage
 # 打包中间产物（权威产物是模组根的 AssetBundles/uecoordcursor，由打包脚本自动部署过去）
 ShaderProject/Assets/AssetBundles/
+
+# ---- 全量同步后新增（2026-10-09）：运行期与一次性产物不入库 ----
+/InternalTrace*.log
+/_poc_roslyn/*.dll
+/_poc_roslyn/*.exe
+/_poc_roslyn/*.pdb
+/temp/
+/runtime/McpRimDebug/*.pdb

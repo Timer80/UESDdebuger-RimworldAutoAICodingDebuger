@@ -38,6 +38,14 @@ namespace McpRimDebug
             }
         }
 
+        // ---- P2-MD-2：find_* 会话内元数据缓存 ----
+        // 每个程序集一次 GetMetadata()（含一次 socket 元数据 blob 拉取）非常昂贵；find_types/find_methods
+        // 各自对同一集合程序集循环扫描。用 asm.GetName().FullName 作 key 缓存 AssemblyDefinition，
+        // 会话内重复 find_* 直接命中，避免重复拉取。首次调用才 InvalidateAssemblyCaches（刷新 attach 后
+        // 游戏持续加载的程序集可见性）；AssemblyLoad/TypeLoad 事件与 HandleDisconnect/ResetSession 时清缓存。
+        readonly object metadataCacheLock = new object();
+        Dictionary<string, AssemblyDefinition> assemblyMetadataCache;
+
         // ---------------------------------------------------------------- eval
 
         /// <summary>
@@ -68,7 +76,9 @@ namespace McpRimDebug
             bool needsThread = ExpressionEvaluator.NeedsThread(parsed);
             bool needsFrame = ExpressionEvaluator.NeedsFrame(parsed);
 
-            lock (commandLock)
+            if (!TryEnterCommandLock(out string busy))
+                return ToolResult.ErrorResult(busy);
+            try
             {
                 VirtualMachine target;
                 lock (stateLock)
@@ -79,83 +89,82 @@ namespace McpRimDebug
                 }
 
                 bool weSuspended = false;
+                // ---- 挂起窗口：以 target.Suspend() 是否真正发起挂起为准 ----
+                // P1-MD-4：不再依赖本地 IsSuspended() 缓存判定（竞态下缓存可能滞后）：
+                // 直接 Suspend，若抛 VMNotSuspendedException 说明本就挂起，无需/不该我们 Resume。
                 try
                 {
-                    // ---- 挂起窗口：VM 运行态 → 自动挂起；已挂起 → 直接求值 ----
-                    if (!IsSuspended())
+                    target.Suspend();
+                    weSuspended = true;
+                }
+                catch (VMNotSuspendedException)
+                {
+                    weSuspended = false; // 已挂起，无需/不该我们 Resume
+                }
+                catch (VMDisconnectedException)
+                {
+                    HandleDisconnect("eval 挂起时 VM 断开");
+                    return ToolResult.ErrorResult("连接已断开（VMDisconnectedException）");
+                }
+                catch (Exception ex)
+                {
+                    return ToolResult.ErrorResult("求值失败: " + FriendlyError(ex, "挂起 VM"));
+                }
+                lock (stateLock) { suspended = true; }
+
+                try
+                {
+                    // ---- 线程/帧上下文（表达式需要才解析） ----
+                    ThreadMirror thread = null;
+                    StackFrame frame = null;
+                    if (needsThread)
                     {
-                        try
-                        {
-                            target.Suspend();
-                            weSuspended = true;
-                        }
-                        catch (VMNotSuspendedException)
-                        {
-                            weSuspended = false; // 已是挂起态
-                        }
-                        catch (VMDisconnectedException)
-                        {
-                            HandleDisconnect("eval 挂起时 VM 断开");
-                            return ToolResult.ErrorResult("连接已断开（VMDisconnectedException）");
-                        }
-                        lock (stateLock) { suspended = true; }
+                        thread = ResolveEvalThread(target, threadId);
+                        if (thread == null)
+                            return ToolResult.ErrorResult("未找到线程 " + threadId
+                                + (threadId > 0 ? "。可用线程: " + ListThreads(target) : "（当前 VM 无可用线程）"));
+                    }
+                    if (needsFrame)
+                    {
+                        frame = ResolveEvalFrame(thread, frameIndex);
+                        if (frame == null)
+                            return ToolResult.ErrorResult("frameIndex " + frameIndex + " 超出线程 #"
+                                + (thread != null ? thread.Id.ToString() : "?") + " 的调用栈范围（0=最内层）");
                     }
 
-                    try
+                    var ctx = new EvalContext { Vm = target, Thread = thread, Frame = frame };
+                    EvalResult result = Evaluator.Evaluate(ctx, parsed);
+
+                    var data = new Dictionary<string, object>
                     {
-                        // ---- 线程/帧上下文（表达式需要才解析） ----
-                        ThreadMirror thread = null;
-                        StackFrame frame = null;
-                        if (needsThread)
+                        ["expression"] = expression,
+                        ["threadId"] = thread != null ? (object)thread.Id : null,
+                        ["frameIndex"] = frame != null ? (object)frameIndex : null,
+                        ["autoSuspended"] = weSuspended,
+                    };
+                    if (result.StaticType != null)
+                    {
+                        string tn = SafeTypeName(result.StaticType);
+                        data["value"] = new Dictionary<string, object>
                         {
-                            thread = ResolveEvalThread(target, threadId);
-                            if (thread == null)
-                                return ToolResult.ErrorResult("未找到线程 " + threadId
-                                    + (threadId > 0 ? "。可用线程: " + ListThreads(target) : "（当前 VM 无可用线程）"));
-                        }
-                        if (needsFrame)
+                            ["kind"] = "type",
+                            ["type"] = tn,
+                        };
+                        return ToolResult.OkResult("求值结果（静态类型引用）: " + tn, data);
+                    }
+                    data["value"] = Formatter.Format(result.Value);
+                    // P1-MD-2.2：求值结果存在截断标记（深度/字段/字符串/数组超限）时全量落盘 + 截断报告
+                    Value valFull = result.Value;
+                    string exprFull = expression;
+                    TruncationSink.AttachTruncation(data, () => System.Text.Json.JsonSerializer.Serialize(
+                        new Dictionary<string, object>
                         {
-                            frame = ResolveEvalFrame(thread, frameIndex);
-                            if (frame == null)
-                                return ToolResult.ErrorResult("frameIndex " + frameIndex + " 超出线程 #"
-                                    + (thread != null ? thread.Id.ToString() : "?") + " 的调用栈范围（0=最内层）");
-                        }
-
-                        var ctx = new EvalContext { Vm = target, Thread = thread, Frame = frame };
-                        EvalResult result = Evaluator.Evaluate(ctx, parsed);
-
-                        var data = new Dictionary<string, object>
-                        {
-                            ["expression"] = expression,
+                            ["expression"] = exprFull,
                             ["threadId"] = thread != null ? (object)thread.Id : null,
                             ["frameIndex"] = frame != null ? (object)frameIndex : null,
-                            ["autoSuspended"] = weSuspended,
-                        };
-                        if (result.StaticType != null)
-                        {
-                            string tn = SafeTypeName(result.StaticType);
-                            data["value"] = new Dictionary<string, object>
-                            {
-                                ["kind"] = "type",
-                                ["type"] = tn,
-                            };
-                            return ToolResult.OkResult("求值结果（静态类型引用）: " + tn, data);
-                        }
-                        data["value"] = Formatter.Format(result.Value);
-                        return ToolResult.OkResult("求值完成", data);
-                    }
-                    finally
-                    {
-                        // ---- 恢复窗口：异常路径也恢复，避免冻结游戏 ----
-                        if (weSuspended)
-                        {
-                            try { target.Resume(); }
-                            catch (VMNotSuspendedException) { }
-                            catch (VMDisconnectedException) { HandleDisconnect("eval 恢复时 VM 断开"); }
-                            catch { }
-                            lock (stateLock) { suspended = false; }
-                        }
-                    }
+                            ["value"] = Formatter.FormatFull(valFull),
+                        }));
+                    return ToolResult.OkResult("求值完成", data);
                 }
                 catch (EvalException ex)
                 {
@@ -170,7 +179,20 @@ namespace McpRimDebug
                 {
                     return ToolResult.ErrorResult("求值失败: " + FriendlyError(ex, "求值表达式"));
                 }
+                finally
+                {
+                    // ---- 恢复窗口：异常路径也恢复，避免冻结游戏 ----
+                    if (weSuspended)
+                    {
+                        try { target.Resume(); }
+                        catch (VMNotSuspendedException) { }
+                        catch (VMDisconnectedException) { HandleDisconnect("eval 恢复时 VM 断开"); }
+                        catch { }
+                        lock (stateLock) { suspended = false; }
+                    }
+                }
             }
+            finally { ExitCommandLock(); }
         }
 
         ThreadMirror ResolveEvalThread(VirtualMachine target, long threadId)
@@ -201,7 +223,9 @@ namespace McpRimDebug
                 return ToolResult.ErrorResult("query 不能为空（子串匹配类型全名/简单名，大小写不敏感，如 ThingDef）");
             int lim = NormalizeLimit(limit);
 
-            lock (commandLock)
+            if (!TryEnterCommandLock(out string busy))
+                return ToolResult.ErrorResult(busy);
+            try
             {
                 VirtualMachine target;
                 lock (stateLock)
@@ -254,6 +278,7 @@ namespace McpRimDebug
                     return ToolResult.ErrorResult("find_types 失败: " + FriendlyError(ex, "搜索类型"));
                 }
             }
+            finally { ExitCommandLock(); }
         }
 
         // ---------------------------------------------------------------- find_methods
@@ -268,7 +293,9 @@ namespace McpRimDebug
                 return ToolResult.ErrorResult("query 不能为空（子串匹配方法名，大小写不敏感，如 Tick）");
             int lim = NormalizeLimit(limit);
 
-            lock (commandLock)
+            if (!TryEnterCommandLock(out string busy))
+                return ToolResult.ErrorResult(busy);
+            try
             {
                 VirtualMachine target;
                 lock (stateLock)
@@ -305,6 +332,7 @@ namespace McpRimDebug
                     return ToolResult.ErrorResult("find_methods 失败: " + FriendlyError(ex, "搜索方法"));
                 }
             }
+            finally { ExitCommandLock(); }
         }
 
         // ---------------------------------------------------------------- 搜索辅助（限流）
@@ -342,15 +370,19 @@ namespace McpRimDebug
         /// 遍历根域程序集元数据做子串匹配（searchMethods=false 匹配类型全名；true 匹配方法名）。
         /// 限流：最多检查 SearchMaxAssemblies 个程序集；每程序集一次 GetMetadata（一次 socket 元数据 blob 拉取，
         /// 之后本地遍历）；结果达到 limit 即停止；动态程序集/元数据拉取失败跳过。
+        /// P2-MD-2 缓存：首次调用才 InvalidateAssemblyCaches（见 EnsureMetadataCacheInitialized），
+        /// 之后以 asm.GetName().FullName 命中 assemblyMetadataCache，未命中才 GetMetadata() 并写入。
+        /// 健壮性：读名字(asm.GetName())、查缓存、GetMetadata()、写缓存整套单程序集操作都在逐程序集 try 内，
+        /// 任一步骤抛非 VMDisconnected 异常仅跳过该程序集、不中断整次 find_*；VMDisconnectedException 仍重抛交上层。
         /// </summary>
         void ScanAssemblyMetadata(VirtualMachine target, string typeQuery, int limit, HashSet<string> seen,
             List<object> results, out bool truncated, bool searchMethods, string methodQuery)
         {
             truncated = false;
-            // 强制刷新程序集缓存：标准库由 AssemblyLoad 事件驱动失效（EventHandler），本会话用
+            // 首次调用才强制刷新程序集缓存：标准库由 AssemblyLoad 事件驱动失效（EventHandler），本会话用
             // 自定义事件循环不触发，attach 后游戏持续加载的程序集会永远不可见（实测只看到 System 程序集）。
             // InvalidateAssemblyCaches 与 GetAssemblies 均为同程序集 internal，可直接调用。
-            try { target.InvalidateAssemblyCaches(); } catch (VMDisconnectedException) { throw; } catch { }
+            EnsureMetadataCacheInitialized(target);
             AssemblyMirror[] assemblies = target.RootDomain.GetAssemblies();
             if (assemblies == null || assemblies.Length == 0)
                 return;
@@ -370,12 +402,22 @@ namespace McpRimDebug
                 }
                 checkedAsm++;
 
+                // 读名字、查缓存、GetMetadata、写缓存整套针对单个程序集的操作都放进 try 内：
+                // 任一环节抛非 VMDisconnected 异常只跳过该程序集，不中断整次 find_*。
                 AssemblyDefinition def;
-                try { def = asm.GetMetadata(); }
+                try
+                {
+                    string metaKey = asm.GetName().FullName;
+                    if (!TryGetCachedMetadata(metaKey, out def))
+                    {
+                        def = asm.GetMetadata();
+                        if (def == null || def.MainModule == null)
+                            continue;
+                        StoreMetadata(metaKey, def);
+                    }
+                }
                 catch (VMDisconnectedException) { throw; }
-                catch { continue; } // 动态程序集等无法获取元数据 → 跳过
-                if (def == null || def.MainModule == null)
-                    continue;
+                catch { continue; } // 动态程序集等无法获取名字/元数据 → 跳过
 
                 try
                 {
@@ -384,6 +426,57 @@ namespace McpRimDebug
                 }
                 catch (VMDisconnectedException) { throw; }
                 catch { /* 单个程序集元数据遍历失败不阻断整体 */ }
+            }
+        }
+
+        /// <summary>
+        /// P2-MD-2：首次调用才 InvalidateAssemblyCaches 并建缓存字典；此后直接复用，
+        /// 避免每次 find_* 都对全部程序集重复刷新+拉取元数据。返回 true 表示命中缓存无需拉取。
+        /// </summary>
+        void EnsureMetadataCacheInitialized(VirtualMachine target)
+        {
+            lock (metadataCacheLock)
+            {
+                if (assemblyMetadataCache != null)
+                    return;
+                try { target.InvalidateAssemblyCaches(); } catch (VMDisconnectedException) { throw; } catch { }
+                assemblyMetadataCache = new Dictionary<string, AssemblyDefinition>(StringComparer.Ordinal);
+            }
+        }
+
+        /// <summary>P2-MD-2：读元数据缓存；命中返回 true 且 out def 有效。调用方应持有 commandLock（不在此处取锁）。</summary>
+        bool TryGetCachedMetadata(string fullName, out AssemblyDefinition def)
+        {
+            lock (metadataCacheLock)
+            {
+                if (assemblyMetadataCache != null && assemblyMetadataCache.TryGetValue(fullName, out def))
+                    return true;
+                def = null;
+                return false;
+            }
+        }
+
+        /// <summary>P2-MD-2：写入元数据缓存（键 = asm 全名）。</summary>
+        void StoreMetadata(string fullName, AssemblyDefinition def)
+        {
+            lock (metadataCacheLock)
+            {
+                if (assemblyMetadataCache == null)
+                    assemblyMetadataCache = new Dictionary<string, AssemblyDefinition>(StringComparer.Ordinal);
+                assemblyMetadataCache[fullName] = def;
+            }
+        }
+
+        /// <summary>
+        /// P2-MD-2：清空元数据缓存。AssemblyLoad/TypeLoad 事件（新程序集加载）、HandleDisconnect/ResetSession
+        /// （避免跨 VM 残留）时调用。
+        /// </summary>
+        internal void InvalidateMetadataCache()
+        {
+            lock (metadataCacheLock)
+            {
+                if (assemblyMetadataCache != null)
+                    assemblyMetadataCache.Clear();
             }
         }
 

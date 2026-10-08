@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -152,6 +152,8 @@ namespace UELoader
                             foreach (DictionaryEntry e in toolsDict)
                             {
                                 string toolName = Convert.ToString(e.Key);
+                                // toolConfig.json 中出现的工具（含 GABP 镜像工具）一律视为有说明，翻译键 UESDdebuger.ToolDesc.<toolName>
+                                ToolNamesWithDescriptions.Add(toolName);
                                 list.Add(new ToolToggle
                                 {
                                     name = toolName,

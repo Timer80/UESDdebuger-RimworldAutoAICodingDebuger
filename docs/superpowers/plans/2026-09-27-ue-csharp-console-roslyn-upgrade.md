@@ -59,7 +59,7 @@
 | `System.Memory.dll` | 4.5.3 | NuGet `system.memory/4.5.3/lib/netstandard2.0` |
 | `System.Runtime.CompilerServices.Unsafe.dll` | 6.0.0 | NuGet `system.runtime.compilerservices.unsafe/6.0.0/lib/netstandard2.0` |
 | `System.Threading.Tasks.Extensions.dll` | 4.5.2 | NuGet `system.threading.tasks.extensions/4.5.2/lib/netstandard2.0` |
-| `System.Numerics.Vectors.dll` | 4.1.3.0 | **必须取 NuGet 包 `system.numerics.vectors/4.5.0`**（可行性验证时临时用了 VS 安装目录的副本，**不可再分发**，入库时必须换官方包） |
+| `System.Numerics.Vectors.dll` | 4.1.3.0 | 取 NuGet 包 **`system.numerics.vectors/4.4.0`** 的 `lib/net46`（实测该包=程序集 4.1.3.0，与 PoC 一致；**4.5.0 包是 4.1.4.0、与 PoC 实测不符，不要用**。可行性验证时曾临时用 VS 安装目录的副本，不可再分发） |
 
 ---
 
@@ -124,8 +124,9 @@ Copy-Item "$u\system.memory\4.5.3\lib\netstandard2.0\System.Memory.dll" $dst -Fo
 Copy-Item "$u\system.runtime.compilerservices.unsafe\6.0.0\lib\netstandard2.0\System.Runtime.CompilerServices.Unsafe.dll" $dst -Force
 Copy-Item "$u\system.threading.tasks.extensions\4.5.2\lib\netstandard2.0\System.Threading.Tasks.Extensions.dll" $dst -Force
 # System.Numerics.Vectors 不在本机缓存：从官方 NuGet 包取（勿用 VS 安装目录副本 —— 那是不可再分发的产物）
-nuget install System.Numerics.Vectors -Version 4.5.0 -OutputDirectory temp\pkg
-Copy-Item "temp\pkg\System.Numerics.Vectors.4.5.0\lib\net46\System.Numerics.Vectors.dll" $dst -Force
+# 用 4.4.0（实测 lib/net46 = 程序集 4.1.3.0，与 PoC 一致）；4.5.0 包是 4.1.4.0、与 PoC 不符，不要用
+nuget install System.Numerics.Vectors -Version 4.4.0 -OutputDirectory temp\pkg
+Copy-Item "temp\pkg\System.Numerics.Vectors.4.4.0\lib\net46\System.Numerics.Vectors.dll" $dst -Force
 ```
 
 入库后**逐件核对程序集版本**（文件名对不上是常见坑）：

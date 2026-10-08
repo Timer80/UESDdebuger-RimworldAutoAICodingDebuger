@@ -1,0 +1,72 @@
+# Build outputs
+McpRimDebug/bin/
+McpRimDebug/obj/
+Source/**/bin/
+Source/**/obj/
+
+# .NET runtime
+# 注意：runtime/dotnet/ 虽在此被忽略，但发布仓库里**必须存在**（没有对应 zip，无法首启重建），
+# 因此提交时用 `git add -f runtime/dotnet` 强制加入（.gitignore 只影响未跟踪文件）。
+runtime/dotnet/
+
+# Portable node/bun runtimes (large, environment-specific)
+runtime/bun/
+runtime/node/
+
+# Tool directories
+.commandcode/
+.superpowers/
+
+# MCP
+MCP/node_modules/
+MCP/node_modules.zip
+MCP/logs/
+MCP/stream-capture/out/
+
+# Git worktrees（本地并行开发用，不入库）
+.worktrees/
+
+# MCP runtime session file (regenerated each game launch, contains session token)
+MCP/ports.json
+
+# UE_Data logs
+UE_Data/sinai-dev-UnityExplorer/logs/
+
+# Release builds
+Source/UE-4.9.0-official/UnityExplorer-4.9.0/Release/
+
+# Third-party source bundled DLLs
+Source/UniverseLib-official/UniverseLib-1.5.1/lib/
+Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/
+Source/UE-4.9.0-official/UnityExplorer-4.9.0/UnityEditorPackage/Runtime/
+
+# Misc
+check.err
+
+# 长任务采样数据与日志（体量随运行时间增长，不入库）
+docs/dpa/samples/
+docs/dpa/tasks/
+
+# 长任务旁观报告（运行产物）
+docs/dpa/watch-*.json
+
+# ---------------------------------------------------------------- Unity 工程（ShaderProject）
+# 背景：ShaderProject/Library/ 有 7800+ 文件、约 110 MB，此前既未入库也未忽略 ——
+# 一次 `git add -A` 会把整个 Unity 生成物灌进仓库（实测 7887 个待添加条目里 7869 个来自这里）。
+# 这里只忽略 **Unity 生成物与中间产物**，手写资产（Assets/Shader/*、ProjectSettings/、Packages/）
+# 保持可见，是否入库由发布策略决定。
+ShaderProject/Library/
+ShaderProject/Logs/
+ShaderProject/Temp/
+ShaderProject/obj/
+ShaderProject/UserSettings/
+ShaderProject/Build/
+ShaderProject/Builds/
+ShaderProject/.vs/
+ShaderProject/*.csproj
+ShaderProject/*.sln
+ShaderProject/*.user
+ShaderProject/*.log
+ShaderProject/*.unitypackage
+# 打包中间产物（权威产物是模组根的 AssetBundles/uecoordcursor，由打包脚本自动部署过去）
+ShaderProject/Assets/AssetBundles/

@@ -36,7 +36,7 @@
 | **`Assembly-CSharp-firstpass.dll` 是什么（实测）** | 61 个公共类型，命名空间**只有** `UnityStandardAssets.ImageEffects`（AAMode/Antialiasing/Bloom/Blur/DepthOfField…），是 Unity 标准资源后处理效果，**与 RimWorld 逻辑无关**；引不引几乎无差别（成员被卡 1001→1000）。它属于"Managed 全集"的一部分，**全集方案天然包含、不会漏**；只有"只引 Assembly-CSharp"那种收窄方案才会漏掉它 |
 | **撞名的归因（关键）** | 撞名**只由 using 组合决定，与引用多少个程序集无关**。默认 using 里那 5 个歧义名（`Keyframe/Graphic/GridLayout/Text/WeakReference<T>`）**全部来自本体内部**（Verse ↔ UnityEngine/System），**模组贡献 0** → 不引用模组对撞名毫无改善 |
 | **本体寻路 / Burst 位置（实测）** | **都在 `Assembly-CSharp.dll` 里**：`Verse.PathFinder`、`PathFinderCostTuning`、`PathFinderJob`+`CalcNode`/`ResultData`、`PathFinderMapData`；本体 `[BurstCompile]` 的 DirectCall 包装也在（`RimWorld.MapGenUtility.ComputeLargestRects_0000B773$BurstDirectCall`、`RimWorld.Planet.FastTileFinder.ComputeQueryJob.SphericalDistance_00014F7E$BurstDirectCall`、`RimWorld.Planet.PlanetLayer.*$BurstDirectCall`、`$BurstDirectCallInitializer`）。**但嵌套 Job 类型不可访问**：`Verse.PathFinder.ScheduledPathJob` 实测 `CS0122`（非 public）→ 要碰它得走反射；Burst 的**原生产物是 native 代码**，Roslyn 只能编译/调用托管面 |
-| **本体程序集"启动即拉满"（实测，重要）** | 修正路径比较口径后：`Managed` **106 个 dll 全部已在进程里加载（106/106，未加载 0）**。→ "引用已加载程序集"这一源**天然等于本体全集**；也说明之前用 `Assembly.LoadFrom` 批量灌本体 dll 是多余且危险的操作（见 §3.1）。**实现要点：按 `Location` 是否位于本体 `Managed` 目录来过滤**，否则会把模组程序集（也是"已加载"）一起带进来，和 `C# Console Extra Mod References` 开关冲突 |
+| **本体程序集"启动即拉满"（实测，重要）** | 修正路径比较口径后：`Managed` **106 个 dll 全部已在进程里加载（106/106，未加载 0）**。→ "引用已加载程序集"这一源**天然等于本体全集**；也说明之前用 `Assembly.LoadFrom` 批量灌本体 dll 是多余且危险的操作（见 §3.1）。**实现要点：按 `Location` 是否位于本体 `Managed` 目录来过滤**，否则会把模组程序集（也是"已加载"）一起带进来（定稿后编译期已不扫已加载程序集，本要点仅作历史实测记录；相关开关为 `C# Console Allow Mod Type Resolution`） |
 | **引用决策（定稿：单一小集 + 全部额外靠诊断触发）** | **没有档位、没有 Full**：编译期引用集**恒为 `SmallProfile` 的 21 个本体程序集**（从 `Managed` 解析；不在磁盘上的跳过）。**不预设任何其它引用**——不扫"已加载程序集"、不预先加模组。一切额外引用（未列出的 Unity 模块、`Unity.Mathematics` 之外的东西、模组类型、`System.*` 其余件）**全部由编译诊断触发自愈补入**（任务 13）。<br>**21 个**：`mscorlib`、`netstandard`、`System`、`System.Core`、`System.Xml`、`System.Xml.Linq`、`Assembly-CSharp`、`Assembly-CSharp-firstpass`、`UnityEngine`、`UnityEngine.CoreModule`、`UnityEngine.IMGUIModule`、`UnityEngine.UI`、`UnityEngine.AudioModule`、`UnityEngine.TextRenderingModule`、`UnityEngine.PhysicsModule`、`UnityEngine.AnimationModule`、`UnityEngine.ParticleSystemModule`、`UnityEngine.AssetBundleModule`、`Unity.Collections`、`Unity.Mathematics`、`com.rlabrecque.steamworks.net` |
 | **模组类型怎么用（同上是自愈驱动）** | 模组程序集**不进引用集**；它们只作为**自愈器的解析候选**（`ReferenceScanner.ModAssemblyPaths()`，由模组加载器汇报，覆盖工坊）。写成 `TEXT20.Foo` 时 → 诊断报缺 → 自愈去已加载程序集/候选表里找 → 补上重试。配置项 `C# Console Allow Mod Type Resolution`（默认 **true**）只用于"彻底不许碰模组"的场景（关掉=自愈只解析本体程序集） |
 | **Small 档残差的真相（实测，含一次自我纠错）** | 早先"5 个不可达成员"是**跨档位混算**的结果：`ParseHelper/ModMetaData.PublishedFileId_t`（Steamworks）、`Current.ColorCorrectionCurves`（firstpass）在 9/13/16 档就被覆盖了；20 档真正的残差**只有 1 条**——`Verse.ModAssetBundlesHandler.loadedAssetBundles : List<UnityEngine.AssetBundle>`，缺的是 **`UnityEngine.AssetBundleModule`**（我先前把它误读成 `@mscorlib`，那是 `List<>` 的定义程序集，属打印口径问题）。它**是原版程序集**（在 `Managed` 里）→ **加进 Small 档（=21）后残差归零**，自愈退化为纯保险 |
@@ -73,7 +73,7 @@
 | `Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/roslyn/VERSIONS.md` | 记录载荷精确版本与来源（换版本必须整套重验） |
 | `src/RoslynBridge/RoslynAssemblyLoader.cs` | 固定顺序加载 + 健康标志 + 只尝试一次 |
 | `src/RoslynBridge/ReferenceSet.cs` | **纯逻辑**：引用去重 / 黑名单 / 顺序规则 |
-| `src/RoslynBridge/ReferenceScanner.cs` | IO：已加载程序集 + `Managed` 全集 + 模组程序集 → 交给 `ReferenceSet` |
+| `src/RoslynBridge/ReferenceScanner.cs` | IO：从 `Managed` 解析 `SmallProfile`（21 个）→ 交给 `ReferenceSet`；另提供 `ModAssemblyPaths()`（只作自愈候选源，不进引用集） |
 | `src/RoslynBridge/PolyfillSource.cs` | polyfill 源码常量（`IsExternalInit` 等） |
 | `src/RoslynBridge/RoslynCompiler.cs` | parse → compile → emit → `byte[]` + 诊断 |
 | `src/RoslynBridge/DiagnosticFormatter.cs` | Roslyn `Diagnostic` → 控制台既有风格文本 |
@@ -97,7 +97,7 @@
 | `src/UnityExplorer.csproj` | 新增 `<Reference>` 指向 `lib/roslyn/*.dll`（`Private=false`，不复制到输出，由部署脚本单独搬运）；新增 `RoslynBridge` 编译项 |
 | `Source/UE-4.9.0-official/UnityExplorer-4.9.0/build.ps1` | STANDALONE_Mono 段：产物旁复制 8 件套；**ILRepack 不吸收 Roslyn**（体积+内部化会让 `Type.GetType` 失败） |
 | `MODIFICATIONS.md` / `THIRD_PARTY_NOTICES.md` | 声明 Roslyn(MIT) 及 7 个依赖；载荷分发说明 |
-| `MCP/index.js` | `execute_csharp_code` 的 `notes` 文案（第 2937 行）改为「默认已引用本体+模组，可直接用 Verse/RimWorld 裸类型名」 |
+| `MCP/index.js` | `execute_csharp_code` 的 `notes` 文案（第 2937 行）改为「默认引用本体 21 个程序集，缺件与模组类型靠诊断自愈现场补入，可直接用 Verse/RimWorld 裸类型名」 |
 
 ---
 
@@ -313,11 +313,11 @@ git commit -m "feat(roslyn): 载荷入库与固定顺序依赖加载器"
 
 ---
 
-## 任务 2：默认引用集合（游戏本体 + 模组程序集）
+## 任务 2：默认引用集合（SmallProfile 21 个本体程序集 + 模组自愈候选）
 
 **文件：**
 - 创建：`src/RoslynBridge/ReferenceSet.cs`（纯逻辑）
-- 创建：`src/RoslynBridge/ReferenceScanner.cs`（IO，依赖 UnityEngine/ExplorerCore，**不进** net472 测试工程，靠游戏内验收）
+- 创建：`src/RoslynBridge/ReferenceScanner.cs`（IO，依赖 UnityEngine/ExplorerCore，**不进** net472 测试工程，靠任务 12 矩阵验收）
 - 修改：`Source/RoslynBridgeTests/Program.cs`（加 `TestReferenceSet`）
 - 修改：`Source/RoslynBridgeTests/RoslynBridgeTests.csproj`（**只** link `ReferenceSet.cs`——它在任务 1 步骤 2 已写入；`ReferenceScanner.cs` 不要 link，否则 net472 侧会因缺 UnityEngine 而编译失败）
 
@@ -497,34 +497,22 @@ namespace UnityExplorer.RoslynBridge
 }
 ```
 
-- [ ] **步骤 6：游戏内验收（必须）—— 这条就是用户要的「开局不空」**
+- [ ] **步骤 6：游戏内验收（并入任务 12 矩阵执行）**
 
-前置：游戏已进图（`get_game_status` 的 `stage=IN_GAME`）。
+按定稿（§3 执行说明），**游戏内验收集中在任务 8/11/12**；本任务只提交离线测试证据（步骤 1–4）。原验收的验证点全部由任务 12 端到端矩阵覆盖，对应关系：
 
-调用：`agg_call_tool { tool: "execute_csharp_code", args: { "code": "[System.AppDomain.CurrentDomain.GetAssemblies().Length, Verse.GenTicks.TicksGame]" } }`
-预期：`success=true` 且返回里含 `ticks` 数值；**不得**出现 `CS0103: The name 'GenTicks' does not exist`。
-
-再验**模组类型靠自愈按需解析**（定稿：模组不预加，写到才补）：
-
-调用：`agg_call_tool { tool: "execute_csharp_code", args: { "code": "typeof(FlightPawn2Framework.PathPlan.FlightAStar.FlightPawnConfig).Assembly.GetName().Name" } }`
-预期：**默认配置下报 `CS0246`（这是预期行为，不是 bug）**。
-再打开配置 `C# Console Extra Mod References` → Reset 控制台 → 重跑同一句 → 返回 `TEXT20`（验证开关与加载器汇报这条路）。
-
-最后加一条防回归（**防有人把引用收窄成只引 Assembly-CSharp.dll**）：
-
-调用：`agg_call_tool { tool: "execute_csharp_code", args: { "code": "Verse.Find.CurrentMap.mapPawns.FreeColonists[0].DrawPos.y" } }`
-预期：`success=true`。`DrawPos` 是 `UnityEngine.Vector3` —— 引用集一旦被收窄，这里立刻 CS0246（实测数据见 §0）
-
-再验 Unity 模块类型（本体 Managed 全集的价值：该模块可能尚未被加载）：
-
-调用：`agg_call_tool { tool: "execute_csharp_code", args: { "code": "typeof(UnityEngine.Video.VideoPlayer).FullName" } }`
-预期：返回 `UnityEngine.Video.VideoPlayer`，不报 CS0246
+| 本任务验证点 | 任务 12 矩阵行 |
+|---|---|
+| 裸名开局不空：`[System.AppDomain.CurrentDomain.GetAssemblies().Length, Verse.GenTicks.TicksGame]` 成功且不出现 CS0103 | #1 |
+| 模组类型靠自愈按需解析：默认（`C# Console Allow Mod Type Resolution`=true）首次执行 `typeof(FlightPawn2Framework.PathPlan.FlightAStar.FlightPawnConfig).Assembly.GetName().Name` 应成功、日志出现 `自愈补引用：TEXT20.dll`；把该开关关掉 → Reset → 重跑应报 `CS0246` | #4 |
+| 防收窄回归：`Verse.Find.CurrentMap.mapPawns.FreeColonists[0].DrawPos.y` 成功（引用集一旦被收窄成只引 Assembly-CSharp.dll，这里立刻 CS0246，实测见 §0） | #14、#15 |
+| 清单外 Unity 模块：`typeof(UnityEngine.Video.VideoPlayer).FullName` 靠自愈补齐（21 个清单不含 VideoModule） | #3、#17 |
 
 - [ ] **步骤 7：Commit**
 
 ```bash
 git add Source/UE-4.9.0-official/UnityExplorer-4.9.0/src/RoslynBridge/ReferenceSet.cs Source/UE-4.9.0-official/UnityExplorer-4.9.0/src/RoslynBridge/ReferenceScanner.cs Source/RoslynBridgeTests
-git commit -m "feat(roslyn): 默认引用档（Small=21 本体程序集 + 可选 Full + 模组开关）"
+git commit -m "feat(roslyn): 默认引用集（SmallProfile=21 本体程序集，模组作自愈候选）"
 ```
 
 ---
@@ -667,13 +655,9 @@ namespace UnityExplorer.RoslynBridge
 
 （`ConfigManager.cs` 顶部需要 `using UnityExplorer.RoslynBridge;`）
 
-- [ ] **步骤 7：游戏内验收**
+- [ ] **步骤 7：游戏内验收（并入任务 12 矩阵执行）**
 
-调用：`agg_call_tool { tool: "execute_csharp_code", args: { "code": "GenTicks.TicksGame" } }`
-预期：`success=true`，`result` 为数字。**不得**再出现「控制台默认无 using 引用」的 guidance。
-
-调用：`agg_call_tool { tool: "execute_csharp_code", args: { "code": "Find.CurrentMap.mapPawns.FreeColonists.Count" } }`
-预期：`success=true`，返回殖民者数量（当前存档为 3）
+本任务只提交离线测试证据；两条游戏内验证由任务 12 矩阵覆盖：`GenTicks.TicksGame` 裸名成功（#1）、`Find.CurrentMap.mapPawns.FreeColonists.Count` 返回殖民者数量（#2，当前存档为 3）。
 
 - [ ] **步骤 8：Commit**
 
@@ -1608,15 +1592,17 @@ dotnet build src/UnityExplorer.csproj -c STANDALONE_Mono
 - [ ] **步骤 5：部署并在游戏内验收「开关 + 回退」**
 
 ```powershell
-# 停游戏 → 复制产物与 Roslyn 载荷到模组
-Copy-Item Release/UnityExplorer.Standalone.Mono/UnityExplorer.STANDALONE.Mono.dll ..\..\..\Assemblies\ -Force
-New-Item -ItemType Directory -Force -Path ..\..\..\UE_Data\sinai-dev-UnityExplorer\Roslyn | Out-Null
-Copy-Item lib\roslyn\*.dll ..\..\..\UE_Data\sinai-dev-UnityExplorer\Roslyn\ -Force
+# 停游戏（MCP stop_game）→ 复制产物与 Roslyn 载荷到**游戏加载的 Mods 副本**
+# （仓库目录不是模组目录，产物复制进仓库不会被游戏读到；仓库只是源码真源）
+$mod = 'C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger'
+Copy-Item Release\UnityExplorer.Standalone.Mono\UnityExplorer.STANDALONE.Mono.dll "$mod\Assemblies\" -Force
+New-Item -ItemType Directory -Force -Path "$mod\UE_Data\sinai-dev-UnityExplorer\Roslyn" | Out-Null
+Copy-Item lib\roslyn\*.dll "$mod\UE_Data\sinai-dev-UnityExplorer\Roslyn\" -Force
 ```
 
-启动游戏进图后：
+启动游戏进图后（MCP `start_quick_test`）：
 调用：`agg_call_tool { tool: "execute_csharp_code", args: { "code": "GenTicks.TicksGame" } }`
-预期：成功；UE 日志里有 `[CSConsole] Roslyn 求值器就绪（refs: loaded=… managed=… mods=… total=…）`（用 `get_unityexplorer_logs` 查看）
+预期：成功；UE 日志里有 `[CSConsole] Roslyn 求值器就绪（refs: small=<n>/21 total=<m>）`——格式以任务 2 `ReferenceScanner.Collect` 的 report 为准（实测应为 `small=21/21 total=21`；用 `get_unityexplorer_logs` 查看）
 
 回退验收：把配置 `C# Console Use Roslyn` 改为 false（UE 配置面板或配置文件），重开控制台，日志应出现 `回退 mcs` 或直接以 mcs 初始化（无 `Roslyn 求值器就绪`），且 `GenTicks.TicksGame` 仍能执行。
 
@@ -1831,9 +1817,9 @@ namespace UnityExplorer.RoslynBridge
 运行：`dotnet run --project Source/RoslynBridgeTests`
 预期：`ALL PASS`
 
-- [ ] **步骤 6：游戏内验收**
+- [ ] **步骤 6：游戏内验收（并入任务 12 矩阵执行）**
 
-在 UE 控制台输入 `sb.App`（先执行 `var sb = new System.Text.StringBuilder();`），预期补全下拉出现 `end`/`endLine` 等候选。
+本任务只提交离线测试证据（含 `GetCompletions` 两条用例）。进程内补全验证由任务 12 矩阵 #19 执行（API 级调用，无需人工打字）；UE 控制台 UI 下拉（输入 `sb.App` 出现候选）为人工加分项，可选。
 
 - [ ] **步骤 7：Commit**
 
@@ -1942,10 +1928,9 @@ git commit -m "feat(csconsole): 语义模型轻量补全与 C# 8+ 关键字"
 运行：`dotnet run --project Source/RoslynBridgeTests`
 预期：`ALL PASS`
 
-- [ ] **步骤 5：游戏内验收（真实 Harmony 打真游戏方法）**
+- [ ] **步骤 5：游戏内验收（并入任务 12 矩阵执行）**
 
-调用：`agg_call_tool { tool: "create_hook", args: { "type_name": "Verse.GenTicks", "method_name": "get_TicksGame" } }`
-预期：返回成功且 `list_hooks` 能看到该 Hook；随后用 `execute_csharp_code` 执行 `Verse.GenTicks.TicksGame` 不报错，`delete_hook` 可移除。
+本任务只提交离线测试证据（含 `TestHookCompile`）。真实 Harmony 链路（`create_hook Verse.GenTicks.get_TicksGame` → `list_hooks` → `execute_csharp_code` → `delete_hook`）由任务 12 矩阵 #20 执行。
 
 - [ ] **步骤 6：Commit**
 
@@ -2026,7 +2011,7 @@ namespace UnityExplorer.RoslynBridge
                         ConfigManager.CSConsole_Assembly_Blacklist.Value, out _);
                     var warm = new ReplSession(refs.Paths);
                     warm.Submit("var __warm = 1;");
-                    // Small 档特有：把常见的"缺引用自愈"提前跑掉，避免用户/AI 第一次调用时多等 1~2 轮编译
+                    // 21 个清单的常见缺口：把常见的"缺引用自愈"提前跑掉，避免用户/AI 第一次调用时多等 1~2 轮编译
                     warm.Submit("var __warmV = UnityEngine.Vector3.zero; var __warmM = Verse.Find.CurrentMap;");
                     ExplorerCore.Log("[CSConsole] Roslyn 预热完成" + (healer?.Healed.Count > 0 ? ("（顺带自愈 " + healer.Healed.Count + " 个引用）") : ""));
                 }
@@ -2063,14 +2048,24 @@ namespace UnityExplorer.RoslynBridge
 - `lib/roslyn/`（Roslyn 编译器载荷 8 件套）及其在 `UE_Data/sinai-dev-UnityExplorer/Roslyn/` 的部署副本
 ```
 
-- [ ] **步骤 5：游戏内验收（时延与体积）**
+- [ ] **步骤 5：构建 + 部署 + 游戏内验收（时延与体积）**
 
 ```powershell
-# 冷启动时延：重启游戏，进图后读日志
-# 期望：启动日志出现 "[CSConsole] Roslyn 预热完成"，且首次 execute_csharp_code 响应 < 500ms（预热摊掉 ~3.5s）
+# 构建（调度顺序保证本构建已包含任务 9/10/13 的改动：执行顺序 1→10 → 13 → 11 → 12）
+cd Source/UE-4.9.0-official/UnityExplorer-4.9.0
+dotnet build src/UnityExplorer.csproj -c STANDALONE_Mono
+
+# 停游戏（MCP stop_game）→ 部署到游戏加载的 Mods 副本（与任务 8 步骤 5 同款命令）
+$mod = 'C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger'
+Copy-Item Release\UnityExplorer.Standalone.Mono\UnityExplorer.STANDALONE.Mono.dll "$mod\Assemblies\" -Force
+New-Item -ItemType Directory -Force -Path "$mod\UE_Data\sinai-dev-UnityExplorer\Roslyn" | Out-Null
+Copy-Item lib\roslyn\*.dll "$mod\UE_Data\sinai-dev-UnityExplorer\Roslyn\" -Force
+
+# 重启进图（MCP start_quick_test）后：
+# 冷启动时延：启动日志出现 "[CSConsole] Roslyn 预热完成"，首次 execute_csharp_code 响应 < 500ms（预热摊掉 ~3.5s）
 "{0:N1} MB" -f ((Get-ChildItem "C:\SteamLibrary\steamapps\common\RimWorld\Mods\UESDdebuger\UE_Data\sinai-dev-UnityExplorer\Roslyn" -File | Measure-Object Length -Sum).Sum / 1MB)
 ```
-预期：约 `12.7 MB`；`Assemblies/UnityExplorer.STANDALONE.Mono.dll` 体积与改动前同量级（Roslyn 未被 ILRepack 吸收）
+体积预期：约 `12.7 MB`；`Assemblies/UnityExplorer.STANDALONE.Mono.dll` 体积与改动前同量级（Roslyn 未被 ILRepack 吸收）
 
 - [ ] **步骤 6：Commit**
 
@@ -2093,18 +2088,18 @@ git commit -m "chore(roslyn): 载荷打包、后台预热与许可声明"
 `MCP/index.js` 第 2937 行改为：
 
 ```javascript
-  execute_csharp_code: { example: '{ "code": "GenTicks.TicksGame" }', notes: '控制台默认已引用游戏本体（Assembly-CSharp + 全部 106 个 Managed 程序集）与全部已加载模组程序集（由模组加载器汇报，含 Steam 创意工坊），并默认 using Verse/RimWorld/Verse.AI/UnityEngine；裸类型名（如 GenTicks、Find、Pawn）可直接使用。模组命名空间默认**不**加入 using（实测会把 34 个重名类型变成歧义），需要时用 add_using_directive。已知与默认 using 冲突、必须全限定的裸名：Keyframe、Graphic、GridLayout、Text、WeakReference。编译器为 Roslyn（C# 13），支持 record/switch 表达式/using 声明等现代语法；若 Roslyn 载荷缺失会自动回退旧编译器（届时仅支持 C# 7 语法）。' },
+  execute_csharp_code: { example: '{ "code": "GenTicks.TicksGame" }', notes: '控制台默认引用 21 个本体程序集（SmallProfile，实测本体 API 覆盖残差为 0）；清单外的 Unity 模块、System 件与模组类型（含 Steam 创意工坊，由模组加载器汇报）由编译诊断自愈现场补入（日志出现「自愈补引用：xxx.dll」，可用 `C# Console Allow Mod Type Resolution` 禁用模组解析）。并默认 using Verse/RimWorld/Verse.AI/UnityEngine，裸类型名（如 GenTicks、Find、Pawn）可直接使用。模组命名空间默认**不**加入 using（实测会把 34 个重名类型变成歧义），需要时用 add_using_directive。已知与默认 using 冲突、必须全限定的裸名：Keyframe、Graphic、GridLayout、Text、WeakReference。编译器为 Roslyn（C# 13），支持 record/switch 表达式/using 声明等现代语法；若 Roslyn 载荷缺失会自动回退旧编译器（届时仅支持 C# 7 语法）。' },
 ```
 
 - [ ] **步骤 2：端到端验收矩阵（逐条执行并记录结果）**
 
-对每条调用 `agg_call_tool { tool: "execute_csharp_code", args: { "code": "<下表的 code>" } }`，期望 `success=true`：
+对每条调用 `agg_call_tool { tool: "execute_csharp_code", args: { "code": "<下表的 code>" } }`，期望 `success=true`（例外：#20 走 `create_hook`/`list_hooks`/`delete_hook`；#19 在 execute 内调用补全 API）：
 
 | # | code | 验证点 |
 |---|---|---|
 | 1 | `GenTicks.TicksGame` | 默认 using（裸名） |
 | 2 | `Find.CurrentMap.mapPawns.FreeColonists.Count` | 默认 using + 本体类型 |
-| 3 | `typeof(UnityEngine.Video.VideoPlayer).Name` | 本体 Managed 全集引用 |
+| 3 | `typeof(UnityEngine.Video.VideoPlayer).Name` | **清单外模块靠自愈（首次）**：VideoModule 不在 21 个清单里，应日志出现「自愈补引用」后成功 |
 | 4 | `typeof(FlightPawn2Framework.PathPlan.FlightAStar.FlightPawnConfig).Assembly.GetName().Name` | **模组类型靠自愈解析**：首次应成功（日志出现 `自愈补引用：TEXT20.dll`）；**把 `C# Console Allow Mod Type Resolution` 关掉后**重跑应为 CS0246（这是"只调试本体"模式） |
 | 5 | `int F(int x) => x switch { 1 => 10, _ => 0 }; F(1)` | C# 8 switch 表达式 + C# 7 本地函数 |
 | 6 | `using var ms = new System.IO.MemoryStream(); ms.Length` | C# 8 using 声明 |
@@ -2113,13 +2108,15 @@ git commit -m "chore(roslyn): 载荷打包、后台预热与许可声明"
 | 9 | `object o = null; o is not null` | C# 9 模式 |
 | 10 | `Log("hello")` | REPL 助手仍可用 |
 | 11 | `typeof(HarmonyLib.Harmony).Assembly.Location` | **工坊模组程序集靠自愈解析**（`brrainz.harmony` 装在 workshop 目录 → 验证自愈走的是"模组加载器汇报"而不是目录扫描） |
-| 18 | `UnityEngine.Video.VideoPlayer` / `UnityEngine.AssetBundle`（Small 清单未含的模块） | 自愈按 CS0012/CS0246 补齐（清单没列 ≠ 用不了） |
+| 18 | `UnityEngine.Video.VideoPlayer` / `UnityEngine.AssetBundle`（21 个清单未含的模块） | 自愈按 CS0012/CS0246 补齐（清单没列 ≠ 用不了） |
+| 19 | 先执行 `var sb = new System.Text.StringBuilder();`，再执行 `string.Join(",", UnityExplorer.CSConsole.ConsoleController.Evaluator.GetCompletions("sb.App", out string __p))` | **补全（并入自任务 9）**：返回候选含 `Append`（API 级验证；UE 控制台 UI 下拉为人工加分项） |
+| 20 | `create_hook { type_name: "Verse.GenTicks", method_name: "get_TicksGame" }` → `list_hooks` → `execute_csharp_code "Verse.GenTicks.TicksGame"` → `delete_hook` | **真实 Harmony 链路（并入自任务 10）**：hook 创建/列出/执行/删除全成功 |
 | 12 | `Find.CurrentMap.mapPawns.AllPawnsSpawned.Count` | 本体集合 API 裸名可用（无歧义回归） |
 | 13 | `System.WeakReference<Verse.Pawn>` / `Verse.WeakReference<Verse.Pawn>` | 已知歧义名全限定后仍可用（默认 using 的 5 个冲突名之一） |
 | 14 | `Verse.Find.CurrentMap.mapPawns.FreeColonists[0].DrawPos.y` | **防收窄回归**：一旦只引 Assembly-CSharp.dll，这里立刻 CS0246（实测见 §0） |
 | 15 | `((System.Action)(() => { Verse.Widgets.BeginGroup(new UnityEngine.Rect(0f, 0f, 10f, 10f)); Verse.GenDraw.DrawLineBetween(UnityEngine.Vector3.zero, UnityEngine.Vector3.one); Verse.MaterialPool.MatFrom((string)null, (UnityEngine.Shader)null); })).GetType().Name` | **覆盖度回归**：这三个成员是"只引 Assembly-CSharp"时被卡最狠的类型（`Widgets` 152/191、`GenDraw` 37/52、`MaterialPool` 12/12，见 §0）。包在**不执行的 lambda** 里：只验编译期可解析，不会真的画线/取材质 |
-| 16 | 在 **`Small` 档**下执行 `Verse.Find.CurrentMap.mapPawns.FreeColonists[0].DrawPos.y`（该程序集尚未进引用集时） | **自愈闭环（默认档的核心保障）**：应 `success=true` 且日志出现 `[CSConsole] 自愈补引用：UnityEngine.CoreModule.dll`；**同一句再跑一次不应出现新的补引用行**（已进集合、未重复补） |
-| 17 | 在 `Small` 档下执行 `typeof(UnityEngine.Video.VideoPlayer).Name` | 边界验证：Small 清单没含 `UnityEngine.VideoModule`，应靠自愈补上（若自愈对该命名空间解析失败，则应给出可读诊断而不是静默失败） |
+| 16 | 进程内调 `RoslynCompiler.CompileWithHealing`（手造 5 引用小集 mscorlib/netstandard/System/System.Core/Assembly-CSharp，healer 搜索目录 = Managed）编译 `Verse.Find.CurrentMap.mapPawns.FreeColonists[0].DrawPos.y`，再对**同一引用集**编译第二段 | **自愈闭环（核心保障）**：第一段 success=true 且 healLog 含 `自愈补引用：UnityEngine.CoreModule.dll`；第二段 success=true 且 healLog 为空（已进集合、不重复补） |
+| 17 | 再次执行 `typeof(UnityEngine.Video.VideoPlayer).Name`（行 3 已自愈补过） | **幂等**：success=true 且**不再出现**新的自愈补引用行；若行 3 自愈对该命名空间解析失败，应给出可读诊断而不是静默失败 |
 
 - [ ] **步骤 3：TEXT20 实参级回归（复用可行性阶段的用例）**
 
@@ -2155,7 +2152,7 @@ git commit -m "docs: 控制台默认引用/using 与 Roslyn 能力说明，端�
 补上 UnityEngine.CoreModule 后重试同一段 → OK                                                   ← 闭环成立
 直接写 `UnityEngine.Time` → CS0103（**不带**程序集名，需按命名空间反查）
 ```
-有了它，"引用集该多大"就不再是必须先答对的问题：**默认 Small 档（21 个，实测残差已归零）**，缺引用时还能自动补齐、不用人/AI 猜；`Full`（106）作为可选档保留。
+有了它，"引用集该多大"就不再是必须先答对的问题：**引用集恒为 21 个本体程序集（实测残差已归零），不设档位**；缺引用（清单外 Unity 模块、System 件、模组类型）时自动补齐、不用人/AI 猜——一切额外引用都由编译诊断触发。
 
 **文件：**
 - 创建：`src/RoslynBridge/MissingReferenceParser.cs`（纯逻辑：从诊断文本提名字）
@@ -2414,15 +2411,9 @@ namespace UnityExplorer.RoslynBridge
         }
 ```
 
-- [ ] **步骤 7：游戏内验收（用"精简档"证明自愈真的救回来）**
+- [ ] **步骤 7：游戏内验收（并入任务 12 矩阵执行）**
 
-把控制台引用集改成**只有 5 个**（临时把 `ReferenceScanner` 的 Managed 扫描关掉，或直接调 `CompileWithHealing`），然后：
-
-调用：`agg_call_tool { tool: "execute_csharp_code", args: { "code": "Verse.Find.CurrentMap.mapPawns.FreeColonists[0].DrawPos.y" } }`
-预期：`success=true`，且 `get_unityexplorer_logs` 里出现 `[CSConsole] 自愈补引用：UnityEngine.CoreModule.dll`
-
-再调一次同样的代码
-预期：仍成功，且**这次没有新的自愈日志**（说明引用已进集合、未重复补）
+本任务只提交离线测试证据（`TestMissingReferenceParser`、`TestHealerByNamespace`）。自愈闭环的进程内证明由任务 12 矩阵 #16（手造 5 引用小集调 `CompileWithHealing`）与 #3/#17/#18（清单外模块靠自愈补齐）执行。
 
 - [ ] **步骤 8：Commit**
 
@@ -2438,18 +2429,19 @@ git commit -m "feat(roslyn): 缺引用自愈（CS0012/CS0246 → 自动补引用
 | 检查项 | 结果 |
 |---|---|
 | 规格覆盖：现有编译器识别 / 语言上限 / Roslyn 可行性 / 外部模组引用 / 默认引用与 using / 回退 / 补全 / Hook / 打包 / 许可 / 文案 | 任务 1–12 覆盖；「只升级 mcs.dll」结论在 §0 标注为**不做** |
-| 用户新增需求（默认引用本体+模组） | 任务 2（引用集合）+ 任务 3（默认 using）+ 任务 12 步骤 1（MCP 文案），并有游戏内验收（任务 2 步骤 6、任务 3 步骤 7） |
+| 用户新增需求（默认引用本体+模组） | 任务 2（引用集合）+ 任务 3（默认 using）+ 任务 12 步骤 1（MCP 文案）；游戏内验收并入任务 12 矩阵（原任务 2 步骤 6 / 任务 3 步骤 7 的验证点由矩阵 #1/#2/#4/#14/#17 覆盖） |
 | 占位符扫描 | 无 TODO/待定；每个代码步骤给出可粘贴代码 |
 | 类型一致性 | `IScriptEvaluator.Evaluate(string, out string)`（任务 7 定义）在任务 8/10 一致使用；`ReplSession.LastAssembly`（任务 10 增补）与 `RoslynScriptEvaluator.LastCompiledAssembly`（任务 10 使用）对应；`ReferenceSet.TryAdd(location, simpleName, blacklist)`（任务 2）在 `ReferenceScanner` 中按同签名调用；任务 8 额外补上 `Init()` 里 `Evaluator.Compile("0 == 0")` → `Evaluator.Evaluate("0 == 0", out _)` 的改法（否则 mcs 专用 API 残留会编译失败） |
 | 依赖未定义类型（首轮自检发现并已修） | ① `ScriptInteraction.ClassesText` 是凭空捏造的 → 改为 `ScriptEvaluator.GetClasses()` 自带实现（mcs 内部反射搬过去），并给出完整代码；② 任务 8 用到任务 9 才创建的 `RoslynCompletion` → 任务 7 先返回空数组，任务 9 接入；③ 任务 9 的命名空间补全依赖 `ReplSession.AllNamespaces()` → 已在任务 9 步骤 3 给出实现（用 Roslyn 元数据遍历，**不**加载程序集）；④ 任务 5 首用任务 4 创建的 `PolyfillSource` → 任务 4 步骤 4 已注明与任务 5 合并提交 |
-| 测试工程 link 覆盖（首轮自检发现并已修） | 每个新建纯逻辑文件都在对应任务的文件清单里给出 csproj link 行：`ReferenceSet`（任务 2）、`DefaultUsings`（任务 3）、`ReplSession`（任务 6）、`IScriptEvaluator`+`RoslynScriptEvaluator`（任务 7）、`RoslynCompletion`（任务 9）。**`ReferenceScanner` 依赖 `UnityEngine`/`ExplorerCore`，明确不 link**（否则 net472 侧编译失败），改由游戏内验收 |
-| 游戏内步骤可达性 | 所有「游戏内验收」步骤都给出前置（进图）、确切工具调用与期望输出；部署命令集中在任务 8 步骤 5 与任务 11 步骤 5 |
+| 测试工程 link 覆盖（首轮自检发现并已修） | 每个新建纯逻辑文件都在对应任务的文件清单里给出 csproj link 行：`ReferenceSet`（任务 2）、`DefaultUsings`（任务 3）、`ReplSession`（任务 6）、`IScriptEvaluator`+`RoslynScriptEvaluator`（任务 7）、`RoslynCompletion`（任务 9）。**`ReferenceScanner` 依赖 `UnityEngine`/`ExplorerCore`，明确不 link**（否则 net472 侧编译失败），改由任务 12 矩阵验收 |
+| 游戏内步骤可达性 | 游戏内验收按定稿集中：任务 8（首次部署 + 开关/回退）、任务 11（再部署 + 时延/体积）、任务 12（端到端矩阵，吸收任务 2/3/9/10/13 的验收点）；其余任务只跑离线 `dotnet run --project Source/RoslynBridgeTests`。部署命令在任务 8 步骤 5 与任务 11 步骤 5（目标 = Mods 游戏副本绝对路径） |
 
 ---
 
 ## 3. 执行说明
 
-- 涉及游戏的两类步骤（任务 2/3/8/9/10/11/12 的「游戏内验收」）必须**先部署再验**：`build.ps1` 产出 → 复制 `UnityExplorer.STANDALONE.Mono.dll` 到 `Assemblies/` → 复制 `lib/roslyn/*.dll` 到 `UE_Data/sinai-dev-UnityExplorer/Roslyn/` → 重启游戏进图。
+- **调度顺序：任务 1→10 → 任务 13 → 任务 11 → 任务 12**（自愈必须先于打包与最终验收——任务 11 的构建要包含任务 13，任务 12 矩阵的自愈行才验得了）。
+- 游戏内验收只在三处执行：**任务 8**（首次部署 + 开关/回退）、**任务 11**（再部署 + 时延/体积）、**任务 12**（端到端矩阵，吸收任务 2/3/9/10/13 的验收点）；其余任务只跑离线测试。部署目标是**游戏加载的 Mods 副本**（绝对路径命令见任务 8 步骤 5 / 任务 11 步骤 5）——产物复制进仓库目录不会被游戏读到；部署后用 MCP `stop_game` / `start_quick_test` 重启进图。
 - 若 Roslyn 载荷顺序出过问题（例如手工加载试验），**必须重启游戏进程**再继续——Mono 的失败缓存不可逆（可行性报告 §4.2）。
 - 每完成一个任务跑一次 `dotnet run --project Source/RoslynBridgeTests`，全绿再提交。
 

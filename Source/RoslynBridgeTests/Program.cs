@@ -24,8 +24,67 @@ namespace RoslynBridgeTests
             TestSuccessPathViaChildProcess();
             TestReferenceSet();
             TestDefaultUsingsParsing();
+            TestPolyfills();
+            TestCompiler();
+            TestDiagnosticFormat();
             Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
             return failures == 0 ? 0 : 1;
+        }
+
+        static void TestCompiler()
+        {
+            var refs = ReferenceSetForThisProcess();
+
+            var ok = RoslynCompiler.Compile("Ok", "public static class M { public static int F(int x) => x switch { 1 => 10, _ => 0 }; }",
+                refs, includePolyfills: true);
+            Check("现代语法编译成功", ok.Success, ok.Diagnostics);
+            Check("成功时 ErrorCount=0", ok.ErrorCount == 0);
+
+            var asm = System.Reflection.Assembly.Load(ok.PeBytes);
+            Check("产物可加载并执行", (int)asm.GetType("M").GetMethod("F").Invoke(null, new object[] { 1 }) == 10);
+
+            var bad = RoslynCompiler.Compile("Bad", "public class X { Missing y; }", refs, includePolyfills: true);
+            Check("缺类型编译失败", !bad.Success);
+            Check("失败时 ErrorCount>0", bad.ErrorCount > 0);
+            Check("失败时无 PE", bad.PeBytes == null);
+        }
+
+        static void TestDiagnosticFormat()
+        {
+            var refs = ReferenceSetForThisProcess();
+            var r = RoslynCompiler.Compile("Fmt", "public class X { Missing y; }", refs, includePolyfills: true);
+            Check("诊断含文件名占位（行号）", r.Diagnostics.Contains("(1,"), r.Diagnostics);
+            Check("诊断含 error CS", r.Diagnostics.Contains("error CS"), r.Diagnostics);
+            Check("诊断含类型名 Missing", r.Diagnostics.Contains("Missing"), r.Diagnostics);
+        }
+
+        static void TestPolyfills()
+        {
+            var refs = ReferenceSetForThisProcess();
+
+            var without = RoslynCompiler.Compile("NoShim", "public record R(int A);", refs, includePolyfills: false);
+            Check("无 polyfill：record 编译失败", !without.Success);
+            Check("无 polyfill：报 CS0518 IsExternalInit",
+                without.Diagnostics.Contains("CS0518") && without.Diagnostics.Contains("IsExternalInit"),
+                without.Diagnostics);
+
+            var with = RoslynCompiler.Compile("WithShim", "public record R(int A);", refs, includePolyfills: true);
+            Check("有 polyfill：record 编译成功", with.Success, with.Diagnostics);
+            Check("有 polyfill：产出非空 PE", with.PeBytes != null && with.PeBytes.Length > 0);
+
+            var req = RoslynCompiler.Compile("Req", "public class C { public required int X { get; set; } }",
+                refs, includePolyfills: true);
+            Check("有 polyfill：required 成员编译成功", req.Success, req.Diagnostics);
+        }
+
+        static System.Collections.Generic.List<string> ReferenceSetForThisProcess()
+        {
+            var list = new System.Collections.Generic.List<string>();
+            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try { if (!string.IsNullOrEmpty(a.Location)) list.Add(a.Location); } catch { }
+            }
+            return list;
         }
 
         static void TestDefaultUsingsParsing()

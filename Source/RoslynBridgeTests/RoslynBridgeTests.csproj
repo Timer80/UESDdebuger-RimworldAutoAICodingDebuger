@@ -7,11 +7,21 @@
     <AssemblyName>RoslynBridgeTests</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
-    <!-- 任务 1 只 link 加载器；任务 2 加 ReferenceSet；PolyfillSource/DiagnosticFormatter/RoslynCompiler 由后续任务创建后再加 link -->
+    <!-- 任务 1 只 link 加载器；任务 2 加 ReferenceSet；任务 4/5 加 PolyfillSource/DiagnosticFormatter/RoslynCompiler -->
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\RoslynAssemblyLoader.cs" Link="RoslynAssemblyLoader.cs" />
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\ReferenceSet.cs" Link="ReferenceSet.cs" />
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\DefaultUsings.cs" Link="DefaultUsings.cs" />
+    <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\PolyfillSource.cs" Link="PolyfillSource.cs" />
+    <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\DiagnosticFormatter.cs" Link="DiagnosticFormatter.cs" />
+    <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\RoslynCompiler.cs" Link="RoslynCompiler.cs" />
     <Reference Include="Microsoft.CodeAnalysis"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\Microsoft.CodeAnalysis.dll</HintPath></Reference>
     <Reference Include="Microsoft.CodeAnalysis.CSharp"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\Microsoft.CodeAnalysis.CSharp.dll</HintPath></Reference>
+    <!-- 任务 5：RoslynCompiler.cs 触碰 ImmutableArray<Diagnostic>（CS0012 → 必须引用 Immutable）；
+         以下传递依赖 RAR 不会自动复制进输出，显式引用以进 bin（Roslyn 运行时直接按文件名加载）。 -->
+    <Reference Include="System.Collections.Immutable"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\System.Collections.Immutable.dll</HintPath></Reference>
+    <Reference Include="System.Reflection.Metadata"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\System.Reflection.Metadata.dll</HintPath></Reference>
+    <Reference Include="System.Memory"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\System.Memory.dll</HintPath></Reference>
+    <Reference Include="System.Threading.Tasks.Extensions"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\System.Threading.Tasks.Extensions.dll</HintPath></Reference>
+    <Reference Include="System.Runtime.CompilerServices.Unsafe"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\System.Runtime.CompilerServices.Unsafe.dll</HintPath></Reference>
   </ItemGroup>
 </Project>

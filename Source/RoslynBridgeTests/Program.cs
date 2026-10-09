@@ -147,8 +147,10 @@ namespace RoslynBridgeTests
             Check("会话 Dispose 摘钩幂等不抛", disposed);
 
             // 修复轮 2 Important：Dispose 后 Submit 必须清晰拒绝（失败结果 + "会话已释放" 诊断），
-            // 不得静默成功、也不得运行期 NRE。判别推演：旧码无防御——s2 此刻 n=1（无基类需解析），
-            // 提交会编译运行全成功 → ErrorCount=0、Success=true、诊断无关键词 → 本断言必 FAIL。
+            // 不得静默成功、也不得运行期 NRE。判别推演（复审 2 勘误）：旧码无防御——s2 此刻
+            // s_submission=2，n=3 需解析基类而 AssemblyResolve 已摘钩 → 运行期 NRE →
+            // F4 记账 Success=false/ErrorCount=1、诊断"运行时异常:…"（前两条件为真）——
+            // 仅第三条件（诊断含"已释放"）不成立 → 本断言必 FAIL。
             var post = s2.Submit("1 + 1");
             Check("Dispose 后 Submit 被拒绝（失败+已释放诊断）", !post.Success && post.ErrorCount > 0
                 && post.Diagnostics.Contains("已释放"), post.Diagnostics);

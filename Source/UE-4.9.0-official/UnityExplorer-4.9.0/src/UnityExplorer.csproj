@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <OutputType>Library</OutputType>
         <PlatformTarget>AnyCPU</PlatformTarget>
@@ -184,6 +184,12 @@
             <ReferencePath Include="$(RimWorldManagedDir)\Assembly-CSharp.dll" />
         </ItemGroup>
     </Target>
+    <!-- 任务 2 修复轮 1：ReferenceScanner.cs 靠 glob 无条件纳入，而非 Mono 配置没有 Assembly-CSharp
+         引用（上方 target 仅 Mono 生效）→ 那 5 个配置必报 CS0246 Verse。此处按配置排除该文件；
+         4 个 Mono 配置（交付面）不受影响，仍由默认 glob 纳入。 -->
+    <ItemGroup Condition="'$(Configuration)'=='BIE_Cpp' or '$(Configuration)'=='BIE_Cpp_CoreCLR' or '$(Configuration)'=='ML_Cpp_net6' or '$(Configuration)'=='ML_Cpp_net472' or '$(Configuration)'=='STANDALONE_Cpp'">
+        <Compile Remove="RoslynBridge\ReferenceScanner.cs" />
+    </ItemGroup>
     <!-- Il2Cpp Unhollower -->
     <ItemGroup Condition="'$(Configuration)'=='ML_Cpp_net6' or '$(Configuration)'=='ML_Cpp_net472' or '$(Configuration)'=='STANDALONE_Cpp' or '$(Configuration)'=='BIE_Cpp'">
         <Reference Include="Il2Cppmscorlib">

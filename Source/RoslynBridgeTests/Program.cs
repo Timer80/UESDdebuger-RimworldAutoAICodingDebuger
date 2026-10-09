@@ -27,6 +27,7 @@ namespace RoslynBridgeTests
             TestPolyfills();
             TestCompiler();
             TestDiagnosticFormat();
+            TestReplSession();
             Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
             return failures == 0 ? 0 : 1;
         }
@@ -75,6 +76,46 @@ namespace RoslynBridgeTests
             var req = RoslynCompiler.Compile("Req", "public class C { public required int X { get; set; } }",
                 refs, includePolyfills: true);
             Check("有 polyfill：required 成员编译成功", req.Success, req.Diagnostics);
+        }
+
+        static void TestReplSession()
+        {
+            var refs = ReferenceSetForThisProcess();
+            var s = new ReplSession(refs);
+
+            var r1 = s.Submit("var x = 5;");
+            Check("提交1 无错误", r1.ErrorCount == 0, r1.Diagnostics);
+            Check("提交1 定义了变量 x", s.GetVars().Contains("x"));
+
+            var r2 = s.Submit("var y = x + 37;");
+            Check("提交2 能读到提交1 的变量", r2.ErrorCount == 0, r2.Diagnostics);
+            Check("变量表含 x 与 y", s.GetVars().Contains("x") && s.GetVars().Contains("y"));
+
+            var r3 = s.Submit("y");
+            Check("末表达式产生返回值", r3.ErrorCount == 0 && s.LastValue?.ToString() == "42",
+                "value=" + s.LastValue + " diag=" + r3.Diagnostics);
+
+            var r4 = s.Submit("x = 100;");
+            Check("可对既有变量赋值", r4.ErrorCount == 0, r4.Diagnostics);
+            var r5 = s.Submit("y = x + 1; y");
+            Check("赋值后再次求值", s.LastValue?.ToString() == "101", "value=" + s.LastValue);
+
+            var r6 = s.Submit("public class MyProbe { public static int V() => 7; }");
+            Check("提交类定义成功", r6.ErrorCount == 0, r6.Diagnostics);
+            var r7 = s.Submit("MyProbe.V()");
+            Check("下一次提交能用到上一次定义的类", s.LastValue?.ToString() == "7", "value=" + s.LastValue);
+            Check("GetClasses 列出用户类", s.GetClasses().Contains("MyProbe"));
+
+            var r8 = s.Submit("using System.Text;");
+            Check("using 指令成功", r8.ErrorCount == 0, r8.Diagnostics);
+            Check("GetUsing 含 System.Text", s.GetUsing().Contains("System.Text"));
+            var r9 = s.Submit("new StringBuilder(\"ab\").Append(\"c\").ToString()");
+            Check("using 对后续提交生效", s.LastValue?.ToString() == "abc", "value=" + s.LastValue);
+
+            var bad = s.Submit("var z = NotExistingThing;");
+            Check("错误提交不污染会话", bad.ErrorCount > 0);
+            var stillOk = s.Submit("y");
+            Check("错误后会话仍可用", stillOk.ErrorCount == 0 && s.LastValue?.ToString() == "101");
         }
 
         static System.Collections.Generic.List<string> ReferenceSetForThisProcess()

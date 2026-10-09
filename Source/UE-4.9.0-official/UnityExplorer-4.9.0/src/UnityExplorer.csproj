@@ -200,6 +200,7 @@
     <ItemGroup Condition="'$(Configuration)'!='STANDALONE_Mono'">
         <Compile Remove="RoslynBridge\RoslynCompiler.cs" />
         <Compile Remove="RoslynBridge\DiagnosticFormatter.cs" />
+        <Compile Remove="RoslynBridge\ReplSession.cs" />
     </ItemGroup>
     <!-- 架构 A 正式接线：net472 可直接消费 netstandard2.0，按计划原样常规 <Reference>
          引 lib/roslyn 载荷（Private=false：不进输出，由部署脚本单独搬运）。 -->

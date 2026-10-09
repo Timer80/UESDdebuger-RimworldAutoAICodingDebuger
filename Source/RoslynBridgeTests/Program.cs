@@ -90,6 +90,9 @@ namespace RoslynBridgeTests
             var r2 = s.Submit("var y = x + 37;");
             Check("提交2 能读到提交1 的变量", r2.ErrorCount == 0, r2.Diagnostics);
             Check("变量表含 x 与 y", s.GetVars().Contains("x") && s.GetVars().Contains("y"));
+            // 修复轮 1 #2：单参 GetField 不遍历基类 static 字段 → 早期变量曾恒显示 null；
+            // 多次提交后 GetVars 必须沿继承链取到值（x 此刻 = 5）。
+            Check("GetVars 显示早期变量的值（基类链）", s.GetVars().Contains("x = 5"), s.GetVars());
 
             var r3 = s.Submit("y");
             Check("末表达式产生返回值", r3.ErrorCount == 0 && s.LastValue?.ToString() == "42",
@@ -116,6 +119,32 @@ namespace RoslynBridgeTests
             Check("错误提交不污染会话", bad.ErrorCount > 0);
             var stillOk = s.Submit("y");
             Check("错误后会话仍可用", stillOk.ErrorCount == 0 && s.LastValue?.ToString() == "101");
+
+            // 修复轮 1 #4 + #1：运行期异常计入 ErrorCount、诊断带消息（覆盖消息优先级 bug）、
+            // 且之后会话仍可用（运行期失败=推进计数按失败记账，程序集已加载不可干净回滚）。
+            var boom = s.Submit("throw new System.Exception(\"boom\");");
+            Check("运行期异常计入 ErrorCount", boom.ErrorCount > 0, "err=" + boom.ErrorCount);
+            Check("运行期异常诊断含消息", boom.Diagnostics.Contains("boom"), boom.Diagnostics);
+            var afterBoom = s.Submit("y");
+            Check("运行期异常后会话仍可用", afterBoom.ErrorCount == 0 && s.LastValue?.ToString() == "101",
+                "value=" + s.LastValue + " diag=" + afterBoom.Diagnostics);
+
+            // 修复轮 1 #3：会话唯一程序集前缀 → 多会话并存互不串值，Dispose 幂等摘钩。
+            var s2 = new ReplSession(refs);
+            var q1 = s2.Submit("var a = 1;");
+            var q2 = s2.Submit("a + 41");
+            Check("多会话：第二会话独立求值", q1.ErrorCount == 0 && q2.ErrorCount == 0
+                && s2.LastValue?.ToString() == "42", "value=" + s2.LastValue + " diag=" + q2.Diagnostics);
+            var q3 = s.Submit("y");
+            Check("多会话：第一会话不受影响", q3.ErrorCount == 0 && s.LastValue?.ToString() == "101",
+                "value=" + s.LastValue);
+            // 判别唯一前缀机制：程序集名必须是 Submission_<8位会话标签>_<n>_asm（4 段下划线），
+            // 旧命名 Submission_<n>_asm 只有 3 段 —— 结构断言直接证伪同名回退。
+            string asmName = System.Reflection.Assembly.Load(q2.PeBytes).GetName().Name;
+            Check("提交程序集名含会话唯一标签", asmName.Split('_').Length == 4, asmName);
+            bool disposed = true;
+            try { s2.Dispose(); s2.Dispose(); } catch { disposed = false; }
+            Check("会话 Dispose 摘钩幂等不抛", disposed);
         }
 
         static System.Collections.Generic.List<string> ReferenceSetForThisProcess()

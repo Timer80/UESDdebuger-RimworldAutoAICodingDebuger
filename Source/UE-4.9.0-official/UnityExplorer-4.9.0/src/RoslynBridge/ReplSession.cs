@@ -14,7 +14,7 @@ namespace UnityExplorer.RoslynBridge
     /// 无状态桩的 REPL：提交 N 编译成 Submission_N（继承 Submission_{N-1}），
     /// 顶层变量提升为静态字段以跨提交保留；末表达式写入 __result 实现值打印。
     /// </summary>
-    public sealed class ReplSession
+    public sealed class ReplSession : IDisposable
     {
         readonly List<string> s_referencePaths;
         readonly List<MetadataReference> s_imageRefs = new List<MetadataReference>();
@@ -22,8 +22,12 @@ namespace UnityExplorer.RoslynBridge
         readonly List<string> s_classes = new List<string>();
         readonly List<KeyValuePair<string, Type>> s_vars = new List<KeyValuePair<string, Type>>();
         readonly List<Assembly> s_sessionAssemblies = new List<Assembly>();
+        // 会话唯一标签（构造时 GUID 段）：提交程序集名 = Submission_<tag>_<n>_asm，
+        // 全局唯一 → 多会话并存时按名回退（RequestingAssembly==null）也不可能答错会话。
+        readonly string s_sessionTag = Guid.NewGuid().ToString("N").Substring(0, 8);
 
         int s_submission;
+        bool s_disposed;
         Assembly s_lastAssembly;
 
         public object LastValue { get; private set; }
@@ -36,7 +40,18 @@ namespace UnityExplorer.RoslynBridge
             // Submission_N 按名解析基类 Submission_{N-1} 时默认探测必失败（实测
             // FileNotFoundException → ReflectionTypeLoadException → GetType 返回 null）。
             // 自挂 AssemblyResolve：只应答"请求方是本会话提交程序集"且本会话按名持有的程序集。
+            // 生命周期契约（任务 7 消费方义务）：会话替换/控制台卸载时调用 Dispose() 摘钩；
+            // Dispose 后不得再 Submit；不 Dispose 也无害（唯一名下死处理器只直通 null）。
             AppDomain.CurrentDomain.AssemblyResolve += ResolveSessionAssembly;
+        }
+
+        /// <summary>摘除 AssemblyResolve 并清空会话程序集注册；幂等，之后不得再 Submit。</summary>
+        public void Dispose()
+        {
+            if (s_disposed) return;
+            s_disposed = true;
+            AppDomain.CurrentDomain.AssemblyResolve -= ResolveSessionAssembly;
+            s_sessionAssemblies.Clear();
         }
 
         Assembly ResolveSessionAssembly(object sender, ResolveEventArgs args)
@@ -164,7 +179,7 @@ namespace UnityExplorer.RoslynBridge
             }
 
             CSharpCompilation compilation = CSharpCompilation.Create(
-                className + "_asm", trees, metadataRefs,
+                "Submission_" + s_sessionTag + "_" + n + "_asm", trees, metadataRefs,
                 new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
             var result = new CompileResult();
@@ -199,8 +214,13 @@ namespace UnityExplorer.RoslynBridge
             }
             catch (Exception ex)
             {
+                // 运行期异常：程序集已 Assembly.Load 进 AppDomain（字节加载不可卸载），无法干净回滚
+                // → 推进计数按失败记账（Success=false、ErrorCount≥1）；诊断必须带上消息（补括号，
+                // 否则 `+` 先于 `??`，InnerException 为 null 时整段拼接结果把 ex.Message 吃掉）。
                 result.Success = false;
-                result.Diagnostics += Environment.NewLine + "运行时异常: " + ex.InnerException?.Message ?? ex.Message;
+                if (result.ErrorCount == 0) result.ErrorCount = 1;
+                result.Diagnostics += Environment.NewLine + "运行时异常: "
+                    + (ex.InnerException?.Message ?? ex.Message);
             }
             return result;
         }
@@ -235,10 +255,19 @@ namespace UnityExplorer.RoslynBridge
         public string GetVars()
         {
             var sb = new StringBuilder();
+            Type start = s_lastAssembly?.GetType("Submission_" + s_submission);
             foreach (var kv in s_vars)
             {
                 object val = null;
-                try { val = s_lastAssembly?.GetType("Submission_" + s_submission)?.GetField(kv.Key)?.GetValue(null); }
+                try
+                {
+                    // 单参 GetField 不带 FlattenHierarchy：基类 public static 字段返回 NULL
+                    //（探针实证；静态字段不遍历基类）→ 与 RefreshVarTypes 同款逐层上溯取值。
+                    FieldInfo f = null;
+                    for (Type t = start; t != null && f == null; t = t.BaseType)
+                        f = t.GetField(kv.Key, BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly);
+                    if (f != null) val = f.GetValue(null);
+                }
                 catch { }
                 sb.AppendLine(kv.Key + " = " + (val ?? "null") + "   (" + (kv.Value?.Name ?? "?") + ")");
             }

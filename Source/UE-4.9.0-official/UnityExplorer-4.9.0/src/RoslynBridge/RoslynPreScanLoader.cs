@@ -29,35 +29,34 @@ namespace UnityExplorer.RoslynBridge
             try
             {
                 bool ok = RoslynAssemblyLoader.EnsureLoaded(DerivePayloadDir());
-                string msg = "[CSConsole] Roslyn 载荷扫描前加载完成（avail=" + ok
-                    + (ok ? "" : "，控制台将在 Reset 时回退 mcs：" + RoslynAssemblyLoader.FailureReason) + "）";
-                Verse.Log.Message(msg);
-                LogToExplorerPanel(msg, false);
-            }
-            catch (Exception ex)
-            {
-                string msg = "[CSConsole] Roslyn 载荷扫描前加载失败（控制台将在 Reset 时回退 mcs）：" + ex.Message;
-                Verse.Log.Warning(msg);
-                LogToExplorerPanel(msg, true);
-            }
+                int mapped = RoslynAssemblyLoader.LoadedPayloadCount;
+                bool resolver = RoslynAssemblyLoader.ResolverInstalled;
 
-            // 追加 9 钩子自检：此 GetFields 正是 RimWorld 扫描同款调用、且打在历史炸点上
-            // （Player.log 首个 TypeLoadException 就是 ReplSession 字段签名解析）——
-            // 它通过 = 应答器真在位、扫描期绑定必有应答；失败即钩子失效（Player.log 一眼可见）。
-            // 注：处理器已在 EnsureLoaded 内挂载（本 cctor 先行），绑定必有应答；catch 兜异常路径。
-            try
-            {
-                typeof(ReplSession).GetFields(System.Reflection.BindingFlags.Static
-                    | System.Reflection.BindingFlags.Public
-                    | System.Reflection.BindingFlags.NonPublic
-                    | System.Reflection.BindingFlags.Instance);
-                string msg = "[CSConsole] Roslyn 钩子自检通过（ReplSession 字段签名解析成功）";
-                Verse.Log.Message(msg);
-                LogToExplorerPanel(msg, false);
+                // 追加 9 修订 3：正锚点只报**可验证事实**（映射条数 + 委托挂载位）。
+                // ⚠️ 不要用 `typeof(ReplSession).GetFields(...)` 当"钩子自检"：C.5 已把 ReplSession 的
+                // 载荷类型字段全部擦除，载荷未载/应答器未挂时它**照样成功**——那是假阳性，会把缺陷
+                // 放进验收。钩子真正生效的证据只有两条：Player.log 零 TypeLoadException +
+                // 控制台 Roslyn 路径实际可用（本锚点证明不了它们，故不做此承诺）。
+                if (ok && mapped == 8 && resolver)
+                {
+                    string msg = "[CSConsole] Roslyn 扫描前加载完成（载荷映射 8/8，解析器已挂载）";
+                    Verse.Log.Message(msg);
+                    LogToExplorerPanel(msg, false);
+                }
+                else
+                {
+                    string msg = "[CSConsole] Roslyn 扫描前加载未就绪（avail=" + ok
+                        + "，载荷映射 " + mapped + "/8，解析器已挂载=" + resolver
+                        + "，原因=" + (RoslynAssemblyLoader.FailureReason ?? "未尝试/未知")
+                        + "）：控制台将在 Reset 时以正确路径重试或回退 mcs";
+                    Verse.Log.Warning(msg);
+                    LogToExplorerPanel(msg, true);
+                }
             }
             catch (Exception ex)
             {
-                string msg = "[CSConsole] 钩子自检失败（typeref 绑定仍无应答）：" + ex.Message;
+                string msg = "[CSConsole] Roslyn 扫描前加载失败（控制台将在 Reset 时回退 mcs）："
+                    + ex.GetType().Name + ": " + ex.Message;
                 Verse.Log.Warning(msg);
                 LogToExplorerPanel(msg, true);
             }
@@ -69,8 +68,11 @@ namespace UnityExplorer.RoslynBridge
         /// <c>ExplorerCore.Init</c> 才赋值（init 链在 UELoaderMod 的 SceneManager.sceneLoaded 里，
         /// 晚于本 cctor，见类注释时序实证）。LogPanel 那一半是安全的（Logs.Add + 两处 null 守卫），
         /// 故吞掉异常后面板仍留痕。
-        /// 绝不能裸调、也绝不让它外泄：ExplorerCore.Log 的 NRE 会被下面各 catch 变成"加载/自检
-        /// 失败"的**误报**（成功路径也报失败、面板日志丢失、Player.log 诊断价值归零）。
+        /// 绝不能裸调、也绝不让它外泄：ExplorerCore.Log 的 NRE 会被各 catch 变成"加载失败"的**误报**。
+        /// 但**空 catch 也不可接受**（追加 8 修订 5）：它会吞掉 ExplorerCore 静态 ctor 的
+        /// TypeInitializationException（如 :31 的 Harmony 实例化失败）——那是一次性**永久毒化**，
+        /// 之后面板通道全废，而 Player.log 却只剩成功行。故把真因经包外通道（Verse.Log，不依赖
+        /// ExplorerCore）报一次，保证 Player.log 有真因；只报一次避免刷屏。
         /// 副作用：首次调用会触发 ExplorerCore 的静态 ctor（创建 Harmony 实例）；幂等、无害。
         /// </summary>
         static void LogToExplorerPanel(string message, bool warning)
@@ -80,11 +82,20 @@ namespace UnityExplorer.RoslynBridge
                 if (warning) ExplorerCore.LogWarning(message);
                 else ExplorerCore.Log(message);
             }
-            catch
+            catch (Exception ex)
             {
-                // 面板日志失败无害：Player.log 已由 Verse.Log 留痕。
+                if (s_panelChannelReported) return;
+                s_panelChannelReported = true;
+                string inner = ex.InnerException != null
+                    ? " ← " + ex.InnerException.GetType().Name + ": " + ex.InnerException.Message
+                    : "";
+                string msg = "[CSConsole] UE 面板日志通道不可用（面板缓存丢失，不影响载荷加载）："
+                    + ex.GetType().Name + ": " + ex.Message + inner;
+                try { Verse.Log.Warning(msg); } catch { /* 兜底通道也失败：无处可报，只能放弃 */ }
             }
         }
+
+        static bool s_panelChannelReported;
 
         // ExplorerCore.ExplorerFolder 此时尚不可用，故不能直接复用：它是
         // `Path.Combine(Loader.ExplorerFolderDestination, Loader.ExplorerFolderName)`（ExplorerCore.cs:28）

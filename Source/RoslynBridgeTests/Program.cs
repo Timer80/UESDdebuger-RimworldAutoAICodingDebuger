@@ -20,7 +20,7 @@ namespace RoslynBridgeTests
                 return RunSuccessPathInChild();
             TestLoadOrder();
             TestLoadFailureDoesNotThrow();
-            TestEnsureLoadedIsIdempotent();
+            TestEnsureLoadedPathKeyedLatch();
             TestSuccessPathViaChildProcess();
             TestReferenceSet();
             TestDefaultUsingsParsing();
@@ -277,19 +277,42 @@ namespace RoslynBridgeTests
                 detail = "找不到真实载荷目录";
             else
             {
+                // ── 修订 1：门闩按路径键控的语义断言（同一进程内可完整观察，故放在子进程）──
+                // ① 不存在的路径：不消耗尝试、不加载（只留首个诊断）
+                Check("子进程：不存在的路径 → false",
+                    RoslynAssemblyLoader.EnsureLoaded(@"Z:\c5\missing-a") == false);
+                Check("子进程：不存在的路径不登记尝试（失败原因只记首个）",
+                    RoslynAssemblyLoader.FailureReason != null
+                    && RoslynAssemblyLoader.EnsureLoaded(@"Z:\c5\missing-b") == false
+                    && RoslynAssemblyLoader.FailureReason.Contains("missing-a"),
+                    RoslynAssemblyLoader.FailureReason);
+                // ② 存在但缺载荷的目录（载荷目录的父目录 lib/）：真尝试并失败 → 登记该路径
+                string incomplete = System.IO.Path.GetDirectoryName(real);
+                Check("子进程：存在但缺载荷的目录 → false（真尝试并登记）",
+                    RoslynAssemblyLoader.EnsureLoaded(incomplete) == false);
+                string failAfterIncomplete = RoslynAssemblyLoader.FailureReason;
+                Check("子进程：同路径重复调用不重试（失败原因逐字不变）",
+                    RoslynAssemblyLoader.EnsureLoaded(incomplete) == false
+                    && RoslynAssemblyLoader.FailureReason == failAfterIncomplete,
+                    RoslynAssemblyLoader.FailureReason);
+                // ③ **不同且存在**的路径（真实载荷目录）→ 允许新尝试并成功：
+                //    旧「一次性全局锁」在此恒返回 false（壳类推导错一次即永久锁死 mcs）→ 本断言即判别力。
                 try { ok = RoslynAssemblyLoader.EnsureLoaded(real); }
                 catch (Exception e) { detail = e.GetType().Name + ": " + e.Message; }
             }
-            Check("子进程：EnsureLoaded(真实载荷目录)==true", ok, detail);
+            Check("子进程：换不同且存在的路径 → 允许重试并成功（修订 1 判别力）", ok, detail);
             Check("子进程：IsAvailable==true", RoslynAssemblyLoader.IsAvailable);
+            Check("子进程：解析器已挂载（ResolverInstalled）", RoslynAssemblyLoader.ResolverInstalled);
 
-            // ── 追加 8 行为断言（只能在本子进程做：父进程已被 TestLoadFailureDoesNotThrow 的一次性锁
-            //    锁成失败态，映射必空、处理器必未挂）──────────────
+            // ── 追加 8 行为断言（只能在本子进程做：父进程的载荷目录尝试必失败，映射必空、处理器必未挂）──
             // ① 映射在挂载前已填满（先填后挂，扫描期工作线程只读）；
             // ② 处理器应答载荷简单名：按名返回**已载实例**（版本号由 AssemblyName 解析，与 identity 无关）；
-            // ③ 非载荷名一律 null → 对第三方零干扰（处理器不得吞别家请求，也不得抛异常）。
+            // ③ 非载荷名一律 null → 对第三方零干扰（处理器不得吞别家请求，也不得抛异常）；
+            // ④ 修订 2（应答面收窄）：载荷名 + 外来请求方 → null；载荷名 + 请求方不可判定(null) → 应答。
             int mapped = PayloadMapCount();
             Check("子进程：载荷映射已填充 8 条（先填后挂）", mapped == 8, "count=" + mapped);
+            Check("子进程：LoadedPayloadCount==8（对外只读口径）",
+                RoslynAssemblyLoader.LoadedPayloadCount == 8, "count=" + RoslynAssemblyLoader.LoadedPayloadCount);
 
             object answered = InvokePayloadResolver(
                 "Microsoft.CodeAnalysis, Version=4.14.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35");
@@ -302,6 +325,20 @@ namespace RoslynBridgeTests
                 "Newtonsoft.Json, Version=13.0.3.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed");
             Check("子进程：应答器对非载荷名返回 null（第三方零干扰）", foreign == null,
                 foreign == null ? null : foreign.ToString());
+
+            // ④ 收窄：System.Memory 是通用名——请求方是别人（这里用自己的测试程序集当"外来请求方"
+            //    的反例不成立，故显式用 mscorlib 当外来方）时必须 null；请求方不可判定时必须应答。
+            var foreignRequester = typeof(string).Assembly;   // mscorlib：与载荷无关的第三方
+            object narrowed = InvokePayloadResolverWithRequester(
+                "System.Memory, Version=4.0.1.2, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51",
+                foreignRequester);
+            Check("子进程：通用名载荷 + 外来请求方 → null（修订 2 收窄）", narrowed == null,
+                narrowed == null ? null : narrowed.ToString());
+
+            object noRequester = InvokePayloadResolverWithRequester(
+                "System.Memory, Version=4.0.1.2, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51", null);
+            Check("子进程：载荷名 + 请求方不可判定(null) → 应答（主路径保底）",
+                noRequester is System.Reflection.Assembly);
 
             Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
             return failures == 0 ? 0 : 1;
@@ -320,10 +357,47 @@ namespace RoslynBridgeTests
         /// <summary>反射调私有的 AppDomain 级应答器（模拟 Mono 的绑定回调）；方法缺失即抛（测试要响）。</summary>
         static object InvokePayloadResolver(string assemblyFullName)
         {
+            return InvokePayloadResolverWithRequester(assemblyFullName, null);
+        }
+
+        /// <summary>
+        /// 同上，但带 RequestingAssembly（修订 2 收窄需要）。`ResolveEventArgs(name, requester)` 是
+        /// internal 构造，故先反射构造器、失败再反射设私有字段；两条途径都不可用即 FAIL（不得静默放过）。
+        /// </summary>
+        static object InvokePayloadResolverWithRequester(string assemblyFullName,
+            System.Reflection.Assembly requester)
+        {
             var m = typeof(RoslynAssemblyLoader).GetMethod("PayloadAssemblyResolver",
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
             if (m == null) throw new InvalidOperationException("PayloadAssemblyResolver 方法不存在");
-            return m.Invoke(null, new object[] { null, new ResolveEventArgs(assemblyFullName) });
+
+            var args = BuildResolveArgs(assemblyFullName, requester);
+            return m.Invoke(null, new object[] { null, args });
+        }
+
+        static ResolveEventArgs BuildResolveArgs(string assemblyFullName,
+            System.Reflection.Assembly requester)
+        {
+            if (requester == null) return new ResolveEventArgs(assemblyFullName);
+
+            var ctor = typeof(ResolveEventArgs).GetConstructor(
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Public,
+                null, new[] { typeof(string), typeof(System.Reflection.Assembly) }, null);
+            if (ctor != null)
+                return (ResolveEventArgs)ctor.Invoke(new object[] { assemblyFullName, requester });
+
+            var args = new ResolveEventArgs(assemblyFullName);
+            var field = typeof(ResolveEventArgs).GetField("_requestingAssembly",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            if (field != null)
+            {
+                field.SetValue(args, requester);
+                return args;
+            }
+            Check("可构造带 RequestingAssembly 的 ResolveEventArgs（修订 2 断言前置）", false,
+                "既无 internal 构造器也无 _requestingAssembly 字段");
+            return args;
         }
 
         static void TestSuccessPathViaChildProcess()
@@ -374,14 +448,41 @@ namespace RoslynBridgeTests
             Check("缺目录后 IsAvailable=false", !RoslynAssemblyLoader.IsAvailable);
         }
 
-        static void TestEnsureLoadedIsIdempotent()
+        // 修订 1：失败门闩按**路径键控**（取代原一次性全局锁）——本进程只观察"失败侧"语义：
+        // 同路径不重试（幂等）、不存在的路径不登记尝试；"不同且存在的路径可重试并成功"在子进程断言
+        //（保持既有纪律：静态一次性状态的成功/失败两侧分进程，互不污染）。
+        static void TestEnsureLoadedPathKeyedLatch()
         {
-            // 判别"一次性锁"的存在：锁定后即使换成**真实载荷目录**也必须直接返回缓存结果、禁止重试
-            //（Mono 会缓存失败的类型解析）。无锁实现对真实目录会返回 true → 本用例即失败。
+            // 上一条用例（TestLoadFailureDoesNotThrow）已用 Z:\definitely\missing 触发首个诊断
+            string first = RoslynAssemblyLoader.FailureReason;
+            Check("失败门闩：不存在路径的失败已留诊断", !string.IsNullOrEmpty(first), "reason=" + first);
+
+            Check("失败门闩：不存在的路径重复调用仍 false",
+                RoslynAssemblyLoader.EnsureLoaded(@"Z:\definitely\missing") == false);
+            Check("失败门闩：不存在路径不改写首个诊断（不消耗尝试）",
+                RoslynAssemblyLoader.FailureReason == first, RoslynAssemblyLoader.FailureReason);
+
+            // 存在但缺载荷的目录（= 载荷目录的父目录 lib/）：真尝试 → 失败 → 登记该路径
             string real = FindRealPayloadDir();
-            bool second = RoslynAssemblyLoader.EnsureLoaded(real);
-            Check("幂等：锁定后对真实载荷目录仍返回 false", second == false);
-            Check("幂等：锁定后 IsAvailable 仍为 false", RoslynAssemblyLoader.IsAvailable == false);
+            string incomplete = real == null ? null : System.IO.Path.GetDirectoryName(real);
+            bool usable = incomplete != null && System.IO.Directory.Exists(incomplete)
+                && !System.IO.File.Exists(System.IO.Path.Combine(incomplete, "System.Memory.dll"));
+            Check("失败门闩：前置（存在但缺载荷的目录可用）", usable, incomplete);
+
+            Check("失败门闩：存在但缺载荷的目录 → false（真尝试并登记）",
+                usable && RoslynAssemblyLoader.EnsureLoaded(incomplete) == false,
+                RoslynAssemblyLoader.FailureReason);
+            string afterIncomplete = RoslynAssemblyLoader.FailureReason;
+            Check("失败门闩：同路径重复调用不重试（幂等；失败原因逐字不变）",
+                usable && RoslynAssemblyLoader.EnsureLoaded(incomplete) == false
+                && RoslynAssemblyLoader.FailureReason == afterIncomplete,
+                RoslynAssemblyLoader.FailureReason);
+            Check("失败门闩：IsAvailable 仍为 false", !RoslynAssemblyLoader.IsAvailable);
+            Check("失败门闩：解析器未挂载（未成功装载 ⇒ 未挂）",
+                !RoslynAssemblyLoader.ResolverInstalled);
+            Check("失败门闩：LoadedPayloadCount==0（无部分装载态）",
+                RoslynAssemblyLoader.LoadedPayloadCount == 0,
+                "count=" + RoslynAssemblyLoader.LoadedPayloadCount);
         }
 
         // ── C.5-lite 护栏（任务 8）：防复发断言 ──
@@ -404,10 +505,17 @@ namespace RoslynBridgeTests
                 "System.Runtime.CompilerServices.Unsafe", "System.Numerics.Vectors",
             };
 
+            // 修订 4（防"静默跳过=假绿"）：RTLE 兜底会丢型、GetFields 失败会丢型，两者都必须计数并断言为 0，
+            // 否则护栏可能"扫了个空集"还报 PASS。
             Type[] types;
+            int nullTypes = 0, loaderExceptions = 0;
             try { types = typeof(ReplSession).Assembly.GetTypes(); }
             catch (System.Reflection.ReflectionTypeLoadException rtle)
-            { types = rtle.Types.Where(t => t != null).ToArray(); }
+            {
+                types = rtle.Types.Where(t => t != null).ToArray();
+                nullTypes = rtle.Types.Length - types.Length;
+                loaderExceptions = rtle.LoaderExceptions == null ? 0 : rtle.LoaderExceptions.Length;
+            }
             catch (Exception e) { Check("C.5 护栏：类型枚举可执行", false, e.GetType().Name); return; }
 
             var bad = new System.Text.StringBuilder();
@@ -415,17 +523,22 @@ namespace RoslynBridgeTests
                 | System.Reflection.BindingFlags.Instance
                 | System.Reflection.BindingFlags.Public
                 | System.Reflection.BindingFlags.NonPublic;
-            int scanned = 0;
+            int scanned = 0, fieldEnumFailures = 0;
             foreach (Type t in types)
             {
                 if (t == null || t.Namespace != "UnityExplorer.RoslynBridge") continue;
                 System.Reflection.FieldInfo[] fs;
-                try { fs = t.GetFields(AllF); } catch { continue; }
+                try { fs = t.GetFields(AllF); } catch { fieldEnumFailures++; continue; }
                 scanned++;
                 foreach (System.Reflection.FieldInfo f in fs)
                     if (FieldTouchesPayload(f.FieldType, payloadAsms))
                         bad.AppendLine(t.Name + " . " + f.Name + " -> " + f.FieldType);
             }
+            // 跳过计数断言（实测值写在用例名里）：空型 0 / LoaderException 0 / 字段枚举失败 0。任一非 0 即假绿风险。
+            Check("C.5 护栏：零跳过（空型 " + nullTypes + " / LoaderException " + loaderExceptions
+                + " / 字段枚举失败 " + fieldEnumFailures + "）",
+                nullTypes == 0 && loaderExceptions == 0 && fieldEnumFailures == 0,
+                "空型=" + nullTypes + " loaderExc=" + loaderExceptions + " fieldFail=" + fieldEnumFailures);
             Check("C.5 护栏：RoslynBridge 全类型零载荷类型字段（扫描 " + scanned + " 型）",
                 bad.Length == 0, bad.ToString().TrimEnd());
         }

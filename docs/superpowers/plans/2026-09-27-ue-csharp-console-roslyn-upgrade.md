@@ -220,9 +220,26 @@ namespace RoslynBridgeTests
 
         static void TestEnsureLoadedIsIdempotent()
         {
-            // 第二次调用必须直接返回缓存结果（Mono 会缓存失败的类型解析 → 禁止重试）
-            bool second = RoslynAssemblyLoader.EnsureLoaded(@"Z:\definitely\missing");
-            Check("幂等：二次调用仍为 false", !second);
+            // 判别"一次性锁"的存在：锁定后即使换成**真实载荷目录**也必须直接返回缓存结果、禁止重试
+            //（Mono 会缓存失败的类型解析）。无锁实现对真实目录会返回 true → 本用例即失败。
+            string real = FindRealPayloadDir();
+            bool second = RoslynAssemblyLoader.EnsureLoaded(real);
+            Check("幂等：锁定后对真实载荷目录仍返回 false", second == false);
+            Check("幂等：锁定后 IsAvailable 仍为 false", RoslynAssemblyLoader.IsAvailable == false);
+        }
+
+        /// <summary>从测试程序目录向上找到仓库里的真实载荷目录；找不到返回 null（用例据此报错）。</summary>
+        static string FindRealPayloadDir()
+        {
+            var dir = new System.IO.DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
+            while (dir != null)
+            {
+                string p = System.IO.Path.Combine(dir.FullName,
+                    @"UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn");
+                if (System.IO.Directory.Exists(p)) return p;
+                dir = dir.Parent;
+            }
+            return null;
         }
     }
 }

@@ -20,6 +20,10 @@ namespace UnityExplorer.RoslynBridge
         /// <summary>本次提交**实际编译的生成源码**（REPL 会重写用户输入：usings/字段提升/类体包裹）。
         /// 诊断里的行列号指的就是它；排错时看它比猜快一个数量级（internal：只给同程序集/离线测试用）。</summary>
         internal string GeneratedSource = "";
+        /// <summary>§21：本次提交实际编译了几遍（常规 1；末表达式是 void 走回退 = 2，**最多 2、禁循环**）。</summary>
+        internal int Passes = 1;
+        /// <summary>§21：是否走了"void 末表达式 → 不进值通道"的回退路径。</summary>
+        internal bool FallbackForVoid;
     }
 
     /// <summary>parse → compile → emit 到内存。不负责加载（调用方决定 Assembly.Load 或 CreateFromImage）。</summary>

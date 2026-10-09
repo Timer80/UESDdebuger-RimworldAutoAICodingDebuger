@@ -57,6 +57,9 @@ namespace RoslynBridgeTests
             TestHostBaseSignatureAlignment();
             TestHostSelfReferenceNeeded();
             TestHostHelperNameShadowing();
+            // §21 CS0029 值通道回退
+            TestVoidValueChannelFallback();
+            TestVoidFallbackProductionShape();
             // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
             // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
             Console.WriteLine("COUNTS parent_pass=" + passLines + " parent_fail=" + failures
@@ -1049,6 +1052,140 @@ namespace RoslynBridgeTests
                 dir = dir.Parent;
             }
             return null;
+        }
+
+        // ══════════════ §21 CS0029：void 末表达式 → 值通道回退（错误驱动，两遍） ══════════════
+
+        /// <summary>
+        /// §21：末表达式是 **void** 时不得生成 `__result = &lt;expr&gt;;`（CS0029：void → object）。
+        /// 机制 = 错误驱动回退：先常规生成/编译，**仅当** pass 1 失败、且诊断是"落在**注入赋值行**上的
+        /// CS0029"、且该行右值**自然类型是 void** 时，才以"末表达式原样语句"重生成重编译一次（**最多一次**）。
+        /// 离线装置：宿主基类注入 `System.Threading.Thread`（它有 public static void `Sleep(int)`），
+        /// 于是无需 UE 运行期即可复现"末条 void 调用"与"用户自己的 void API"两种形态。
+        /// </summary>
+        static void TestVoidValueChannelFallback()
+        {
+            var refs = ReferenceSetForThisProcess();
+            // 装置：不注入宿主基类（Thread 是 sealed，不能当基类）；改为先定义**用户自己的 void 方法**，
+
+            // ① 末条 void 调用（= 游戏内 Log("hello") 的同型形态）⇒ 回退后编译成功、无 CS0029
+            var s = NewSession(refs);
+            s.Submit("public class Vh { public static void Noop() { } }");
+            var r1 = s.Submit("Vh.Noop();");
+            Check("§21 ①：末条 void 调用编译成功（不再 CS0029）", r1.Success, r1.Diagnostics);
+            Check("§21 ①：确实走了回退路径（Passes=2 / FallbackForVoid）",
+                r1.Passes == 2 && r1.FallbackForVoid, "passes=" + r1.Passes);
+            Check("§21 ①：最终源码不再注入赋值（原样语句）",
+                !r1.GeneratedSource.Contains("__result = Vh.Noop()") && r1.GeneratedSource.Contains("Vh.Noop();"),
+                r1.GeneratedSource);
+            Check("§21 ①：诊断不含 CS0029（第一遍的错不得泄漏）",
+                !r1.Diagnostics.Contains("CS0029"), r1.Diagnostics);
+            Check("§21 ①：无值可回显（与 mcs 的 void 语义一致）", s.LastValue == null);
+
+            // ② 值通道不回归（游戏内实测 42 的离线等价断言）
+            var s2 = NewSession(refs);
+            s2.Submit("var x = 1;");
+            var r2 = s2.Submit("x + 41");
+            Check("§21 ②：值通道不回归（x + 41 = 42）",
+                r2.Success && s2.LastValue?.ToString() == "42", "value=" + s2.LastValue);
+            Check("§21 ②/⑧：值表达式**零额外开销**（Passes=1，未走回退）",
+                r2.Passes == 1 && !r2.FallbackForVoid, "passes=" + r2.Passes);
+
+            // ③ 1 + 1 = 2（最基本的值表达式）
+            var r3 = s2.Submit("1 + 1");
+            Check("§21 ③：1 + 1 = 2 且 Passes=1",
+                r3.Success && s2.LastValue?.ToString() == "2" && r3.Passes == 1,
+                "value=" + s2.LastValue + " passes=" + r3.Passes);
+
+            // ④ void 调用**之后**提交值表达式 ⇒ 状态没被搞坏
+            var s4 = NewSession(refs);
+            s4.Submit("public class Vh { public static void Noop() { } }");
+            s4.Submit("Vh.Noop();");
+            var r4 = s4.Submit("2 + 3");
+            Check("§21 ④：void 之后的值表达式仍返回值（=5）",
+                r4.Success && s4.LastValue?.ToString() == "5", "value=" + s4.LastValue);
+
+            // ⑤ 反向护栏：`Sleep(0).ToString()` 是**非法**用法（对 void 取成员）⇒ 仍按正常报错处理
+            var r5 = s4.Submit("Vh.Noop().ToString()");
+            Check("§21 ⑤：对 void 取成员的非法用法仍报错（未被过度抑制）",
+                !r5.Success && r5.ErrorCount > 0, r5.Diagnostics);
+
+            // ⑦ 用户自己的 void API（非我们助手）同样可用 ⇒ 证明不是"12 助手名白名单"
+            var s7 = NewSession(refs);
+            var r7 = s7.Submit("System.Threading.Thread.Sleep(0);");   // 用户自己的 void 游戏/框架 API（全限定）
+            Check("§21 ⑦：用户自己的 void 静态调用也可用（非助手白名单）",
+                r7.Success && r7.Passes == 2, r7.Diagnostics);
+
+            // ⑧ 非 void 静态调用不受影响（值通道照常）
+            var r8 = s7.Submit("System.Math.Abs(-3)");
+            Check("§21 ⑧：非 void 静态调用值通道照常（=3，Passes=1）",
+                r8.Success && s7.LastValue?.ToString() == "3" && r8.Passes == 1,
+                "value=" + s7.LastValue + " passes=" + r8.Passes);
+
+            // ⑨a **不过度回退**：用户自己写的 CS0029（cast void）+ 末表达式不是 void ⇒ 不回退、原样报错
+            var s9a = NewSession(refs);
+            s9a.Submit("public class Vh { public static void Noop() { } }");
+            var r9a = s9a.Submit("(object)Vh.Noop()");
+            Check("§21 ⑨a：用户自己代码里的 CS0029 **不触发回退**（Passes=1，不掩盖真实错误）",
+                !r9a.Success && r9a.Passes == 1 && !r9a.FallbackForVoid,
+                "passes=" + r9a.Passes + " diag=" + r9a.Diagnostics);
+
+            // ⑨b/⑨c/⑩：void 末条 + 另有真实错误 ⇒ 回退后仍失败，且**上报第二遍诊断**（第一遍 CS0029 不泄漏）
+            var s9b = NewSession(refs);
+            s9b.Submit("public class Vh { public static void Noop() { } }");
+            var r9b = s9b.Submit("int z = NotDefinedSymbol; Vh.Noop();");
+            Check("§21 ⑨b：回退后仍失败且报**真实错误**（NotDefinedSymbol）",
+                !r9b.Success && r9b.Passes == 2 && r9b.Diagnostics.Contains("NotDefinedSymbol"),
+                "passes=" + r9b.Passes + " diag=" + r9b.Diagnostics);
+            Check("§21 ⑨c：第二遍诊断优先（第一遍 CS0029 不泄漏给用户）",
+                !r9b.Diagnostics.Contains("CS0029"), r9b.Diagnostics);
+            Check("§21 ⑩：回退**最多一次**（Passes 恰为 2，绝无第三遍）", r9b.Passes == 2);
+
+            // 性能：void 回退路径 vs 值表达式的**实测耗时**（报告要数字，不要推理）
+            // 先各跑一次"热身"（JIT/首次编译），再测，避免把冷启动算进回退成本
+            NewSession(refs).Submit("1 + 1");
+            NewSession(refs).Submit("System.Threading.Thread.Sleep(0);");
+            var swVoid = System.Diagnostics.Stopwatch.StartNew();
+            var sv = NewSession(refs);
+            sv.Submit("public class Vh { public static void Noop() { } }");
+            var rv = sv.Submit("Vh.Noop();");
+            swVoid.Stop();
+            var swValue = System.Diagnostics.Stopwatch.StartNew();
+            var sval = NewSession(refs);
+            var rval = sval.Submit("1 + 1");
+            swValue.Stop();
+            Console.WriteLine("VOIDFALLBACK void_ms=" + swVoid.ElapsedMilliseconds
+                + " value_ms=" + swValue.ElapsedMilliseconds
+                + " passes_void=" + rv.Passes + " passes_value=" + rval.Passes);
+        }
+
+        /// <summary>
+        /// §21 生产形态判别力：用**真实 UE 程序集**证明"助手是 void ⇒ 注入赋值必 CS0029"
+        /// 与"去掉赋值即可编译"（只编译不执行，故不依赖 UE 运行期状态）。
+        /// </summary>
+        static void TestVoidFallbackProductionShape()
+        {
+            string ue = FindBuiltUeAssembly();
+            if (ue == null)
+            {
+                Check("§21 生产形态：能找到已构建 UE 程序集", false, "未找到 Release 产物");
+                return;
+            }
+            var refs = ReferenceSetForThisProcess();
+            refs.Add(ue);
+
+            const string withAssign =
+                "public class S : UnityExplorer.RoslynBridge.ReplHostBase "
+                + "{ public static void Run() { __result = Log(\"hello\"); } }";
+            var bad = RoslynCompiler.Compile("VoidAssign", withAssign, refs, includePolyfills: false);
+            Check("§21 生产形态：助手是 void ⇒ `__result = Log(...)` 报 CS0029（回退前提）",
+                !bad.Success && bad.Diagnostics.Contains("CS0029"), bad.Diagnostics);
+
+            const string noAssign =
+                "public class S : UnityExplorer.RoslynBridge.ReplHostBase "
+                + "{ public static void Run() { Log(\"hello\"); } }";
+            var ok = RoslynCompiler.Compile("VoidNoAssign", noAssign, refs, includePolyfills: false);
+            Check("§21 生产形态：去掉赋值后同一源码可编译（回退形态有效）", ok.Success, ok.Diagnostics);
         }
 
         /// <summary>B4：批量预置与逐条提交**行为等价**，且成本可见（打印实测毫秒，供报告引用）。</summary>

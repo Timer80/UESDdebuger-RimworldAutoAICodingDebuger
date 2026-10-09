@@ -314,45 +314,21 @@ namespace UnityExplorer.RoslynBridge
                 return rejected;
             }
 
-            // 3) 末条语句若是表达式 → 捕获为 __result
-            string valueExpr = null;
+            // 3) 末条语句若是表达式 → 捕获为值通道（`__result = <expr>;`）
+            // §21：**void 表达式不能进值通道**（`Cannot implicitly convert type 'void' to 'object'` = CS0029）。
+            // 机制 = **错误驱动回退（两遍，禁循环）**：先按常规生成并编译；**当且仅当** pass 1 失败且诊断里
+            // 存在"指向注入赋值行"的 CS0029 时，才以"末表达式原样语句、不加赋值"的形态重生成并重编译一次。
+            // 为何不用"每次先建语义模型"：单提交已 ~600-1500ms，每次多一遍全量编译不划算；回退只在 void 末条发生。
+            // 为何不做"助手名白名单"：那只修我们自己的 12 个助手，用户自己的 void API
+            //（`Verse.Log.Message(...)`/`Verse.Widgets.BeginGroup(...)` 等）照样 CS0029，而 mcs 路径都能跑 ⇒ 大面积不对等。
+            ExpressionStatementSyntax lastExpr = null;
+            string lastExprText = null;
             if (statements.Count > 0 && statements[statements.Count - 1] is ExpressionStatementSyntax es)
             {
-                valueExpr = es.Expression.ToString();
+                lastExpr = es;
+                lastExprText = es.Expression.ToString();
                 statements.RemoveAt(statements.Count - 1);
             }
-
-            var body = new StringBuilder();
-            foreach (StatementSyntax st in statements) body.AppendLine("        " + st.ToFullString().Trim());
-            if (valueExpr != null) body.AppendLine($"        __result = {valueExpr};");
-
-            var src = new StringBuilder();
-            src.AppendLine("using System;");
-            // B1/D ①：**本次新增**的 using 也要进本次编译 —— 否则它无法在自己的提交里被校验，
-            // 只会"静默入表、从此每次提交都失败"（实测症状：连 `new[]{1,2,3}.Sum()` 都报
-            // CS0246 'UniverseLib'，而那条 using 属于更早的提交）。失败即不提交（见方法尾部）。
-            var emittedUsings = new List<string>(s_usings);
-            foreach (string d in pendingUsings)
-                if (!emittedUsings.Contains(d)) emittedUsings.Add(d);
-            src.AppendLine(string.Join(Environment.NewLine, emittedUsings.ToArray()));
-            // §19：继承链根是助手基类；`__result` 现由基类承载（ReplHostBase.__result），故此处不再声明。
-            // 若注入的 hostBaseTypeName 为空（离线测试用"无基类"形态），则退回自声明 __result（等价旧行为）。
-            src.AppendLine($"public class {className}" + (baseName != null ? " : " + baseName : ""));
-            src.AppendLine("{");
-            if (baseName == null) src.AppendLine("    public static object __result;");
-            src.Append(fields);
-            src.AppendLine("    public static void Run()");
-            src.AppendLine("    {");
-            src.Append(body);
-            src.AppendLine("    }");
-            src.Append(classes);
-            src.AppendLine("}");
-
-            var trees = new List<SyntaxTree>
-            {
-                CSharpSyntaxTree.ParseText(src.ToString(), new CSharpParseOptions(LanguageVersion.Latest)),
-                CSharpSyntaxTree.ParseText(PolyfillSource.Code, new CSharpParseOptions(LanguageVersion.Latest)),
-            };
 
             var metadataRefs = new List<MetadataReference>(imageRefs.Count);
             foreach (object r in imageRefs) metadataRefs.Add((MetadataReference)r);
@@ -361,31 +337,33 @@ namespace UnityExplorer.RoslynBridge
                 try { metadataRefs.Add(MetadataReference.CreateFromFile(p)); } catch { }
             }
 
-            CSharpCompilation compilation = CSharpCompilation.Create(
-                "Submission_" + s_sessionTag + "_" + n + "_asm", trees, metadataRefs,
-                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+            string asmName = "Submission_" + s_sessionTag + "_" + n + "_asm";
+            int assignmentLine;
+            string srcText = BuildSubmissionSource(className, baseName, fields, statements, lastExpr,
+                assignValue: lastExpr != null, pendingUsings: pendingUsings, classesSource: classes,
+                out assignmentLine);
+            SyntaxTree generatedTree;
+            CSharpCompilation compilation = CreateSubmissionCompilation(srcText, asmName, metadataRefs,
+                out generatedTree);
+            Diagnostic[] firstDiag;
+            CompileResult result = EmitOnce(compilation, srcText, notes, out firstDiag);
 
-            var result = new CompileResult();
-            result.Notes = notes.ToString().TrimEnd();
-            result.GeneratedSource = src.ToString();
-            byte[] pe;
-            using (var ms = new MemoryStream())
+            if (lastExpr != null && result.ErrorCount > 0
+                && IsVoidAssignmentError(compilation, generatedTree, firstDiag, assignmentLine))
             {
-                var emit = compilation.Emit(ms);
-                result.Diagnostics = DiagnosticFormatter.FormatAll(emit.Diagnostics);
-                // C.5-lite：原 `Count(d => d.Severity == DiagnosticSeverity.Error)` 虽非捕获式，
-                // 但编译器会把 lambda 缓存为 <>c.<>9__* 静态字段（Func<Diagnostic,bool>——泛型实参
-                // =载荷类型，字段签名解析连带解析实参 typeref，与 List<MetadataReference> 同款炸法）
-                // → 改显式循环，杜绝委托缓存字段。
-                // ⚠️ 脆弱点：载荷类型仅以方法组/表达式形式出现，禁止改为捕获式（否则闭包
-                // <>c__DisplayClass* 字段复活、启动扫描再炸）；非捕获 lambda 亦禁止（<>c 委托缓存字段）。
-                result.ErrorCount = 0;
-                foreach (Diagnostic d in emit.Diagnostics)
-                    if (d.Severity == DiagnosticSeverity.Error) result.ErrorCount++;
-                result.Success = emit.Success && result.ErrorCount == 0;
-                pe = result.Success ? ms.ToArray() : null;
-                result.PeBytes = pe;
+                // 回退：同一次提交最多再编译一遍（禁循环）；第二遍的诊断如实上报（绝不吞真实错误）
+                int ignoredLine;
+                srcText = BuildSubmissionSource(className, baseName, fields, statements, lastExpr,
+                    assignValue: false, pendingUsings: pendingUsings, classesSource: classes,
+                    out ignoredLine);
+                compilation = CreateSubmissionCompilation(srcText, asmName, metadataRefs, out generatedTree);
+                Diagnostic[] secondDiag;
+                result = EmitOnce(compilation, srcText, notes, out secondDiag);
+                result.Passes = 2;
+                result.FallbackForVoid = true;
             }
+
+            byte[] pe = result.PeBytes;
 
             LastResult = result;
             if (!result.Success) return result;   // 失败：会话状态不变（不推进 submission 计数）
@@ -616,6 +594,158 @@ namespace UnityExplorer.RoslynBridge
                 if (c == '/' && text[i + 1] == '/' && !inString && !inChar) return i;
             }
             return -1;
+        }
+
+        /// <summary>
+        /// §21：生成提交源码（**方法而非 lambda**——闭包会捕获 `StatementSyntax` 等**载荷类型**局部，
+        /// 生成 `&lt;&gt;c__DisplayClass*` 字段 ⇒ C.5 护栏（启动期字段扫描）会再次炸）。
+        /// <paramref name="assignValue"/> = 末表达式进值通道（`__result = &lt;expr&gt;;`）；false 时原样当语句执行。
+        /// </summary>
+        string BuildSubmissionSource(string className, string baseName, StringBuilder fields,
+            IEnumerable<StatementSyntax> statements, ExpressionStatementSyntax lastExpr, bool assignValue,
+            IEnumerable<string> pendingUsings, StringBuilder classesSource, out int assignmentLine)
+        {
+            assignmentLine = -1;
+            var body = new StringBuilder();
+            foreach (StatementSyntax st in statements) body.AppendLine("        " + st.ToFullString().Trim());
+            string assignText = null;
+            if (lastExpr != null)
+            {
+                if (assignValue)
+                {
+                    assignText = "__result = " + lastExpr.Expression + ";";
+                    body.AppendLine("        " + assignText);
+                }
+                else
+                {
+                    body.AppendLine("        " + lastExpr.ToFullString().Trim());   // void：原样语句，不捕获
+                }
+            }
+
+            var src = new StringBuilder();
+            src.AppendLine("using System;");
+            // B1/D ①：**本次新增**的 using 也要进本次编译 —— 否则它无法在自己的提交里被校验，
+            // 只会"静默入表、从此每次提交都失败"（实测症状：连 `new[]{1,2,3}.Sum()` 都报
+            // CS0246 'UniverseLib'，而那条 using 属于更早的提交）。失败即不提交（见方法尾部）。
+            var emittedUsings = new List<string>(s_usings);
+            foreach (string d in pendingUsings)
+                if (!emittedUsings.Contains(d)) emittedUsings.Add(d);
+            src.AppendLine(string.Join(Environment.NewLine, emittedUsings.ToArray()));
+            // §19：继承链根是助手基类；`__result` 现由基类承载（ReplHostBase.__result），故此处不再声明。
+            // 若注入的 hostBaseTypeName 为空（离线测试用"无基类"形态），则退回自声明 __result（等价旧行为）。
+            src.AppendLine($"public class {className}" + (baseName != null ? " : " + baseName : ""));
+            src.AppendLine("{");
+            if (baseName == null) src.AppendLine("    public static object __result;");
+            src.Append(fields);
+            src.AppendLine("    public static void Run()");
+            src.AppendLine("    {");
+            src.Append(body);
+            src.AppendLine("    }");
+            src.Append(classesSource);
+            src.AppendLine("}");
+
+            string text = src.ToString();
+            // §21：**生成阶段就确定注入赋值所在行**（0 基，与 Roslyn LineSpan 同口径）。
+            // 用"最后出现一次"定位（注入赋值是本方法体最后一条语句；用户自己若写过 `__result = …;`
+            // 也一定在它前面）⇒ 零手算、零模糊规则（不搞"落在文件末尾附近"这类启发式）。
+            if (assignText != null)
+                assignmentLine = LineOfLastOccurrence(text, assignText);
+            return text;
+        }
+
+        /// <summary>文本里**最后一次**出现 <paramref name="needle"/> 所在的 0 基行号（找不到 -1）。</summary>
+        static int LineOfLastOccurrence(string text, string needle)
+        {
+            int idx = text == null ? -1 : text.LastIndexOf(needle, StringComparison.Ordinal);
+            if (idx < 0) return -1;
+            int line = 0;
+            for (int i = 0; i < idx; i++)
+                if (text[i] == '\n') line++;
+            return line;
+        }
+
+        /// <summary>生成源码 + 载荷 polyfill 编成一个 compilation；同时回传生成源码那棵树（诊断位置判定要用）。</summary>
+        static CSharpCompilation CreateSubmissionCompilation(string srcText, string assemblyName,
+            List<MetadataReference> metadataRefs, out SyntaxTree generatedTree)
+        {
+            generatedTree = CSharpSyntaxTree.ParseText(srcText, new CSharpParseOptions(LanguageVersion.Latest));
+            var trees = new List<SyntaxTree>
+            {
+                generatedTree,
+                CSharpSyntaxTree.ParseText(PolyfillSource.Code, new CSharpParseOptions(LanguageVersion.Latest)),
+            };
+            return CSharpCompilation.Create(assemblyName, trees, metadataRefs,
+                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        }
+
+        /// <summary>编译一次并填 CompileResult（诊断原样回传，供 §21 过滤器按"错误码 + 位置"精确判定）。</summary>
+        static CompileResult EmitOnce(CSharpCompilation compilation, string srcText, StringBuilder notes,
+            out Diagnostic[] diagnostics)
+        {
+            var result = new CompileResult();
+            result.Notes = notes.ToString().TrimEnd();
+            result.GeneratedSource = srcText;
+            using (var ms = new MemoryStream())
+            {
+                var emit = compilation.Emit(ms);
+                diagnostics = new Diagnostic[emit.Diagnostics.Length];
+                emit.Diagnostics.CopyTo(diagnostics, 0);
+                result.Diagnostics = DiagnosticFormatter.FormatAll(emit.Diagnostics);
+                // C.5-lite：原 `Count(d => d.Severity == DiagnosticSeverity.Error)` 虽非捕获式，
+                // 但编译器会把 lambda 缓存为 <>c.<>9__* 静态字段（Func<Diagnostic,bool>——泛型实参
+                // =载荷类型，字段签名解析连带解析实参 typeref，与 List<MetadataReference> 同款炸法）
+                // → 改显式循环，杜绝委托缓存字段。
+                // ⚠️ 脆弱点：载荷类型仅以方法组/表达式形式出现，禁止改为捕获式（否则闭包
+                // <>c__DisplayClass* 字段复活、启动扫描再炸）；非捕获 lambda 亦禁止（<>c 委托缓存字段）。
+                result.ErrorCount = 0;
+                foreach (Diagnostic d in diagnostics)
+                    if (d.Severity == DiagnosticSeverity.Error) result.ErrorCount++;
+                result.Success = emit.Success && result.ErrorCount == 0;
+                result.PeBytes = result.Success ? ms.ToArray() : null;
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// §21 过滤器（**两重判定，都在同一个 compilation 上完成 ⇒ 不额外全量编译**）：
+        ///  ① 位置：pass 1 的诊断里存在 **CS0029**，且 `Location.SourceTree` 就是生成树、
+        ///    **行号 == 生成阶段记录的注入赋值行号**（`assignmentLine`，对端实测：末条 void 调用
+        ///    稳定落在 `__result = &lt;expr&gt;;` 那一行，如 (18,20)/(19,25)）；
+        ///  ② 语义：那条 `__result = &lt;expr&gt;;` 的右值**自然类型**是 `void`。
+        /// 为什么两重都要（9a 防线）：用户写 `(object)SomeVoidCall()` 时，cast 的 CS0029 **也在注入行上**，
+        /// 只看位置就会过度回退；此时右值类型是 object（非 void）⇒ ② 挡下，原样报用户自己的错。
+        /// 任何查询失败/右值非 void ⇒ false（保守，绝不误排除合法值表达式）。
+        /// </summary>
+        static bool IsVoidAssignmentError(CSharpCompilation compilation, SyntaxTree generatedTree,
+            Diagnostic[] pass1, int assignmentLine)
+        {
+            try
+            {
+                if (pass1 == null || assignmentLine < 0) return false;
+
+                foreach (Diagnostic d in pass1)
+                {
+                    if (d.Severity != DiagnosticSeverity.Error || d.Id != "CS0029") continue;
+                    if (d.Location == null || d.Location.SourceTree != generatedTree) continue;
+                    if (d.Location.GetLineSpan().StartLinePosition.Line != assignmentLine) continue;
+
+                    // 位置命中后再做语义确认（同一次编译的 SemanticModel）
+                    foreach (SyntaxNode node in generatedTree.GetRoot().DescendantNodes())
+                    {
+                        var stmt = node as ExpressionStatementSyntax;
+                        if (stmt == null) continue;
+                        if (stmt.GetLocation().GetLineSpan().StartLinePosition.Line != assignmentLine) continue;
+                        var assign = stmt.Expression as AssignmentExpressionSyntax;
+                        if (assign == null || assign.Left.ToString() != "__result") continue;
+                        ITypeSymbol rhs = compilation.GetSemanticModel(generatedTree)
+                            .GetTypeInfo(assign.Right).Type;
+                        return rhs != null && rhs.SpecialType == SpecialType.System_Void;
+                    }
+                    return false;
+                }
+            }
+            catch { /* 语义/位置查询失败：按"不可回退"处理（保守，保持既有行为） */ }
+            return false;
         }
 
         /// <summary>

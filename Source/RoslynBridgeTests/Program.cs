@@ -33,7 +33,6 @@ namespace RoslynBridgeTests
             var list = DefaultUsings.Parse("Verse;RimWorld;; Verse.AI ;");
             Check("分号切分", list.Count == 3, "got " + list.Count);
             Check("去空项", !list.Contains(""));
-            Check("去重（含首尾空格视为同一个）", list.Count == 3);
             Check("含 Verse", list.Contains("Verse"));
             Check("含 RimWorld", list.Contains("RimWorld"));
             Check("含 Verse.AI", list.Contains("Verse.AI"));
@@ -43,6 +42,15 @@ namespace RoslynBridgeTests
             Check("内置含 RimWorld", defaults.Contains("RimWorld"));
             Check("内置含 UnityEngine", defaults.Contains("UnityEngine"));
             Check("内置含 System.Linq", defaults.Contains("System.Linq"));
+
+            // 修复轮 1：原"去重"断言与"分号切分"同值空转（输入无真重复，Contains 分支从未判 false），
+            // 改为真重复输入 + 早退边界覆盖。
+            var dup = DefaultUsings.Parse("Verse; Verse;RimWorld");
+            Check("去重：真重复+空格差异视为同一个", dup.Count == 2, "got " + dup.Count);
+            Check("真重复 → 计数 1", DefaultUsings.Parse("Verse;Verse").Count == 1);
+            Check("Parse(null) → 空表", DefaultUsings.Parse(null).Count == 0);
+            Check("Parse(\"\") → 空表", DefaultUsings.Parse("").Count == 0);
+            Check("纯分号空白串 → 空表", DefaultUsings.Parse(" ;;; ").Count == 0);
         }
 
         static void TestReferenceSet()

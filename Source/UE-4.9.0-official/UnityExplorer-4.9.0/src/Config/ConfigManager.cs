@@ -1,4 +1,4 @@
-using UnityExplorer.RoslynBridge;
+﻿using UnityExplorer.RoslynBridge;
 using UnityExplorer.UI;
 
 namespace UnityExplorer.Config

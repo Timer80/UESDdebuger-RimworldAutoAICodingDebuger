@@ -1,6 +1,8 @@
-﻿using Mono.CSharp;
+using Mono.CSharp;
 using System.Collections;
 using System.Text;
+using UnityExplorer.Config;
+using UnityExplorer.RoslynBridge;
 using UnityExplorer.UI;
 using UnityExplorer.UI.Panels;
 using UniverseLib.Input;
@@ -36,21 +38,15 @@ namespace UnityExplorer.CSConsole
         static string previousInput;
         static int previousContentLength = 0;
 
+#if CPP
+        // IL2CPP 专属命名空间。本体/通用默认表已迁至 DefaultUsings.BuiltIn（可经配置覆盖），
+        // 此处仅保留 Unhollower 两项：它们不在 BuiltIn 里，配置覆盖也不应丢失。
         static readonly string[] DefaultUsing = new string[]
         {
-            "System",
-            "System.Linq",
-            "System.Text",
-            "System.Collections",
-            "System.Collections.Generic",
-            "System.Reflection",
-            "UnityEngine",
-            "UniverseLib",
-#if CPP
             "UnhollowerBaseLib",
             "UnhollowerRuntimeLib",
-#endif
         };
+#endif
 
         const int CSCONSOLE_LINEHEIGHT = 18;
 
@@ -131,8 +127,12 @@ namespace UnityExplorer.CSConsole
             };
 
             usingDirectives = new HashSet<string>();
+            foreach (string use in DefaultUsings.Parse(ConfigManager.CSharp_Console_Default_Usings.Value))
+                AddUsing(use);
+#if CPP
             foreach (string use in DefaultUsing)
                 AddUsing(use);
+#endif
 
             if (logSuccess)
                 ExplorerCore.Log($"C# Console reset");//. Using directives:\r\n{Evaluator.GetUsing()}");

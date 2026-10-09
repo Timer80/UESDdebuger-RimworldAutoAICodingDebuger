@@ -10,6 +10,7 @@
     <!-- 任务 1 只 link 加载器；任务 2 加 ReferenceSet；PolyfillSource/DiagnosticFormatter/RoslynCompiler 由后续任务创建后再加 link -->
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\RoslynAssemblyLoader.cs" Link="RoslynAssemblyLoader.cs" />
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\ReferenceSet.cs" Link="ReferenceSet.cs" />
+    <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\DefaultUsings.cs" Link="DefaultUsings.cs" />
     <Reference Include="Microsoft.CodeAnalysis"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\Microsoft.CodeAnalysis.dll</HintPath></Reference>
     <Reference Include="Microsoft.CodeAnalysis.CSharp"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\Microsoft.CodeAnalysis.CSharp.dll</HintPath></Reference>
   </ItemGroup>

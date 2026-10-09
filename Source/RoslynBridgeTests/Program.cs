@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using UnityExplorer.RoslynBridge;
 
 namespace RoslynBridgeTests
@@ -22,8 +23,26 @@ namespace RoslynBridgeTests
             TestEnsureLoadedIsIdempotent();
             TestSuccessPathViaChildProcess();
             TestReferenceSet();
+            TestDefaultUsingsParsing();
             Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
             return failures == 0 ? 0 : 1;
+        }
+
+        static void TestDefaultUsingsParsing()
+        {
+            var list = DefaultUsings.Parse("Verse;RimWorld;; Verse.AI ;");
+            Check("分号切分", list.Count == 3, "got " + list.Count);
+            Check("去空项", !list.Contains(""));
+            Check("去重（含首尾空格视为同一个）", list.Count == 3);
+            Check("含 Verse", list.Contains("Verse"));
+            Check("含 RimWorld", list.Contains("RimWorld"));
+            Check("含 Verse.AI", list.Contains("Verse.AI"));
+
+            var defaults = DefaultUsings.BuiltIn;
+            Check("内置含 Verse", defaults.Contains("Verse"));
+            Check("内置含 RimWorld", defaults.Contains("RimWorld"));
+            Check("内置含 UnityEngine", defaults.Contains("UnityEngine"));
+            Check("内置含 System.Linq", defaults.Contains("System.Linq"));
         }
 
         static void TestReferenceSet()

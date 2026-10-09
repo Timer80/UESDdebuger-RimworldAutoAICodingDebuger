@@ -1,4 +1,5 @@
-﻿using UnityExplorer.UI;
+using UnityExplorer.RoslynBridge;
+using UnityExplorer.UI;
 
 namespace UnityExplorer.Config
 {
@@ -26,6 +27,9 @@ namespace UnityExplorer.Config
         public static ConfigElement<KeyCode> World_MouseInspect_Keybind;
         public static ConfigElement<KeyCode> UI_MouseInspect_Keybind;
         public static ConfigElement<string> CSConsole_Assembly_Blacklist;
+        public static ConfigElement<bool> CSharp_Console_Use_Roslyn;
+        public static ConfigElement<bool> CSharp_Console_Allow_Mod_Type_Resolution;
+        public static ConfigElement<string> CSharp_Console_Default_Usings;
         public static ConfigElement<string> Reflection_Signature_Blacklist;
 
         // internal configs
@@ -133,6 +137,23 @@ namespace UnityExplorer.Config
                 "Separate each Assembly with a semicolon ';'." +
                 "For example, to blacklist Assembly-CSharp, you would add 'Assembly-CSharp;'",
                 "");
+
+            CSharp_Console_Use_Roslyn = new("C# Console Use Roslyn",
+                "Use the Roslyn compiler (C# 13) for the C# Console instead of the legacy Mono.CSharp compiler.\n" +
+                "If Roslyn fails to initialize, the console automatically falls back to Mono.CSharp.",
+                true);
+
+            CSharp_Console_Allow_Mod_Type_Resolution = new("C# Console Allow Mod Type Resolution",
+                "When a compile fails because a reference is missing, may the auto-healer resolve it from a mod assembly?\n" +
+                "Default ON. Mods are never referenced up-front either way - a mod assembly only enters the reference set\n" +
+                "when your code actually touches a mod type (and the compiler asks for it).\n" +
+                "Turn OFF to keep the console strictly base-game (mod types will stay unresolvable).",
+                true);
+
+            CSharp_Console_Default_Usings = new("C# Console Default Usings",
+                "Namespaces added as using directives when the C# Console is reset.\n" +
+                "Separate each namespace with a semicolon ';'.",
+                string.Join(";", DefaultUsings.BuiltIn));
 
             Reflection_Signature_Blacklist = new("Member Signature Blacklist",
                 "Use this to blacklist certain member signatures if they are known to cause a crash or other issues.\r\n" +

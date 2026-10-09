@@ -205,6 +205,10 @@ namespace UnityExplorer.CSConsole
                 // 该开关不改变引用集行为（实现侧 RoslynScriptEvaluator 仅存储，不预加 ModAssemblyPaths）。
                 Evaluator = new RoslynScriptEvaluator(refs.Paths, blacklist,
                     ConfigManager.CSharp_Console_Allow_Mod_Type_Resolution.Value);
+                // 任务 9 收尾轮 R2：补全降级上报钩子。RoslynBridge 侧**刻意零 ExplorerCore 依赖**
+                // （离线测试工程只 link RoslynBridge 源码，直接调 ExplorerCore 会链接失败）⇒ 委托注入。
+                // 补全跑在**每次按键**路径上：异常必须降级成一条日志，而不是打断输入或静默消失。
+                RoslynCompletion.ReportDiagnostic = CompletionDiagnostics;
                 ExplorerCore.Log($"[CSConsole] Roslyn 求值器就绪（{report}）");
 #endif
             }
@@ -643,6 +647,15 @@ namespace UnityExplorer.CSConsole
 
 
         #region Autocompletes
+
+        // 任务 9 收尾轮 R2：补全降级上报的宿主侧实现（在 ResetConsole 的 Roslyn 分支里挂给
+        // `RoslynCompletion.ReportDiagnostic`）。**用方法组而不是 lambda**：方法组不生成闭包、
+        // 也不留编译器缓存的委托字段（C.5 纪律：那些字段同样会被启动期字段扫描牵连；
+        // 产物面 C.5 扫描覆盖**全部**类型，含本类的编译器生成类型）。
+#if STANDALONE_MONO
+        static void CompletionDiagnostics(string message)
+            => ExplorerCore.LogWarning("[CSConsole] 自动补全降级：" + message);
+#endif
 
         public static void InsertSuggestionAtCaret(string suggestion)
         {

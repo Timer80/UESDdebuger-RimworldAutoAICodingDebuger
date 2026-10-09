@@ -1772,6 +1772,202 @@ namespace RoslynBridgeTests
 
             // 关键字表（C# 8+ 补齐）：源码文本断言（KeywordLexer 不可 link，理由见报告 §22）
             TestKeywordTableSource();
+
+            // §22 复审收尾轮（R1–R4）
+            TestCompletionRobustness();                 // R2 结构兜底 + R3 失效钩子 + R4③ 不静默
+            TestNamespaceSourceIncludesSubmissions();   // R4④ 提交件进源 + R4② 转发命名空间探针
+            TestCompletionUiDedupSource();              // R1 UI 合并点去重（源码级断言）
+        }
+
+        /// <summary>
+        /// 复审收尾轮 R2 / R3 / R4③：
+        /// ① 补全入口**结构上绝不抛**（异常 ⇒ 空候选 + 一条上报，**不静默**）；
+        /// ② 命名空间缓存的失效钩子真的重建；
+        /// ③ 引用读不出元数据**不静默**（报一条、只报一次）。
+        /// </summary>
+        static void TestCompletionRobustness()
+        {
+            var refs = ReferenceSetForThisProcess();
+            var reported = new System.Collections.Generic.List<string>();
+            RoslynCompletion.ReportDiagnostic = m => reported.Add(m);   // 测试用上报探针
+
+            // ① 正常路径：不得误报（同时证"零引用失败"）
+            using (var ev = NewEvaluator(refs))
+            {
+                string prefixOk;
+                string[] ok = ev.GetCompletions("System.Tex", out prefixOk);
+                Check("§22 R2 正常补全不误报降级日志", ok.Length > 0 && reported.Count == 0,
+                    JoinList(ok) + " reported=" + reported.Count);
+            }
+
+            // ② 结构兜底：null 会话**故意**踩异常路径 ⇒ 空候选 + 一条上报，**不抛**
+            // 判别力：旧码（入口无 try/catch）此处 NRE 直接逃出 ⇒ 用例以异常终止（RED）。
+            string prefixNull;
+            string[] nullResult = RoslynCompletion.Complete("sb.App", null, out prefixNull);
+            Check("§22 R2 null 会话 ⇒ 空候选而非抛出（结构保证可被验证）",
+                nullResult != null && nullResult.Length == 0, "prefix=" + prefixNull);
+            Check("§22 R2 异常降级为**一条上报**（不静默吞）",
+                reported.Count == 1 && !string.IsNullOrEmpty(reported[0]),
+                "count=" + reported.Count + " msg=" + (reported.Count > 0 ? reported[0] : "<none>"));
+
+            // ③ R3：失效钩子（任务 13 自愈补引用后**必须**调用）—— 判定"真的重建"
+            var ses = NewSession(refs);
+            System.Collections.Generic.IEnumerable<string> first = ses.AllNamespaces();
+            int n1 = CountNamespaces(first);
+            int folded = ses.NamespaceReferenceCount;
+            ses.InvalidateNamespaceCache();
+            System.Collections.Generic.IEnumerable<string> second = ses.AllNamespaces();
+            Check("§22 R3 失效后**重建新表**（同会话、不同对象、内容一致）",
+                !ReferenceEquals(first, second) && CountNamespaces(second) == n1 && n1 > 0,
+                "n1=" + n1 + " same_object=" + ReferenceEquals(first, second));
+            Check("§22 R3 无提交件时折进表的引用数 = 外部引用数",
+                folded == refs.Count && ses.NamespaceReferenceFailureCount == 0,
+                "folded=" + folded + " refs=" + refs.Count + " failures=" + ses.NamespaceReferenceFailureCount);
+
+            // ④ R4③：打不开的引用不静默（报一条、只报一次）
+            var badRefs = ReferenceSetForThisProcess();
+            badRefs.Add(@"Z:\__no_such_dir__\Nope.dll");
+            using (var evBad = NewEvaluator(badRefs))
+            {
+                int before = reported.Count;
+                string p1, p2;
+                evBad.GetCompletions("System.Tex", out p1);
+                int afterFirst = reported.Count;
+                evBad.GetCompletions("System.Tex", out p2);
+                // 判别力：旧码（空 catch 静默跳过）⇒ delta 恒 0 ⇒ 本行必 FAIL。
+                Check("§22 R4③ 引用读不出元数据 ⇒ 上报一条（不静默跳过）",
+                    afterFirst == before + 1, "delta=" + (afterFirst - before));
+                Check("§22 R4③ 只报一次（不每次按键刷屏）",
+                    reported.Count == afterFirst, "delta2=" + (reported.Count - afterFirst));
+            }
+
+            RoslynCompletion.ReportDiagnostic = null;
+        }
+
+        /// <summary>
+        /// 复审 R4④：命名空间源**包含会话提交件**（`imageRefs`）。可观测性说明：当前 `Submit` **拒绝**
+        /// `namespace` 声明（"不支持的顶层成员形态"）⇒ 提交件只贡献**全局命名空间**（空名，不入表）⇒
+        /// 行为上无增量，故判据用**结构断言**：折进表的引用数 = 外部引用数 + 提交件数。
+        /// 另附**类型转发探针**（R4②）。
+        /// </summary>
+        static void TestNamespaceSourceIncludesSubmissions()
+        {
+            var refs = ReferenceSetForThisProcess();
+            var plain = NewSession(refs);
+            int plainCount = CountNamespaces(plain.AllNamespaces());
+            int plainFolded = plain.NamespaceReferenceCount;
+
+            var withSub = NewSession(refs);
+            var r1 = withSub.Submit("public class ImgNsProbe { }");
+            Check("§22 R4④ 前置：提交一个类", r1.Success, r1.Diagnostics);
+            int subCount = CountNamespaces(withSub.AllNamespaces());
+
+            Check("§22 R4④ 提交件折进命名空间源（引用数 = 外部 " + refs.Count + " + 提交件 1）",
+                withSub.NamespaceReferenceCount == refs.Count + 1
+                && withSub.NamespaceReferenceFailureCount == 0,
+                "folded=" + withSub.NamespaceReferenceCount + " plain_folded=" + plainFolded);
+            Console.WriteLine("NSIMAGES external=" + refs.Count + " plain_folded=" + plainFolded
+                + " sub_folded=" + withSub.NamespaceReferenceCount
+                + " plain_ns=" + plainCount + " sub_ns=" + subCount);
+
+            TestForwardedNamespaceProbe();
+        }
+
+        /// <summary>
+        /// R4② 探针：`[assembly: TypeForwardedTo(typeof(System.Text.StringBuilder))]` 编出的 dll **不含类型定义**、
+        /// 只有 ExportedType 行；拿它单独做命名空间源 ⇒ 若 `System.Text` 在表里，说明 Roslyn 已把转发命名空间归类
+        /// （netstandard/mono facade 的缺口**不存在**，无需额外实现）；否则记为已知限制（报告 §22.9）。
+        /// </summary>
+        static void TestForwardedNamespaceProbe()
+        {
+            string mscorlib = null;
+            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try { if (a.GetName().Name == "mscorlib") { mscorlib = a.Location; break; } } catch { }
+            }
+            if (mscorlib == null) { Check("§22 R4② 转发探针前置：找到 mscorlib", false, null); return; }
+
+            var fwd = new System.Collections.Generic.List<string>();
+            var tree = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(
+                "[assembly: System.Runtime.CompilerServices.TypeForwardedTo(typeof(System.Text.StringBuilder))]");
+            var comp = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create("fwdprobe",
+                new[] { tree },
+                new[] { Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(mscorlib) },
+                new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(
+                    Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+            using (var ms = new System.IO.MemoryStream())
+            {
+                var emit = comp.Emit(ms);
+                if (!emit.Success)
+                {
+                    Check("§22 R4② 转发探针前置：纯转发程序集可发射", false,
+                        emit.Diagnostics.Length.ToString());
+                    return;
+                }
+                var imgRef = Microsoft.CodeAnalysis.MetadataReference.CreateFromImage(ms.ToArray());
+                var scan = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create("fwdscan", null, new[] { imgRef });
+                var asm = scan.GetAssemblyOrModuleSymbol(imgRef) as Microsoft.CodeAnalysis.IAssemblySymbol;
+                if (asm == null) { Check("§22 R4② 转发探针前置：可读转发程序集符号", false, null); return; }
+                var stack = new System.Collections.Generic.Stack<Microsoft.CodeAnalysis.INamespaceSymbol>();
+                stack.Push(asm.GlobalNamespace);
+                while (stack.Count > 0)
+                {
+                    var ns = stack.Pop();
+                    foreach (var child in ns.GetNamespaceMembers())
+                    {
+                        fwd.Add(child.ToDisplayString());
+                        stack.Push(child);
+                    }
+                }
+            }
+            Console.WriteLine("FWDNS forwarded_namespaces=[" + string.Join(",", fwd.ToArray()) + "]");
+            Check("§22 R4② 转发命名空间已归类（ExportedType 不缺 ⇒ facade 无需额外实现）",
+                HasName(fwd.ToArray(), "System.Text"), JoinList(fwd.ToArray()));
+        }
+
+        /// <summary>
+        /// 复审 R1：UI 合并点去重。`CSAutoCompleter` 依赖 UniverseLib/UE（`InputFieldRef`/`AutoCompleteModal`/
+        /// `SignatureHighlighter`）⇒ 不可 link 进测试工程（同 `KeywordLexer` 的处理），故用**源码级断言**：
+        /// ① 三来源都走 `AddSuggestion`（无绕过去重的直接 `suggestions.Add` 残留）
+        /// ② 折叠数有观测点（`LastFoldedDuplicates++`，**不静默折叠**）
+        /// ③ 折叠判据 = 插入文本（`seenCompletions.Add(value)`）
+        /// ④ 调用点兜底（求值器来源异常降级）
+        /// 游戏内面板的视觉确认（`System.Tex` 不再出现两行 `t`）并入任务 12（报告 §22.9）。
+        /// </summary>
+        static void TestCompletionUiDedupSource()
+        {
+            string path = FindFileUpwards("CSAutoCompleter.cs");
+            if (path == null) { Check("§22 R1 CSAutoCompleter.cs 可定位", false, null); return; }
+            string text = System.IO.File.ReadAllText(path);
+            int viaHelper = CountOccurrences(text, "AddSuggestion(");
+            int directAdd = CountOccurrences(text, "suggestions.Add(");
+            Check("§22 R1 三来源都经去重入口 AddSuggestion（1 定义 + 3 调用）",
+                viaHelper == 4, "found=" + viaHelper);
+            Check("§22 R1 无绕过去重的直接 suggestions.Add（仅 AddSuggestion 内部一处）",
+                directAdd == 1, "found=" + directAdd);
+            Check("§22 R1 折叠判据 = 插入文本、折叠数有观测点（不静默折叠）",
+                text.Contains("seenCompletions.Add(value)") && text.Contains("LastFoldedDuplicates++"));
+            Check("§22 R1 调用点兜底：求值器来源异常降级为日志",
+                text.Contains("求值器补全异常"));
+        }
+
+        static int CountOccurrences(string text, string needle)
+        {
+            int n = 0, at = 0;
+            while (true)
+            {
+                at = text.IndexOf(needle, at, StringComparison.Ordinal);
+                if (at < 0) return n;
+                n++;
+                at += needle.Length;
+            }
+        }
+
+        static int CountNamespaces(System.Collections.Generic.IEnumerable<string> namespaces)
+        {
+            int n = 0;
+            foreach (string ns in namespaces) n++;
+            return n;
         }
 
         /// <summary>

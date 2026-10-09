@@ -22,11 +22,44 @@ namespace UnityExplorer.RoslynBridge
 
         const int MaxCandidates = 50;
 
+        /// <summary>
+        /// 补全异常/降级**上报钩子**（宿主 `ConsoleController` 接 `ExplorerCore.LogWarning`）。
+        /// 为什么用委托而不是直接调 `ExplorerCore`：本文件被**离线测试工程 link**，而测试工程不含
+        /// `ExplorerCore`（UE 侧类型）⇒ 直接引用会链接失败。未接钩子时静默（但**仍不抛**）。
+        /// C.5：`Action&lt;string&gt;` 是普通类型（非载荷类型），可作字段。
+        /// </summary>
+        public static Action<string> ReportDiagnostic;
+
+        // "引用读不出元数据"的只报一次闸（bool 字段，C.5 安全；避免每次按键刷屏）。
+        static bool s_reportedRefFailures;
+
+        /// <summary>
+        /// 补全入口：**结构上的"绝不抛"**（复审 R2）——补全跑在**每次按键**路径上，抛出去就打断输入。
+        /// 任何异常都在此降级为"空候选 + 一条上报"，绝不外泄；上报走 <see cref="ReportDiagnostic"/>。
+        /// </summary>
         public static string[] Complete(string input, ReplSession session, out string prefix)
         {
             prefix = "";
-            if (string.IsNullOrEmpty(input) || session == null) return new string[0];
+            try
+            {
+                return CompleteCore(input, session, out prefix);
+            }
+            catch (Exception ex)
+            {
+                prefix = "";
+                Report("自动补全异常已降级为空候选：" + ex.GetType().Name + ": " + ex.Message);
+                return new string[0];
+            }
+        }
 
+        static string[] CompleteCore(string input, ReplSession session, out string prefix)
+        {
+            prefix = "";
+            if (string.IsNullOrEmpty(input)) return new string[0];
+
+            // ⚠️ 这里**不**判 `session == null`：调用方理应保证非空，真为 null 就让它在下面 NRE 到入口的
+            // catch —— 那条降级路径**必须有真实触发点**（R2：结构保证要能被验证，不能只在注释里承诺；
+            // 离线断言用 null 会话踩它）。
             Match m = MemberPattern.Match(input);
             if (!m.Success) return new string[0];
 
@@ -45,6 +78,14 @@ namespace UnityExplorer.RoslynBridge
             // （不是类型符号 ⇒ type==null），而"类型符号没命中候选"（如接收者写成半截名字）时也回落到这里，
             // 交给命名空间前缀匹配去判——两边都不命中才返回空（不误报）。
             return NamespaceCompletions(receiver + "." + prefix, session);
+        }
+
+        /// <summary>上报一条降级信息；钩子本身抛异常也必须吞（它同样跑在按键路径上）。</summary>
+        static void Report(string message)
+        {
+            Action<string> sink = ReportDiagnostic;
+            if (sink == null) return;
+            try { sink(message); } catch { }
         }
 
         /// <summary>沿**基类链**枚举公共成员名，扣掉 prefix 后**升序去重**返回（构造器/访问器/运算符不显示）。</summary>
@@ -108,6 +149,14 @@ namespace UnityExplorer.RoslynBridge
             }
             result.Sort(StringComparer.Ordinal);
             if (result.Count > MaxCandidates) result.RemoveRange(MaxCandidates, result.Count - MaxCandidates);
+
+            // 复审 R4③：打不开的引用**不许静默**——表本身照用（少几条候选好过没补全），但报一条（只报一次）。
+            if (!s_reportedRefFailures && session.NamespaceReferenceFailureCount > 0)
+            {
+                s_reportedRefFailures = true;
+                Report("命名空间补全源有 " + session.NamespaceReferenceFailureCount
+                    + " 条引用读不出元数据（已跳过 ⇒ 候选可能偏少；引用集见 ReplSession.s_referencePaths）");
+            }
             return result.ToArray();
         }
     }

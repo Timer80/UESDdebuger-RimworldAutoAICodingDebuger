@@ -16,6 +16,12 @@ namespace UnityExplorer.RoslynBridge
     /// </summary>
     public sealed class ReplSession : IDisposable
     {
+        // ⚠️ **引用集契约**（任务 9 收尾轮 R3：调用点已**指名**，勿只当注释看）
+        // 本表在构造后**只增不改**；任何"就地增删引用"的调用点 —— **任务 13 的引用自愈**
+        // （`RoslynCompiler.CompileWithHealing` 里 `ReferenceSet.TryAdd(...)` 成功之后）—— **必须**紧接着调用
+        // `InvalidateNamespaceCache()`；否则命名空间补全表会**静默停留在旧快照**（不崩、只是永远缺候选 =
+        // 最难发现的那类缺陷）。**双向登记**：任务 13 简报里也有一条指向本方法
+        // （`task-13-brief.md` 的"⚠️ 与补全缓存的耦合（任务 9 复审登记）"），两处互指防漏。
         readonly List<string> s_referencePaths;
         // C.5-lite（任务 8）：原 `List<MetadataReference> s_imageRefs`（s_ 前缀名不副实——实为实例字段）。
         // RimWorld 启动期 GetFields 字段扫描解析字段签名时**不按 BindingFlags 过滤，实例字段一样炸**
@@ -618,6 +624,20 @@ namespace UnityExplorer.RoslynBridge
             catch { return null; }
         }
 
+        /// <summary>命名空间源里"读不出元数据"的引用条数（0 = 全部可用）。&gt;0 时补全侧会**报一条**日志
+        /// （R4③：不静默跳过——少候选但不说，等于让后人查一个不存在的 bug）。</summary>
+        public int NamespaceReferenceFailureCount { get; private set; }
+
+        /// <summary>真正折进命名空间表的引用条数（= 可读的 `s_referencePaths` 条数 + `imageRefs` 条数）。
+        /// 用途：把"提交件也进了来源"这件事变成**可断言**的事实（命名空间本身在离线装置里不可观测，见报告 §22.9）。</summary>
+        public int NamespaceReferenceCount { get; private set; }
+
+        /// <summary>
+        /// **引用集变更后必须调用**（任务 9 收尾轮 R3）：清空命名空间表缓存，下次 <see cref="AllNamespaces"/> 重建。
+        /// 契约与调用点见 `s_referencePaths` 声明处：**任务 13 的引用自愈在 `ReferenceSet.TryAdd` 成功后必须调用本方法**。
+        /// </summary>
+        public void InvalidateNamespaceCache() => s_namespaces = null;
+
         /// <summary>
         /// 会话引用里的**命名空间全集**（惰性构建 + 缓存）。**只读 Roslyn 元数据**——`MetadataReference`
         /// 分派只 mmap/读元数据、**不加载程序集**（把本体 106 个 dll 真载入进程的代价见 §3.1 老教训）。
@@ -626,23 +646,37 @@ namespace UnityExplorer.RoslynBridge
         {
             if (s_namespaces != null) return s_namespaces;
             var set = new HashSet<string>(StringComparer.Ordinal);
+            int failures = 0;
+            int folded = 0;
             try
             {
                 var refs = new List<MetadataReference>();
+                // R4④（复审必修）：**会话自己的提交件也算来源**——用户定义的类型/polyfill 的命名空间都在
+                // 提交件里，漏掉它们 = "我用过的命名空间却补不出来"。载荷类型擦除见 imageRefs 声明处。
+                foreach (object r in imageRefs)
+                {
+                    var mr = r as MetadataReference;
+                    if (mr == null) continue;
+                    refs.Add(mr);
+                    folded++;
+                }
                 foreach (string p in s_referencePaths)
                 {
-                    try { refs.Add(MetadataReference.CreateFromFile(p)); } catch { }
+                    try { refs.Add(MetadataReference.CreateFromFile(p)); folded++; }
+                    catch { failures++; }   // R4③：不静默——计入失败数，补全侧会报一条
                 }
                 CSharpCompilation comp = CSharpCompilation.Create("NamespaceProbe", null, refs);
                 foreach (MetadataReference r in refs)
                 {
                     IAssemblySymbol asm = null;
                     try { asm = comp.GetAssemblyOrModuleSymbol(r) as IAssemblySymbol; } catch { }
-                    if (asm == null) continue;
+                    if (asm == null) { failures++; continue; }
                     CollectNamespaces(asm.GlobalNamespace, set);
                 }
             }
-            catch { /* 元数据不可读 ⇒ 表为空：命名空间补全退化为"无候选"，成员补全不受影响 */ }
+            catch { failures++; /* 极端：整体失败 ⇒ 表退化为已收集部分，且失败数在"不静默"通道上 */ }
+            NamespaceReferenceFailureCount = failures;
+            NamespaceReferenceCount = folded;
             s_namespaces = set;
             return s_namespaces;
         }

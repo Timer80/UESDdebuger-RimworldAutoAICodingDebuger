@@ -46,6 +46,11 @@ namespace UnityExplorer.RoslynBridge
         /// 不依赖"名字是否进了集合"——那正是 R2 的假绿来源）；
         /// <paramref name="unavailableDefaultUsings"/> = 引用集缺其来源程序集的默认 using 根命名空间。
         /// </summary>
+        /// <summary>
+        /// ⚠️ **仅供旧测试形态 / 勿在生产调用**（S-次要项，§20）：本重载恒传 `selfAssemblyPath=null`
+        /// ⇒ 必然产出"宿主自引用缺失"告警、并把 `UnityExplorer` 计入"不可用默认 using"。
+        /// 生产路径一律走下面的 6 参重载（由 `ReferenceScanner.Collect` 传真实宿主程序集）。
+        /// </summary>
         public static ReferenceSet CollectFrom(string managedDir, string ueDir, string blacklist,
             out string report, out List<string> unavailableDefaultUsings,
             out List<string> missingUeSideAssemblies)

@@ -7,11 +7,14 @@ namespace RoslynBridgeTests
     internal static class Program
     {
         static int failures;
+        static int passLines;
+        static int childPassLines;
+        static int childFailLines;
         static void Check(string name, bool cond, string detail = null)
         {
             Console.WriteLine((cond ? "PASS " : "FAIL ") + name
                 + (cond || string.IsNullOrEmpty(detail) ? "" : "  → " + detail));
-            if (!cond) failures++;
+            if (cond) passLines++; else failures++;
         }
 
         static int Main(string[] args)
@@ -54,6 +57,12 @@ namespace RoslynBridgeTests
             TestHostBaseSignatureAlignment();
             TestHostSelfReferenceNeeded();
             TestHostHelperNameShadowing();
+            // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
+            // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
+            Console.WriteLine("COUNTS parent_pass=" + passLines + " parent_fail=" + failures
+                + " child_pass=" + childPassLines + " child_fail=" + childFailLines
+                + " total_pass=" + (passLines + childPassLines)
+                + " total_fail=" + (failures + childFailLines));
             Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
             return failures == 0 ? 0 : 1;
         }
@@ -270,7 +279,7 @@ namespace RoslynBridgeTests
                 Console.WriteLine("USINGMAP " + ns + " -> " + DefaultUsings.OwnerOf(ns));
         }
 
-        /// <summary>B1(b) 用**真实 dll 元数据**离线验证"默认 using 全项可用"（12/12）。</summary>
+        /// <summary>B1(b) 用**真实 dll 元数据**离线验证"默认 using 全项可用"（13/13 = `DefaultUsings.BuiltIn` 实际项数）。</summary>
         static void TestDefaultUsingsResolvable()
         {
             string managed = FindUpwards("RimWorldWin64_Data\\Managed");
@@ -782,12 +791,17 @@ namespace RoslynBridgeTests
                     + (inHost ? "（" + a + "）" : "（宿主缺失）"),
                     inHost && inMcs && a == b, "host=" + a + " mcs=" + b);
             }
-            // `Inspect` 有两个重载：上面按名取到的是最后一个，这里单独断言两个重载都在且一致
-            Check("§19 对齐：Inspect 有 (object) 与 (Type) 两个重载且一致",
-                hostMembers.ContainsKey("Inspect2") && mcsMembers.ContainsKey("Inspect2")
+            // `Inspect` 有两个重载（(object) 与 (Type)）：`MemberSignatures` 按顺序登记为 Inspect / Inspect2，
+            // 故 S-次要项修复：**两个重载都参与比较**（此前只比了 Inspect2）。
+            Check("§19 对齐：Inspect(object) 与 Inspect(Type) 两个重载都在且各自一致",
+                hostMembers.ContainsKey("Inspect") && mcsMembers.ContainsKey("Inspect")
+                && hostMembers["Inspect"] == mcsMembers["Inspect"]
+                && hostMembers.ContainsKey("Inspect2") && mcsMembers.ContainsKey("Inspect2")
                 && hostMembers["Inspect2"] == mcsMembers["Inspect2"],
-                "host=" + (hostMembers.ContainsKey("Inspect2") ? hostMembers["Inspect2"] : "<缺>")
-                + " mcs=" + (mcsMembers.ContainsKey("Inspect2") ? mcsMembers["Inspect2"] : "<缺>"));
+                "host=" + (hostMembers.ContainsKey("Inspect") ? hostMembers["Inspect"] : "<缺>")
+                + " / " + (hostMembers.ContainsKey("Inspect2") ? hostMembers["Inspect2"] : "<缺>")
+                + "   mcs=" + (mcsMembers.ContainsKey("Inspect") ? mcsMembers["Inspect"] : "<缺>")
+                + " / " + (mcsMembers.ContainsKey("Inspect2") ? mcsMembers["Inspect2"] : "<缺>"));
 
             string hostText = System.IO.File.ReadAllText(host);
             // 断"基类列表为空"（语义），而非文本里是否出现 InteractiveBase——注释里说明"不继承 …"是正常的
@@ -993,10 +1007,12 @@ namespace RoslynBridgeTests
                 refs, includePolyfills: false);
             Check("G1：无基类时 Log 报 CS1955（= 解析到类型 `Verse.Log`，G1 归因实证）",
                 !rlog.Success && rlog.Diagnostics.Contains("CS1955"), rlog.Diagnostics);
+            // S-次要项修复：断言名写了 CS0103，判据也必须校该错误码（此前只判 !Success，名与实不符）
+            var rGv = RoslynCompiler.Compile("ShadowGetVarsNoBase",
+                usings + "public class D { public static void Run() { GetVars(); } }",
+                refs, includePolyfills: false);
             Check("G1：无基类时 GetVars 报 CS0103（UE 特有名字，using 链无同名物）",
-                !(RoslynCompiler.Compile("ShadowGetVarsNoBase",
-                    usings + "public class D { public static void Run() { GetVars(); } }",
-                    refs, includePolyfills: false)).Success);
+                !rGv.Success && rGv.Diagnostics.Contains("CS0103"), rGv.Diagnostics);
 
             // 对等后果：助手 `Log` 成员遮蔽 `Verse.Log` **类型** ⇒ 要用本体日志须全限定（与 mcs 路径一致）
             var qualified = RoslynCompiler.Compile("ShadowQualified",
@@ -1198,6 +1214,8 @@ namespace RoslynBridgeTests
             Check("子进程：载荷名 + 请求方不可判定(null) → 应答（主路径保底）",
                 noRequester is System.Reflection.Assembly);
 
+            // S3（§20）：子进程出口行也带机读计数（父进程 spawn 时捕获并汇总，口径一致）
+            Console.WriteLine("COUNTS child_pass=" + passLines + " child_fail=" + failures);
             Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
             return failures == 0 ? 0 : 1;
         }
@@ -1258,6 +1276,10 @@ namespace RoslynBridgeTests
             return args;
         }
 
+        /// <summary>
+        /// S3（§20）：子进程输出**捕获后再原样打印**，于是父进程能给出**精确**的子进程 PASS/FAIL 行数，
+        /// 且父进程自身的计数不再被"闯入的"子进程输出干扰（此前是 stdout 直接继承、只能事后猜）。
+        /// </summary>
         static void TestSuccessPathViaChildProcess()
         {
             string exe = System.Reflection.Assembly.GetExecutingAssembly().Location;
@@ -1266,17 +1288,40 @@ namespace RoslynBridgeTests
                 var psi = new System.Diagnostics.ProcessStartInfo(exe, "--success-path")
                 {
                     UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
                 };
                 using (var p = System.Diagnostics.Process.Start(psi))
                 {
+                    string output = p.StandardOutput.ReadToEnd();
+                    string err = p.StandardError.ReadToEnd();
                     p.WaitForExit();
+
+                    Console.WriteLine("--- 子进程输出开始 ---");
+                    Console.Write(output);
+                    if (!string.IsNullOrEmpty(err)) Console.WriteLine("[stderr] " + err);
+                    Console.WriteLine("--- 子进程输出结束 ---");
+
+                    childPassLines = CountLines(output, "PASS ");
+                    childFailLines = CountLines(output, "FAIL ");
                     Check("成功路径（子进程）退出码=0", p.ExitCode == 0, "exit=" + p.ExitCode);
+                    Check("成功路径（子进程）自报计数行为 0 失败（child_fail=" + childFailLines + "）",
+                        childFailLines == 0);
                 }
             }
             catch (Exception e)
             {
                 Check("成功路径（子进程）能启动", false, e.GetType().Name + ": " + e.Message);
             }
+        }
+
+        static int CountLines(string text, string prefix)
+        {
+            int n = 0;
+            if (string.IsNullOrEmpty(text)) return 0;
+            foreach (string line in text.Split('\n'))
+                if (line.StartsWith(prefix, StringComparison.Ordinal)) n++;
+            return n;
         }
 
         static void TestLoadOrder()
@@ -1399,7 +1444,95 @@ namespace RoslynBridgeTests
                 "空型=" + nullTypes + " loaderExc=" + loaderExceptions + " fieldFail=" + fieldEnumFailures);
             Check("C.5 护栏：RoslynBridge 全类型零载荷类型字段（扫描 " + scanned + " 型）",
                 bad.Length == 0, bad.ToString().TrimEnd());
+
+            // ── S1（§20）：扫描面缺口修复 ──
+            // 上面扫的是**测试程序集**（链接进来的 RoslynBridge 源码）；`ReplHostBase.cs` 依赖 UE/Unity 类型，
+            // **不能**link 进测试工程（那会把 ExplorerCore/InspectorManager/ClipboardPanel 等拖进来，
+            // 且若改为引用 UE dll 又会与链接副本撞 CS0433）。故改为**用元数据读真产物**：
+            // Roslyn 打开已构建的 UE 程序集 → 遍历全部类型的字段签名 → 复用同一判据。
+            // 这比 link 更强：扫的就是**发布的那个 dll**（含 ReplHostBase 与所有产物类型）。
+            TestC5GuardOnBuiltAssembly();
         }
+
+        /// <summary>S1：对**已构建的 UE 程序集**做 C.5 判据扫描（元数据，不装载、不执行）。</summary>
+        static void TestC5GuardOnBuiltAssembly()
+        {
+            string ue = FindBuiltUeAssembly();
+            if (ue == null)
+            {
+                Check("C.5 护栏（产物面）：能找到已构建 UE 程序集", false,
+                    @"未找到 Release\UnityExplorer.Standalone.Mono\UnityExplorer.STANDALONE.Mono.dll");
+                return;
+            }
+
+            string[] payloadAsms = PayloadAssemblyNames();
+            var comp = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create("metaScan",
+                null, new[] { Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(ue) });
+            var asm = comp.GetAssemblyOrModuleSymbol(
+                comp.References.First()) as Microsoft.CodeAnalysis.IAssemblySymbol;
+            if (asm == null)
+            {
+                Check("C.5 护栏（产物面）：能读到程序集符号", false, ue);
+                return;
+            }
+
+            var bad = new System.Text.StringBuilder();
+            int types = 0, fields = 0;
+            var stack = new System.Collections.Generic.Stack<Microsoft.CodeAnalysis.INamespaceSymbol>();
+            stack.Push(asm.GlobalNamespace);
+            while (stack.Count > 0)
+            {
+                var ns = stack.Pop();
+                foreach (var nested in ns.GetNamespaceMembers()) stack.Push(nested);
+                foreach (var type in ns.GetTypeMembers()) ScanSymbolType(type, payloadAsms, ref types, ref fields, bad);
+            }
+            Check("C.5 护栏（产物面）：UE 程序集全类型零载荷类型字段（扫 " + types + " 型 / " + fields + " 字段）",
+                bad.Length == 0, bad.ToString().TrimEnd());
+            Check("C.5 护栏（产物面）：ReplHostBase 在扫描面内（S1 缺口已闭合）",
+                types > 0 && System.IO.File.ReadAllText(FindFileUpwards("ReplHostBase.cs") ?? ue)
+                    .Contains("class ReplHostBase"), "扫描 " + types + " 型");
+        }
+
+        static void ScanSymbolType(Microsoft.CodeAnalysis.INamedTypeSymbol type, string[] payloadAsms,
+            ref int types, ref int fields, System.Text.StringBuilder bad)
+        {
+            types++;
+            foreach (var member in type.GetMembers())
+            {
+                var f = member as Microsoft.CodeAnalysis.IFieldSymbol;
+                if (f == null) continue;
+                fields++;
+                if (SymbolTouchesPayload(f.Type, payloadAsms))
+                    bad.AppendLine(type.ToDisplayString() + " . " + f.Name + " -> " + f.Type.ToDisplayString());
+            }
+            foreach (var nested in type.GetTypeMembers())
+                ScanSymbolType(nested, payloadAsms, ref types, ref fields, bad);
+        }
+
+        /// <summary>泛型实参递归（与反射版判据同语义）。</summary>
+        static bool SymbolTouchesPayload(Microsoft.CodeAnalysis.ITypeSymbol t, string[] payloadAsms)
+        {
+            if (t == null) return false;
+            var arr = t as Microsoft.CodeAnalysis.IArrayTypeSymbol;
+            if (arr != null) return SymbolTouchesPayload(arr.ElementType, payloadAsms);
+            string asmName = t.ContainingAssembly == null ? null : t.ContainingAssembly.Name;
+            if (asmName != null)
+                foreach (string p in payloadAsms) if (asmName == p) return true;
+            var named = t as Microsoft.CodeAnalysis.INamedTypeSymbol;
+            if (named != null)
+                foreach (var arg in named.TypeArguments)
+                    if (SymbolTouchesPayload(arg, payloadAsms)) return true;
+            return false;
+        }
+
+        static string[] PayloadAssemblyNames()
+            => new[]
+            {
+                "Microsoft.CodeAnalysis", "Microsoft.CodeAnalysis.CSharp",
+                "System.Collections.Immutable", "System.Reflection.Metadata",
+                "System.Memory", "System.Threading.Tasks.Extensions",
+                "System.Runtime.CompilerServices.Unsafe", "System.Numerics.Vectors",
+            };
 
         // 泛型实参递归：FieldType.Assembly 只给泛型定义所在程序集（List<MetadataReference>→mscorlib），
         // 必须下钻 GetGenericArguments 才能抓到载荷实参（与 Mono 字段签名解析行为对齐）。

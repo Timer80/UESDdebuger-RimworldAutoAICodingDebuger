@@ -73,7 +73,8 @@ namespace UnityExplorer.RoslynBridge
             // Submission_N 按名解析基类 Submission_{N-1} 时默认探测必失败（实测
             // FileNotFoundException → ReflectionTypeLoadException → GetType 返回 null）。
             // 自挂 AssemblyResolve：只应答"请求方是本会话提交程序集"且本会话按名持有的程序集。
-            // §19 追加：把**宿主程序集**（自引用）也登记进来——提交类现在还要解析基类 `ReplHostBase`，
+            // §19 追加：把**宿主程序集**（自引用）也登记进来（S-次要项留档：本应答器只按 FullName 命中
+            // **自身**或本会话提交件，且仅当请求方就是本会话提交程序集时才应答 ⇒ 对第三方零影响）——提交类现在还要解析基类 `ReplHostBase`，
             // 而 Unity Mono 的 typeref 绑定一向脆弱（C.5 全轮教训）：宿主虽已在默认上下文，
             // 仍按名兜底应答一次（Identity/FullName 匹配，只有本会话提交程序集发起的请求才走这里）。
             try
@@ -497,7 +498,7 @@ namespace UnityExplorer.RoslynBridge
         /// 用**一次**校验编译判定可用性；不可用的当场剔除、绝不留在表里。
         /// 语义与动机：
         ///  · 旧路径（ConsoleController.AddUsing → Submit("using X;")）每项一次完整提交编译 +
-        ///    Assembly.Load + 一个新 Submission 程序集；`ResetConsole` 的 12 项默认 using 就是
+        ///    Assembly.Load + 一个新 Submission 程序集；`ResetConsole` 的默认 using（项数 = `DefaultUsings.BuiltIn.Length`）就是
         ///    12 次编译（B4 的 `reset_csharp_console` 5000ms 超时的可疑主因）。
         ///  · 更要紧的是**正确性**：只要表里留了一条编译不过的 using，此后**每一次提交**都会带上它
         ///    而全部失败（B1 实测：连 `new[]{1,2,3}.Sum()` 都报 CS0246 'UniverseLib'）。

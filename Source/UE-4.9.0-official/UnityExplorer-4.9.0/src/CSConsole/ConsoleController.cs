@@ -159,7 +159,7 @@ namespace UnityExplorer.CSConsole
             // 配置判定只在一处（EvaluatorSelector）；用局部变量接收，避免恒假 const 触发 CS0162 不可达告警。
             bool roslynCompiled = EvaluatorSelector.RoslynCompiledIn;
 
-            // 本会话的默认 using 候选：配置项（默认值 = DefaultUsings.BuiltIn 12 项）+ CPP 追加项
+            // 本会话的默认 using 候选：配置项（默认值 = string.Join(";", DefaultUsings.BuiltIn)，**项数以该表为准，勿硬编码数字**）+ CPP 追加项
             List<string> defaultUsings = DefaultUsings.Parse(ConfigManager.CSharp_Console_Default_Usings.Value);
 #if CPP
             foreach (string use in DefaultUsing)

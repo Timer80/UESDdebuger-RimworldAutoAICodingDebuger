@@ -197,6 +197,33 @@ namespace UnityExplorer.RoslynBridge
             var notes = new StringBuilder();   // B3：可读提示（不污染 Diagnostics；成功时作为结果回显）
             var unrecognized = new StringBuilder();   // 追加 F.2：未识别成员形态（响亮拒绝，不静默丢弃）
             var statements = new List<StatementSyntax>();
+            // §23：本提交的引用集（历次提交件 + 外部引用）**只组装一次**，供 ① `var` 推断探针（可能多次）
+            // 与 ② 正式提交编译**共用** —— 否则每个 `var` 声明符都重建一遍 `CreateFromFile`（离线实测每次
+            // ~35ms，见报告 §23.3）。载荷类型只作**局部变量**（C.5）；**懒建**：被响亮拒绝的提交（未识别成员）
+            // 在到达编译点前就返回，一分钱都不付。
+            List<MetadataReference> metadataRefs = null;
+
+            // §23（探针可见性 = 正式提交可见性）：**先**把本次提交里的成员声明**全部**收进 `classes`，
+            // 再处理语句。理由：正式提交里它们与语句同属生成类的类体，而**成员查找与声明顺序无关** ——
+            // `var v = new Vec();` 后面紧跟 `class Vec { … }` 在正式编译里能解析；而 `var` 推断发生在下面的
+            // 语句循环内（那时"后置成员"还没进 `classes`）⇒ 探针看不见它 ⇒ 静默退回 `object`。
+            // ⚠️ 这是新机制的**倒退点**（旧实现复用整棵原 tree，顶层类型就在同一棵树里，反而没有这个盲区），
+            // 靠预扫消除。两类**注定被响亮拒绝**的形态（`namespace` / 解析残渣 `IncompleteMember`）跳过：
+            // 塞进探针只会污染诊断，且提交本身马上就会失败返回。
+            foreach (MemberDeclarationSyntax pre in root.Members)
+            {
+                var preGlobal = pre as GlobalStatementSyntax;
+                if (preGlobal != null)
+                {
+                    // 全局语句里的**局部函数**同样是生成类的成员（见下面对应分支），故同样与顺序无关
+                    var preFn = preGlobal.Statement as LocalFunctionStatementSyntax;
+                    if (preFn != null) classes.AppendLine(EnsureStaticPublic(preFn).ToFullString());
+                    continue;
+                }
+                if (pre is BaseNamespaceDeclarationSyntax || pre is IncompleteMemberSyntax) continue;
+                classes.AppendLine(EnsureAccessible(pre).ToFullString());
+            }
+
             foreach (MemberDeclarationSyntax m in root.Members)
             {
                 if (m is GlobalStatementSyntax g)
@@ -205,7 +232,7 @@ namespace UnityExplorer.RoslynBridge
                     // （原"缺分号 → SyntaxFactory.ParseStatement(…+';')"补丁已删：整段输入已在解析前补过
                     //   末尾分号，逐语句重解析只会拿回第一条语句、治不了被并进去的后续语句。）
 
-                    if (stmt is LocalFunctionStatementSyntax lfs)
+                    if (stmt is LocalFunctionStatementSyntax)
                     {
                         // 追加 F 清扫（同类漏分支）：顶层 `int Twice(int a) => a * 2;` 在 Roslyn 眼里是
                         // **局部函数**（GlobalStatement 里的 LocalFunctionStatement）——原实现把它丢进
@@ -215,12 +242,9 @@ namespace UnityExplorer.RoslynBridge
                         // 会自然报 CS0103/CS8421——响亮且可解释，好过静默失效。
                         // 另需补 `public`：这些成员最终是**生成类的嵌套成员**，"无修饰符 = private"
                         // ⇒ 后续提交（派生类 Submission_N+1）按简单名找不到它（实测 CS0103 'Twice'）。
-                        var fn = lfs;
-                        if (!fn.Modifiers.Any(SyntaxKind.StaticKeyword))
-                            fn = fn.AddModifiers(StaticToken());
-                        if (!HasAccessibility(fn.Modifiers))
-                            fn = fn.AddModifiers(PublicToken());
-                        classes.AppendLine(fn.ToFullString());
+                        // §23：文本已由**预扫**统一收进 `classes`（`EnsureStaticPublic`，与 `var` 推断共用
+                        // 同一份、且与声明顺序无关）⇒ 本分支只需保留"局部函数必须是生成类成员、**不得**落进
+                        // Run()"这一分支语义（否则会掉回下面的 else：那就是 F.1 的老缺陷）。
                         // R5c（复审次要项）：**不**把方法名登记进 s_classes —— 那是"类清单"，
                         // 混进方法名会污染 GetClasses() 展示；只登记类型/委托名。
                     }
@@ -233,13 +257,18 @@ namespace UnityExplorer.RoslynBridge
                             string fieldType = typeText;
                             if (isVar)
                             {
-                                ITypeSymbol inferred = GetInferredType(tree, v);
+                                // §23：推断探针与正式提交**同可见性** —— 同 usings（含本次待加入）+ 同引用集
+                                // （外部引用 + 历次提交件 + polyfill）+ **同基类**（链根/上一提交）+ 本次提交的
+                                // 成员源码（已生成的字段 + 全部类型/方法声明，见下面的预扫）。
+                                if (metadataRefs == null) metadataRefs = BuildReferences();
+                                ITypeSymbol inferred = GetInferredType(v, pendingUsings,
+                                    fields.ToString() + classes.ToString(), metadataRefs);
                                 fieldType = inferred?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat
                                     .WithGlobalNamespaceStyle(SymbolDisplayGlobalNamespaceStyle.Omitted));
-                                // 引用本次提交之前变量的初始化式（如 var y = x + 37;）在一次性推断编译里
-                                // 必然解析失败（x 对该孤立编译不可见）→ 错误类型显示为空串或 TypeKind.Error，
-                                // 直接生成字段会得到 `public static  y;` → CS1519。统一回落 object，
-                                // 运行后由 RefreshVarTypes 按反射修正显示类型。
+                                // 仍可能出现"真解析不了"的初始化式（void 调用、`var x;`、语法残渣…）⇒ 回落 object
+                                // （与旧行为一致），随后正式提交会用真实诊断把它暴露出来（CS0815/CS0029 等）。
+                                // ⚠️ 正常写法（`new StringBuilder()` / 引用会话变量 / 用户自定义类型）现在都能解析，
+                                // 不再走进这支——那正是 §23 修的静默退化。
                                 if (inferred == null || inferred.TypeKind == TypeKind.Error
                                     || string.IsNullOrEmpty(fieldType))
                                     fieldType = "object";
@@ -293,7 +322,7 @@ namespace UnityExplorer.RoslynBridge
                     // （原实现只列 Class/Struct/Interface/Enum 四种具体语法 ⇒ record/record struct/
                     //   delegate/方法声明统统落进"无分支"被**静默丢弃**：实测 `public record Point(int X, int Y);`
                     //   提交"成功"但之后 `new Point(3, 4)` 报 CS0246 'Point'，用户完全看不到原因。）
-                    classes.AppendLine(EnsureAccessible(m).ToFullString());
+                    // §23：源码文本已由**预扫**收进 `classes`（顺序无关），此处只登记名字供 GetClasses() 展示。
                     var bt = m as BaseTypeDeclarationSyntax;
                     if (bt != null && !s_classes.Contains(bt.Identifier.Text)) s_classes.Add(bt.Identifier.Text);
                     var del2 = m as DelegateDeclarationSyntax;
@@ -340,12 +369,8 @@ namespace UnityExplorer.RoslynBridge
                 statements.RemoveAt(statements.Count - 1);
             }
 
-            var metadataRefs = new List<MetadataReference>(imageRefs.Count);
-            foreach (object r in imageRefs) metadataRefs.Add((MetadataReference)r);
-            foreach (string p in s_referencePaths)
-            {
-                try { metadataRefs.Add(MetadataReference.CreateFromFile(p)); } catch { }
-            }
+            // §23：与 `var` 推断**共用同一份**引用集（懒建：本次提交没有 `var` 时在这里才第一次组装）
+            if (metadataRefs == null) metadataRefs = BuildReferences();
 
             string asmName = "Submission_" + s_sessionTag + "_" + n + "_asm";
             int assignmentLine;
@@ -410,37 +435,32 @@ namespace UnityExplorer.RoslynBridge
             return result;
         }
 
-        ITypeSymbol GetInferredType(SyntaxTree tree, VariableDeclaratorSyntax v)
+        /// <summary>
+        /// `var` 的字段类型推断（**§23 修复轮，对端游戏内实测挖出的高影响缺陷**）：与正式提交用
+        /// **同一套可见性** —— `using System;` + 会话 usings + **本次提交待加入的 usings** +
+        /// 引用集（外部引用 + **历次提交件 `Submission_N`**）+ polyfill + **与本次提交相同的基类** +
+        /// 本次提交的成员源码（已生成字段 + 全部类型/方法声明）。
+        /// 旧实现只用「用户 tree + `s_referencePaths`」⇒ 三处硬缺口：
+        ///  ① **缺 usings**：`var sb = new StringBuilder();` 需要 `using System.Text;`，而 `System.Text`
+        ///    就在**默认 using** 里 ⇒ 正式提交编译得过、探针却解析不到 ⇒ 回落 `object`；
+        ///  ② **缺历次提交件**：初始化式引用会话变量/类型（`var y = sb2.ToString();` / `new Vec(2,5)`）时，
+        ///    探针看不到 `Submission_N` ⇒ 同样回落 `object`；
+        ///  ③ **缺基类**：第 1 个提交的助手成员（`GetVars()` 等）只在宿主基类上 ⇒ `var g = GetVars();` 回落 `object`。
+        /// 后果是**静默**的：字段类型变成 `object`，`GetVars()` 显示 `(Object)`、`sb.Append("x")` 报
+        /// CS1929/CS1061（'object' 没有 `Append`）——看不出根因（详见报告 §23.4 可见症状链）。
+        /// 机制选择：`var x = &lt;init&gt;;` 的推断类型 **恒等于初始化式的自然类型**，故直接复用表达式探针
+        /// （语义模型：**不 Emit、不 Load、不执行**，零副作用），不另建第二套编译。**不**复用 `Submit` 里的
+        /// compilation：推断发生在生成源码**之前**（字段类型正是生成源码的输入）⇒ 复用只能"先用 object 编译
+        /// 一遍、再重生成重编译"，代价是**两次全量提交编译**（离线实测每次 ~130ms，游戏内更慢），而探针
+        /// 单次只 ~1ms 量级（实测见报告 §23.3）；且探针是补全路径已在用的同一个（`ResolveExpressionSymbol`），
+        /// 不引入第二套机制。
+        /// </summary>
+        ITypeSymbol GetInferredType(VariableDeclaratorSyntax v, IEnumerable<string> pendingUsings,
+            string pendingMembers, IEnumerable<MetadataReference> suppliedRefs)
         {
-            // 只为 var 推断字段类型：用一次性编译的语义模型；失败则回落 object
-            try
-            {
-                var comp = CSharpCompilation.Create("infer",
-                    new[] { tree },
-                    RoslynRefsFromPaths(s_referencePaths),
-                    new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
-                SemanticModel model = comp.GetSemanticModel(tree);
-                return model.GetTypeInfo(v.Initializer.Value).Type;
-            }
-            catch { return null; }
-        }
-
-        // C.5-lite：原 `Where(File.Exists).Select(p => MetadataReference.CreateFromFile(p))` 同款
-        // 委托缓存雷（Func<string,MetadataReference> 泛型实参=载荷类型，字段签名解析炸）→ 显式循环；
-        // File.Exists 过滤与 CreateFromFile 的 try-catch 跳坏 dll 语义保留（外层 GetInferredType
-        // 亦有 catch，双保险）。
-        // ⚠️ 脆弱点：载荷类型仅以方法组/表达式形式出现，禁止改为捕获式（否则闭包字段复活、
-        // 启动扫描再炸）；此处若改回 `Where(...).Select(p => ...)`，编译器生成的 <>c 委托缓存字段
-        // 签名含载荷类型，与 s_imageRefs 同款炸法。
-        static List<MetadataReference> RoslynRefsFromPaths(IEnumerable<string> paths)
-        {
-            var refs = new List<MetadataReference>();
-            foreach (string p in paths)
-            {
-                if (!File.Exists(p)) continue;
-                try { refs.Add(MetadataReference.CreateFromFile(p)); } catch { }
-            }
-            return refs;
+            if (v == null || v.Initializer == null) return null;   // `var x;` 非法（正式提交自会报 CS0815）
+            return ResolveExpressionSymbol(v.Initializer.Value.ToString(), pendingUsings, pendingMembers,
+                suppliedRefs);
         }
 
         void RefreshVarTypes(Assembly asm, string className)
@@ -563,21 +583,39 @@ namespace UnityExplorer.RoslynBridge
         ///    "用户敲字"不该触发游戏逻辑；
         ///  ② **不涨内存**：每次按键 Assembly.Load 一个探测程序集，而字节加载**不可卸载**；
         ///  ③ **快一个量级**：无 IL 生成、无 PE、无加载、无 JIT（每次按键都跑）。
+        /// <paramref name="extraUsings"/>：本次提交**待加入**的 using（正式提交成功后才进 `s_usings`）；
+        /// <paramref name="pendingMembers"/>：本次提交的成员源码（`var` 推断用：字段按语句顺序**已生成**的部分
+        /// + **全部**类型/方法声明 —— 成员查找与声明顺序无关，故后置的 `class Vec` 也必须在）；已有成功提交时
+        /// 会话变量/用户类型另经由**基类链**（`Submission_{s_submission}`）与**历次提交件引用**可见。
         /// </summary>
-        internal ITypeSymbol ResolveExpressionSymbol(string expression)
+        internal ITypeSymbol ResolveExpressionSymbol(string expression, IEnumerable<string> extraUsings = null,
+            string pendingMembers = null, IEnumerable<MetadataReference> suppliedRefs = null)
         {
             if (string.IsNullOrEmpty(expression)) return null;
             try
             {
-                string probeName = "__CompletionProbe_" + Guid.NewGuid().ToString("N");
+                // §23：探针类**故意取名为"正在生成的那个提交类名"**（`Submission_{s_submission + 1}`）。
+                // 理由：本次提交里声明的**嵌套类型**（如 `class Vec`）在语义模型里的显示名会带上**容器类名**
+                // （`<容器>.Vec`），而调用方要把这个显示名写回提交源码当字段类型。取名 `__CompletionProbe_xxx`
+                // 时显示名是 `__CompletionProbe_xxx.Vec` —— 提交源码里根本没有这个名字（实测 CS0246，见报告 §23.2）；
+                // 取名 `Submission_N` 时显示名与正式提交**逐字一致**（`Submission_N.Vec`，写在提交类体里合法），
+                // 无需对显示名做任何字符串前缀剥离。探针是独立编译，真正的 `Submission_N` 此刻尚未存在
+                // （`imageRefs` 只到 N-1）⇒ 无重名冲突。
+                string probeName = "Submission_" + (s_submission + 1);
                 var src = new StringBuilder();
-                src.AppendLine("using System;");
-                if (s_usings.Count > 0)
-                    src.AppendLine(string.Join(Environment.NewLine, s_usings.ToArray()));
-                // 无成功提交时（s_submission==0）没有可继承的提交类：探测量为"孤立表达式"，如实失败即可。
+                AppendProbeUsings(src, extraUsings);
+                // §23：探针类继承**与正在生成的那个提交完全相同的基类**（`BaseTypeNameFor(s_submission + 1, …)`
+                // 就是该提交的链根）：第 1 个提交 ⇒ 宿主助手基类（`ReplHostBase`，由 §19 (i) 宿主自引用保证
+                // 它在引用集里）⇒ 助手成员（`GetVars()`/`GetUsing()`/`GetClasses()`/`CurrentTarget`…）按简单名
+                // 可见；其后 ⇒ `Submission_{s_submission}`。旧实现对第 1 个提交**没有基类** ⇒ 助手成员解析不到 ⇒
+                // `var g = GetVars();` 静默退回 object（§23 缺陷类的第三个盲区）。基类名传 null（离线"无宿主"
+                // 形态，§19）时照旧无基类；基类解析不出时也只是该表达式退回 object——与旧行为同档，
+                // 不会更糟（提交侧本就会 CS0246 ReplHostBase，那不是本方法能修的）。
+                string probeBase = BaseTypeNameFor(s_submission + 1, s_hostBaseTypeName);
                 src.AppendLine("public class " + probeName
-                    + (s_submission > 0 ? " : Submission_" + s_submission : ""));
+                    + (probeBase != null ? " : " + probeBase : ""));
                 src.AppendLine("{");
+                if (!string.IsNullOrEmpty(pendingMembers)) src.AppendLine(pendingMembers);
                 src.AppendLine("    public static object Get() { return " + expression + "; }");
                 src.AppendLine("}");
 
@@ -589,12 +627,10 @@ namespace UnityExplorer.RoslynBridge
                     // 与提交侧同款：用户类型可能引用 polyfill 提供的类型（isExternalInit/required/params 集合）
                     CSharpSyntaxTree.ParseText(PolyfillSource.Code, new CSharpParseOptions(LanguageVersion.Latest)),
                 };
-                var refs = new List<MetadataReference>(imageRefs.Count + s_referencePaths.Count);
-                foreach (object r in imageRefs) refs.Add((MetadataReference)r);   // 历史提交件：类型身份在这里
-                foreach (string p in s_referencePaths)
-                {
-                    try { refs.Add(MetadataReference.CreateFromFile(p)); } catch { }
-                }
+                // suppliedRefs：调用方（`Submit`）传**同一次提交内共享**的引用集，避免每个 `var` 都重建一遍
+                //（`CreateFromFile` 的元数据读取是这条路径的主要成本）；补全路径不传 ⇒ 各自组装。
+                IEnumerable<MetadataReference> refs = suppliedRefs != null
+                    ? suppliedRefs : (IEnumerable<MetadataReference>)BuildReferences();
 
                 CSharpCompilation compilation = CSharpCompilation.Create("CompletionProbe",
                     trees, refs, new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
@@ -622,6 +658,37 @@ namespace UnityExplorer.RoslynBridge
                 return null;
             }
             catch { return null; }
+        }
+
+        /// <summary>补全/`var` 推断探针共用的 **usings 头**：`using System;` + 会话已接受 + **本次提交待加入**。</summary>
+        void AppendProbeUsings(StringBuilder src, IEnumerable<string> extraUsings)
+        {
+            src.AppendLine("using System;");
+            foreach (string d in s_usings) src.AppendLine(d);
+            if (extraUsings == null) return;
+            foreach (string d in extraUsings)
+                if (!s_usings.Contains(d)) src.AppendLine(d);
+        }
+
+        /// <summary>补全/`var` 推断探针共用的**引用集**（与正式提交同款：**历次提交件** + 外部引用）。
+        /// C.5：只作**局部/参数/返回值**流转，绝不留字段（`MetadataReference` 是载荷类型；擦除版见 `imageRefs`）。
+        /// 调用点：① `Submit` 的**懒建**共享引用集（同一次提交内多个 `var` 推断与正式提交编译**共用一份**，
+        /// 省掉重复的 `CreateFromFile` 元数据读取——离线实测每次组装 ~35ms，见报告 §23.3）；
+        /// ② 补全路径（`RoslynCompletion.Complete` 每次按键）走默认参数、各自组装（载荷类型禁止进字段 ⇒
+        /// 无法缓存；这是 §22 起就有的既有成本，非本节引入）。
+        /// ⚠️ 脆弱点（原 `RoslynRefsFromPaths` 的教训搬来这里，方法随 §23 修复一起退役）：本循环**不许**改回
+        /// `paths.Where(File.Exists).Select(p =&gt; MetadataReference.CreateFromFile(p))` —— 非捕获 lambda 也会被
+        /// 编译器缓存成 `&lt;&gt;c` 的 `Func&lt;string,MetadataReference&gt;` 字段，泛型实参是**载荷类型** ⇒
+        /// 启动期字段扫描照样炸（与 `s_imageRefs` 同款炸法；捕获式更糟：`&lt;&gt;c__DisplayClass*` 实例字段）。</summary>
+        List<MetadataReference> BuildReferences()
+        {
+            var refs = new List<MetadataReference>(imageRefs.Count + s_referencePaths.Count);
+            foreach (object r in imageRefs) refs.Add((MetadataReference)r);   // 历次提交件：类型身份在这里
+            foreach (string p in s_referencePaths)
+            {
+                try { refs.Add(MetadataReference.CreateFromFile(p)); } catch { }
+            }
+            return refs;
         }
 
         /// <summary>命名空间源里"读不出元数据"的引用条数（0 = 全部可用）。&gt;0 时补全侧会**报一条**日志
@@ -935,6 +1002,18 @@ namespace UnityExplorer.RoslynBridge
                 return HasAccessibility(ev.Modifiers) ? m : ev.AddModifiers(PublicToken());
 
             return m;   // 其余形态（如 EventField/Constructor）原样嵌入：不猜、不破坏
+        }
+
+        /// <summary>
+        /// 顶层**局部函数**提升为生成类成员时的必备修饰符：缺 `static` ⇒ 后续提交的 static `Run()` 调不到它；
+        /// 缺 `public` ⇒ 派生类（Submission_N+1）按简单名找不到（实测 CS0103 'Twice'）。§23 起被**预扫**与
+        /// 语句循环共用（同一份文本，防两处漂移）。
+        /// </summary>
+        static LocalFunctionStatementSyntax EnsureStaticPublic(LocalFunctionStatementSyntax fn)
+        {
+            if (!fn.Modifiers.Any(SyntaxKind.StaticKeyword)) fn = fn.AddModifiers(StaticToken());
+            if (!HasAccessibility(fn.Modifiers)) fn = fn.AddModifiers(PublicToken());
+            return fn;
         }
 
         static bool HasAccessibility(SyntaxTokenList modifiers)

@@ -1777,6 +1777,192 @@ namespace RoslynBridgeTests
             TestCompletionRobustness();                 // R2 结构兜底 + R3 失效钩子 + R4③ 不静默
             TestNamespaceSourceIncludesSubmissions();   // R4④ 提交件进源 + R4② 转发命名空间探针
             TestCompletionUiDedupSource();              // R1 UI 合并点去重（源码级断言）
+            // §23 var 推断缺陷修复轮
+            TestVarInference();
+        }
+
+        /// <summary>
+        /// §23：`var` 推断缺陷（对端游戏内实测：`var sb = new StringBuilder();` **编译成功**但字段类型**静默
+        /// 退化为 `object`** ⇒ `GetVars()` 显示 `(Object)`、`sb.Append("x")` 报 CS1929）。
+        /// 装置与生产同形：**先预置默认 using 里的 `System.Text`**（`DefaultUsings.BuiltIn` 含它 ⇒ 正式提交
+        /// 编得过、旧探针（不带任何 using）解析不到 ⇒ 正好复现"成功但退化"）；会话用离线惯例 `NewSession`
+        /// （注入 null 宿主基类，§19）。
+        /// 断言面覆盖"探针与正式提交**同可见性**"的四条通道：usings（①）、历次提交件（②⑤）、本次提交的
+        /// 已生成成员（④）与**后置**成员（⑧）、以及**基类**（⑨，注入可解析替身）；
+        /// ③⑥⑦ 为对照组/不回归护栏。判别力逐条写在断言旁（**实测判定**：HEAD 码 = 9 条 RED，
+        /// 半成品 = ④⑧⑨ 共 4 条 RED，本轮 = 全绿）。
+        /// </summary>
+        static void TestVarInference()
+        {
+            var refs = ReferenceSetForThisProcess();
+
+            // ① 核心用例：裸类型名 + var（控制台最常见写法）
+            var s = NewSession(refs);
+            string diag;
+            var accepted = s.AddUsings(new[] { "System.Text", "System.Collections.Generic" }, out diag);
+            var r1 = s.Submit("var sb = new StringBuilder();");
+            // 判别力：旧码此处 GeneratedSource 里是 `public static object sb;` ⇒ 本行必 FAIL。
+            Check("§23 ① `var sb = new StringBuilder();` 推断为 StringBuilder（不是 object）",
+                r1.Success && r1.GeneratedSource.Contains("public static System.Text.StringBuilder sb;"),
+                "accepted=" + accepted.Count + " diag=" + diag + " | " + r1.Diagnostics);
+            // 判别力：旧码 GetVars 打 `(Object)` ⇒ 本行必 FAIL（这也是游戏内唯一可见线索）。
+            Check("§23 ① GetVars() 显示真实类型（不是 `(Object)`）",
+                s.GetVars().Contains("StringBuilder") && !s.GetVars().Contains("(Object)"), s.GetVars());
+            Check("§23 ① 成员补全可用（旧码 object ⇒ 0 候选）", CompletionsOf(s, "sb.App") > 0,
+                "count=" + CompletionsOf(s, "sb.App"));
+            // 行为面：旧码连正常使用都坏（CS1929 'object' does not contain 'Append'）
+            var r1b = s.Submit("sb.Append(\"x\"); sb.Length");
+            Check("§23 ① 行为面：`sb.Append(\"x\"); sb.Length` = 1（旧码 CS1929）",
+                r1b.Success && s.LastValue?.ToString() == "1", r1b.Diagnostics + " value=" + s.LastValue);
+
+            // ② 初始化式引用**会话变量**（跨提交）：旧探针看不到 Submission_N ⇒ object
+            var s2 = NewSession(refs);
+            s2.Submit("var a = 1;");
+            var r2 = s2.Submit("var b = a + 1;");
+            Check("§23 ② 跨提交引用会话变量的 var 推断为 int（不是 object）",
+                r2.Success && r2.GeneratedSource.Contains("public static int b;"),
+                r2.Diagnostics + " | " + r2.GeneratedSource);
+            Check("§23 ② 行为面：`b + 40` = 42（a=1 ⇒ b=2；旧码 b 是 object ⇒ CS0019 ⇒ 本行必 FAIL）",
+                s2.Submit("b + 40").Success && s2.LastValue?.ToString() == "42", "value=" + s2.LastValue);
+
+            // ③ 对照组（游戏内 count=4 的那一组）：全限定写法旧码本来就正常 ⇒ 修复不得把它弄坏
+            var s3 = NewSession(refs);
+            var r3 = s3.Submit("var sb3 = new System.Text.StringBuilder();");
+            Check("§23 ③ 对照组：全限定 var 仍推断为 StringBuilder",
+                r3.Success && r3.GeneratedSource.Contains("public static System.Text.StringBuilder sb3;"),
+                r3.Diagnostics);
+
+            // ④ **同一次提交内**的兄弟变量（粘贴多行是常见用法）：新探针**不再复用原 tree**，故必须显式带上
+            //    本次提交已生成的成员（`pendingMembers`），否则 `q` 在探针里解析不到 ⇒ 退回 object。
+            //    ⚠️ 判别力（实测判定，**勿再写反**）：本条**对旧码无判别力** —— 旧探针把整段用户输入当**一棵 tree**
+            //    编译，全局语句里的局部 `p` 对它本来就可见（HEAD 实测 PASS）。它的判别对象是"新探针但漏传
+            //    `pendingMembers`"这一实现（去掉该参数 ⇒ `public static object q;` ⇒ 行为面 `q + 40` CS0019 ⇒ RED）。
+            var s4 = NewSession(refs);
+            var r4 = s4.Submit("var p = 1; var q = p + 1;");
+            Check("§23 ④ 同提交内兄弟变量可见（q 推断为 int；防新探针漏传 pendingMembers，非旧码判别）",
+                r4.Success && r4.GeneratedSource.Contains("public static int q;"),
+                r4.Diagnostics + " | " + r4.GeneratedSource);
+            Check("§23 ④ 行为面：`q + 40` = 42（p=1 ⇒ q=2；漏传 pendingMembers 的新探针 ⇒ object ⇒ CS0019 ⇒ RED）",
+                s4.Submit("q + 40").Success && s4.LastValue?.ToString() == "42", "value=" + s4.LastValue);
+
+            // ⑤ 会话里**自定义类型**的 var（历次提交件进探针引用集；旧码看不到 Submission_N ⇒ object）
+            var s5 = NewSession(refs);
+            s5.Submit("public class Vec23 { public int X; public Vec23(int x) { X = x; } }");
+            var r5 = s5.Submit("var v = new Vec23(2);");
+            Check("§23 ⑤ 用户自定义类型可推断（历次提交件进了探针引用集）",
+                r5.Success && r5.GeneratedSource.Contains("Vec23 v;")
+                && !r5.GeneratedSource.Contains("public static object v;"),
+                r5.Diagnostics + " | " + r5.GeneratedSource);
+            Check("§23 ⑤ 行为面：`v.X` = 2",
+                s5.Submit("v.X").Success && s5.LastValue?.ToString() == "2", "value=" + s5.LastValue);
+
+            // ⑥ 值通道不回归（§21 既有断言）
+            var s6 = NewSession(refs);
+            s6.Submit("var x = 1;");
+            var r6 = s6.Submit("x + 41");
+            Check("§23 ⑥ 值通道不回归：`x + 41` = 42",
+                r6.Success && s6.LastValue?.ToString() == "42", "value=" + s6.LastValue);
+
+            // ⑦ 匿名类型仍按 object 提升 + 提示（§17 既有语义不回归：匿名类型无法跨提交保留）
+            var s7 = NewSession(refs);
+            var r7 = s7.Submit("var anon = new { A = 1 };");
+            Check("§23 ⑦ 匿名类型仍按 object 提升（不回归）",
+                r7.Success && r7.GeneratedSource.Contains("public static object anon;"),
+                r7.Diagnostics + " | " + r7.GeneratedSource);
+
+            // ⑧ 同提交内**后置**的类型声明（粘贴顺序：先用法、后定义）：正式提交里成员查找与声明顺序无关
+            //    （类型与语句同属生成类的类体），故探针必须看到**全部**成员 —— 只看"已处理成员"会让这里的
+            //    `new Vec23b(2)` 解析失败 ⇒ 静默退回 object（把 §23 修的盲区换个位置复活）。
+            //    判别力（实测判定）：**旧码 PASS**（旧探针编译整棵原 tree，顶层 class 就在同一棵树里）；
+            //    判别对象 = "新探针只带已处理成员"的实现（半成品实测 FAIL）⇒ 属**防新机制倒退**的护栏。
+            var s9 = NewSession(refs);
+            var r9 = s9.Submit("var v9 = new Vec23b(2); class Vec23b { public int X; public Vec23b(int x) { X = x; } }");
+            Check("§23 ⑧ 同提交内后置类型声明可见（v9 推断为 Vec23b，非 object）",
+                r9.Success && r9.GeneratedSource.Contains("Vec23b v9;")
+                && !r9.GeneratedSource.Contains("public static object v9;")
+                // 探针类名泄漏的专用判据：探针若叫 `__CompletionProbe_xxx`，嵌套类型显示名会带该前缀 ⇒
+                // 字段类型写成 `__CompletionProbe_xxx.Vec23b` ⇒ CS0246（半成品实测踩到过，见报告 §23.2）
+                && !r9.GeneratedSource.Contains("__CompletionProbe_"),
+                r9.Diagnostics + " | " + r9.GeneratedSource);
+            Check("§23 ⑧ 行为面：`v9.X` = 2",
+                s9.Submit("v9.X").Success && s9.LastValue?.ToString() == "2", "value=" + s9.LastValue);
+
+            // ⑨ 第 1 个提交的探针必须继承**与该提交相同的基类**（生产 = 宿主助手基类 `ReplHostBase`，
+            //    §19 (i) 宿主自引用保证它在引用集里）——否则助手成员按简单名对探针不可见 ⇒
+            //    `var h = GetVars();` / 本例的 `var h = Hosted;` 静默退回 object（同一缺陷类的第三个盲区）。
+            //    离线替身 `VarProbeHostBase23`（测试程序集里的 public 类 + 一个 public static 字段）=
+            //    宿主自引用的离线对应物：把测试程序集自身显式放进引用集（形态上与生产 `self=` 同构）。
+            //    判别力（实测判定）：**旧码 FAIL**（旧探针没有基类，`Hosted` 解析不到 ⇒ object）⇒ 本条是
+            //    "与本次提交同可见性"这一契约的真判别断言。
+            var refs9 = ReferenceSetForThisProcess();
+            string selfLoc = typeof(Program).Assembly.Location;
+            bool selfInRefs = false;
+            for (int i = 0; i < refs9.Count; i++)
+                if (string.Equals(refs9[i], selfLoc, StringComparison.OrdinalIgnoreCase)) { selfInRefs = true; break; }
+            if (!selfInRefs) refs9.Add(selfLoc);
+            var s10 = new ReplSession(refs9, "RoslynBridgeTests.VarProbeHostBase23");
+            var r10 = s10.Submit("var h = Hosted;");
+            Check("§23 ⑨ 第 1 提交的探针继承**与该提交相同的基类**（基类成员可见 ⇒ h 推断为 string）",
+                r10.Success && r10.GeneratedSource.Contains("public static string h;"),
+                "selfInRefs=" + selfInRefs + " | " + r10.Diagnostics + " | " + r10.GeneratedSource);
+            Check("§23 ⑨ 行为面：`h + \"!\"` = h!（此式对 object 也成立 ⇒ 仅作行为面记录，判别力由上一行承担）",
+                s10.Submit("h + \"!\"").Success && s10.LastValue?.ToString() == "h!", "value=" + s10.LastValue);
+
+            // 开销证据：var 提交（多一次**只建语义模型**的探针）vs 纯值提交
+            var s8 = NewSession(refs);
+            s8.AddUsings(new[] { "System.Text" }, out diag);
+            s8.Submit("1 + 1");                       // 热身（避免把冷启动算进来）
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            s8.Submit("var zz = new StringBuilder();");
+            sw.Stop();
+            long varMs = sw.ElapsedMilliseconds;
+            sw.Restart();
+            s8.Submit("1 + 1");
+            sw.Stop();
+            Console.WriteLine("VARINFERCOST var_ms=" + varMs + " value_ms=" + sw.ElapsedMilliseconds);
+
+            // 探针本身的单次开销（只建 compilation + 绑定表达式：不 Emit、不 Load、不执行）——
+            // 用来支撑"不另建第二套提交编译、也不复用提交 compilation"的机制选择（报告 §23.3）。
+            var swp = System.Diagnostics.Stopwatch.StartNew();
+            int probeCalls = 20;
+            for (int i = 0; i < probeCalls; i++)
+                s8.ResolveExpressionSymbol("new System.Text.StringBuilder()");
+            swp.Stop();
+            Console.WriteLine("PROBECOST calls=" + probeCalls + " total_ms=" + swp.ElapsedMilliseconds
+                + " avg_us=" + (swp.ElapsedTicks * 1000000L / System.Diagnostics.Stopwatch.Frequency / probeCalls));
+
+            // 拆开探针开销的**主要来源**：引用集**重建**（`CreateFromFile` 读元数据）× 同一批路径
+            var swBuild = System.Diagnostics.Stopwatch.StartNew();
+            for (int i = 0; i < probeCalls; i++)
+            {
+                var tmp = new System.Collections.Generic.List<Microsoft.CodeAnalysis.MetadataReference>();
+                foreach (string p in refs)
+                {
+                    try { tmp.Add(Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(p)); } catch { }
+                }
+            }
+            swBuild.Stop();
+            Console.WriteLine("PROBEREFS_BUILD calls=" + probeCalls + " total_ms=" + swBuild.ElapsedMilliseconds
+                + " paths=" + refs.Count);
+
+            // 共享引用集时的探针开销（`Submit` 的实际形态：同一次提交内只组装一次、多次 `var` 复用）
+            var sharedRefs = new System.Collections.Generic.List<Microsoft.CodeAnalysis.MetadataReference>();
+            foreach (string p in refs)
+            {
+                try { sharedRefs.Add(Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(p)); } catch { }
+            }
+            var swShared = System.Diagnostics.Stopwatch.StartNew();
+            for (int i = 0; i < probeCalls; i++)
+                s8.ResolveExpressionSymbol("new System.Text.StringBuilder()", null, null, sharedRefs);
+            swShared.Stop();
+            Console.WriteLine("PROBECOST_SHARED calls=" + probeCalls + " total_ms=" + swShared.ElapsedMilliseconds
+                + " avg_us=" + (swShared.ElapsedTicks * 1000000L / System.Diagnostics.Stopwatch.Frequency / probeCalls));
+        }
+
+        static int CompletionsOf(ReplSession session, string input)
+        {
+            string prefix;
+            return RoslynCompletion.Complete(input, session, out prefix).Length;
         }
 
         /// <summary>
@@ -2088,5 +2274,19 @@ namespace RoslynBridgeTests
             }
             return n;
         }
+    }
+
+    /// <summary>
+    /// §23 ⑨ 的**离线宿主基类替身**：模拟生产里"第 1 个提交继承宿主助手基类 `ReplHostBase`"（§19 (i)，
+    /// 宿主自引用保证它在引用集里）。它属于**测试程序集自己的 public 类型**，不是 UE 类型，因此不需要
+    /// ExplorerCore/Unity 依赖即可离线验证"探针基类 = 该提交的基类"这条可见性契约。
+    /// 例：`var h = Hosted;` 只有探针继承了本类型才能推断出 `string`（否则静默退回 object）。
+    /// `__result` 必须由基类承载（与 `ReplHostBase` 同形）：生成类只在 baseName == null 时自声明它，
+    /// 注入基类后若基类没有它，值通道会 CS0103 '__result'（§19 的既有约定）。
+    /// </summary>
+    public class VarProbeHostBase23
+    {
+        public static readonly string Hosted = "h";
+        public static object __result;
     }
 }

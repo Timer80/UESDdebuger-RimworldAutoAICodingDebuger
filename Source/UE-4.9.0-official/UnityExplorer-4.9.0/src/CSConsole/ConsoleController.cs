@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Text;
 using UnityExplorer.Config;
 using UnityExplorer.RoslynBridge;
@@ -12,6 +12,7 @@ namespace UnityExplorer.CSConsole
     public static class ConsoleController
     {
         public static IScriptEvaluator Evaluator { get; private set; }
+
 
         /// <summary>本次会话实际生效的求值器：true=Roslyn，false=mcs（回退）。</summary>
         public static bool UsingRoslyn { get; private set; }

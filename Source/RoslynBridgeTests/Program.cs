@@ -60,6 +60,8 @@ namespace RoslynBridgeTests
             // §21 CS0029 值通道回退
             TestVoidValueChannelFallback();
             TestVoidFallbackProductionShape();
+            // §22 任务 9：自动补全（语义模型成员 + 命名空间元数据 + 关键字表）
+            TestCompletion();
             // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
             // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
             Console.WriteLine("COUNTS parent_pass=" + passLines + " parent_fail=" + failures
@@ -1698,6 +1700,197 @@ namespace RoslynBridgeTests
                 dir = dir.Parent;
             }
             return null;
+        }
+
+        // ══════════════ §22 任务 9：自动补全（语义模型成员 / 命名空间元数据 / 关键字表） ══════════════
+
+        /// <summary>
+        /// 任务 9：`IScriptEvaluator.GetCompletions` 的两条来源（成员=语义模型 / 命名空间=元数据）与关键字表。
+        /// 离线口径（对简报的偏离，见报告 §22）：宿主程序集（UE）不在测试进程里 ⇒ 用 `NewEvaluator`
+        /// （注入 null 基类，§19 惯例），否则每次提交都 CS0246 `ReplHostBase`、用例失去判别力。
+        /// </summary>
+        static void TestCompletion()
+        {
+            var refs = ReferenceSetForThisProcess();
+            using (var ev = NewEvaluator(refs))
+            {
+                string outp;
+                Check("§22 前置：提交建变量 sb",
+                    ev.Evaluate("var sb = new System.Text.StringBuilder();", out outp), outp);
+
+                string prefix;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                string[] c1 = ev.GetCompletions("sb.App", out prefix);
+                sw.Stop();
+                long coldMs = sw.ElapsedMilliseconds;
+                sw.Restart();
+                string[] c1b = ev.GetCompletions("sb.App", out prefix);
+                sw.Stop();
+                Console.WriteLine("COMPLETIONCOST cold_ms=" + coldMs + " warm_ms=" + sw.ElapsedMilliseconds
+                    + " candidates=" + c1.Length);
+                Console.WriteLine("MEMCOMPS sb.App → [" + JoinList(c1) + "] prefix=" + prefix);
+                // 判别力：旧码是任务 8 的空桩（GetCompletions 恒返回空数组）⇒ 本行必 FAIL。
+                Check("§22 成员来源命中 Append*（" + c1.Length + " 项）", AnyPrefix(c1, "end"), JoinList(c1));
+                Check("§22 冷热两次候选一致（补全不改会话状态、可重复）", SameList(c1, c1b),
+                    JoinList(c1) + " vs " + JoinList(c1b));
+                Check("§22 prefix = 已输入的 `App`", prefix == "App", "prefix=" + prefix);
+                // 判别力：候选必须是"扣掉 prefix 的**余部**"——CSAutoCompleter 把候选**插入光标处**，
+                // 回填整名会得到 `sb.AppendAppend`（任何"返回整名"的实现本行必 FAIL）。
+                Check("§22 候选 = 余部而非整名（`end` 在表内、`Append` 不在）",
+                    HasName(c1, "end") && !HasName(c1, "Append"), JoinList(c1));
+
+                // 反向护栏：不存在的成员 ⇒ 空候选（不误报）
+                string[] cNone = ev.GetCompletions("sb.Zzz", out prefix);
+                Check("§22 无匹配成员 ⇒ 空候选（不误报）", cNone.Length == 0, JoinList(cNone));
+
+                // ② 成员**链**接收者（`list.Count`）：只有语义模型能判出它的类型——反射表/字符串表都拿不到。
+                Check("§22 前置：提交建 list",
+                    ev.Evaluate("var list = new System.Collections.Generic.List<int>();", out outp), outp);
+                string[] c2 = ev.GetCompletions("list.Count.ToStr", out prefix);
+                Check("§22 成员链接收者（list.Count）经语义模型命中 ToString",
+                    c2.Length == 1 && c2[0] == "ing", "prefix=" + prefix + " " + JoinList(c2));
+
+                // ③ 类型名接收者（静态成员）：符号路径（类型表达式没有"值类型"）
+                string[] c3 = ev.GetCompletions("System.Math.Ab", out prefix);
+                Check("§22 类型名接收者命中 Abs（静态成员）",
+                    prefix == "Ab" && HasName(c3, "s"), "prefix=" + prefix + " " + JoinList(c3));
+
+                // ④ 命名空间来源：`System.Tex` → `t`（插入后正好是 `System.Text`）
+                string[] c4 = ev.GetCompletions("System.Tex", out prefix);
+                Console.WriteLine("NSCOMPS System.Tex → [" + JoinList(c4) + "] prefix=" + prefix);
+                Check("§22 命名空间来源命中 t/Text*（" + c4.Length + " 项）", AnyPrefix(c4, "t"), JoinList(c4));
+                Check("§22 命名空间候选含 `t`（能补成 System.Text）", HasName(c4, "t"), JoinList(c4));
+
+                // ⑤ 命名空间全集缓存后仍一致（同会话第二次调用走缓存）
+                string[] c5 = ev.GetCompletions("System.Tex", out prefix);
+                Check("§22 命名空间来源可重复（缓存不改变结果）",
+                    c5.Length == c4.Length && c5.Length > 0, JoinList(c5));
+            }
+
+            // 命名空间表：能覆盖**未加载**的 dll，且**不把程序集载入进程**（只读元数据）
+            TestNamespaceSourceWithoutLoading();
+
+            // 关键字表（C# 8+ 补齐）：源码文本断言（KeywordLexer 不可 link，理由见报告 §22）
+            TestKeywordTableSource();
+        }
+
+        /// <summary>
+        /// 命名空间源的两条硬要求：① 覆盖**未加载**程序集的命名空间 ② **不加载程序集**（只读元数据）。
+        /// 装置：往引用集里显式加一条本进程**从未加载**过的 net35 `UnityEngine.dll` 路径（该 dll 在仓库
+        /// `lib/net35` 里就有，测试工程不引用它），断言它的命名空间进表、而它仍在进程外。
+        /// 判别力：若实现走 `Assembly.Load*`/`ReflectionUtility.AllNamespaces`（反射=必须加载）而非 Roslyn
+        /// 元数据，"UnityEngine 仍在进程外"必 FAIL。
+        /// </summary>
+        static void TestNamespaceSourceWithoutLoading()
+        {
+            string libNet35 = FindUpwards(@"UE-4.9.0-official\UnityExplorer-4.9.0\lib\net35");
+            string ueDll = libNet35 == null ? null : System.IO.Path.Combine(libNet35, "UnityEngine.dll");
+            if (ueDll == null || !System.IO.File.Exists(ueDll))
+            {
+                Check("§22 命名空间源前置：仓库内可定位 lib/net35/UnityEngine.dll", false, ueDll);
+                return;
+            }
+
+            int loadedBefore = CountLoadedAssemblies("UnityEngine");
+            var refs = ReferenceSetForThisProcess();   // 只含"已加载"⇒ 里面没有 UnityEngine
+            refs.Add(ueDll);                           // 显式引用一个从未加载的 dll 路径
+            var s = NewSession(refs);
+
+            bool hasUnityEngine = false;
+            int total = 0;
+            foreach (string ns in s.AllNamespaces())
+            {
+                total++;
+                if (ns == "UnityEngine" || ns.StartsWith("UnityEngine.", StringComparison.Ordinal))
+                    hasUnityEngine = true;
+            }
+            int loadedAfter = CountLoadedAssemblies("UnityEngine");
+
+            Check("§22 命名空间源覆盖未加载 dll 的命名空间（UnityEngine.*）", hasUnityEngine,
+                "refs=" + refs.Count + " ns=" + total);
+            Check("§22 命名空间源只用元数据、不加载程序集（UnityEngine 仍在进程外）",
+                loadedBefore == 0 && loadedAfter == 0, "before=" + loadedBefore + " after=" + loadedAfter);
+            Check("§22 命名空间源非空（含 System.*）", total > 0, "ns=" + total);
+        }
+
+        /// <summary>
+        /// 关键字表补齐（C# 8+）：**源码文本断言**。
+        /// 为什么不是 `KeywordLexer.keywords.Contains(...)`（简报写法）：`KeywordLexer : Lexer`，而
+        /// `Lexer.HighlightColor` 是 UnityEngine `Color`、`TryMatchCurrent(LexerBuilder)` 又拖进 LexerBuilder
+        /// ⇒ link 进测试工程会连带 UnityEngine/UE 依赖（§20 对 `ReplHostBase` 的同类裁定）。改为读**真源码**的
+        /// `keywords` 初始化块、逐 token 断言：判别力与"表里到底有没有这个词"等价（同一文件即编译输入）。
+        /// </summary>
+        static void TestKeywordTableSource()
+        {
+            string path = FindFileUpwards("KeywordLexer.cs");
+            if (path == null)
+            {
+                Check("§22 关键字表源码可定位（KeywordLexer.cs）", false, "未找到 KeywordLexer.cs");
+                return;
+            }
+            string text = System.IO.File.ReadAllText(path);
+            int at = text.IndexOf("keywords", StringComparison.Ordinal);
+            int open = at < 0 ? -1 : text.IndexOf('{', at);
+            int close = open < 0 ? -1 : text.IndexOf('}', open);
+            if (open < 0 || close <= open)
+            {
+                Check("§22 关键字表初始化块可解析", false, path);
+                return;
+            }
+            string block = text.Substring(open + 1, close - open - 1);
+            var tokens = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+            var rx = new System.Text.RegularExpressions.Regex("\"([A-Za-z_][A-Za-z0-9_]*)\"");
+            foreach (System.Text.RegularExpressions.Match m in rx.Matches(block))
+                tokens.Add(m.Groups[1].Value);
+
+            // 判别力：本轮之前 `required`/`file`/`scoped` 三项**不在表里** ⇒ 本行必 FAIL。
+            string[] wanted = { "record", "init", "required", "with", "file", "scoped",
+                "unmanaged", "global", "not", "and", "or" };
+            var missing = new System.Collections.Generic.List<string>();
+            foreach (string kw in wanted)
+                if (!tokens.Contains(kw)) missing.Add(kw);
+            Check("§22 关键字表含 C# 8+ 关键字（表内 " + tokens.Count + " 个 token）",
+                missing.Count == 0, "缺：" + string.Join(",", missing.ToArray()));
+            Check("§22 关键字表含 required/file/scoped（本轮新增三项）",
+                tokens.Contains("required") && tokens.Contains("file") && tokens.Contains("scoped"));
+        }
+
+        static bool AnyPrefix(string[] candidates, string prefix)
+        {
+            if (candidates == null) return false;
+            foreach (string s in candidates)
+                if (s != null && s.StartsWith(prefix, StringComparison.Ordinal)) return true;
+            return false;
+        }
+
+        static bool HasName(string[] candidates, string name)
+        {
+            if (candidates == null) return false;
+            foreach (string s in candidates)
+                if (s == name) return true;
+            return false;
+        }
+
+        static string JoinList(string[] items)
+            => items == null ? "<null>" : string.Join(",", items);
+
+        static bool SameList(string[] a, string[] b)
+        {
+            if (a == null || b == null) return a == b;
+            if (a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++)
+                if (a[i] != b[i]) return false;
+            return true;
+        }
+
+        static int CountLoadedAssemblies(string simpleName)
+        {
+            int n = 0;
+            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try { if (a.GetName().Name == simpleName) n++; } catch { }
+            }
+            return n;
         }
     }
 }

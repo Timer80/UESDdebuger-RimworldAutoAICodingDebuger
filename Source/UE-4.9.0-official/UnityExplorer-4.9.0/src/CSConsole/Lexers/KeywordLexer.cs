@@ -21,7 +21,9 @@ namespace UnityExplorer.CSConsole.Lexers
 "add", "and", "alias", "ascending", "async", "await", "by", "descending", "dynamic", "equals", "from", "get",
 "global", "group", "init", "into", "join", "let", "managed", "nameof",  "not", "notnull", "on",
 "or", "orderby", "partial", "record", "remove", "select", "set", "unmanaged", "value", "var", "when", "where",
-"where", "with", "yield", "nint", "nuint"
+"where", "with", "yield", "nint", "nuint",
+// C# 8+ 上下文关键字（任务 9 补齐；`required`/`file`/`scoped` 此前缺失 ⇒ 在控制台里不高亮）
+"required", "file", "scoped"
         };
 
         public override bool TryMatchCurrent(LexerBuilder lexer)

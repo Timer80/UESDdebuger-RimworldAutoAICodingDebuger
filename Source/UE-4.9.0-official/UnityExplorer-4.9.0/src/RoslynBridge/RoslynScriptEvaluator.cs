@@ -73,10 +73,9 @@ namespace UnityExplorer.RoslynBridge
 
         public string[] GetCompletions(string input, out string prefix)
         {
-            // 本任务先返回空数组（保证本任务可独立编译/测试通过）；任务 9 接入：
-            //   return RoslynCompletion.Complete(input, s_session, out prefix);
-            prefix = "";
-            return Array.Empty<string>();
+            // 任务 9 接线：语义模型（成员，含基类链）+ 命名空间元数据（前缀匹配）；候选 = 扣掉 prefix 的余部。
+            // 任何解析失败都退化为"空候选"（补全绝不抛、绝不阻断输入）。
+            return RoslynCompletion.Complete(input, s_session, out prefix);
         }
 
         public string GetUsing() => s_session.GetUsing();

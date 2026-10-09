@@ -17,6 +17,9 @@
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\ReplSession.cs" Link="ReplSession.cs" />
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\CSConsole\IScriptEvaluator.cs" Link="IScriptEvaluator.cs" />
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\RoslynScriptEvaluator.cs" Link="RoslynScriptEvaluator.cs" />
+    <!-- 任务 9：补全（语义模型 + 命名空间元数据）。KeywordLexer 不可 link（基类 Lexer → LexerBuilder →
+         UE/Unity 依赖），其关键字表用**源码文本断言**覆盖，理由见报告 §22。 -->
+    <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\RoslynCompletion.cs" Link="RoslynCompletion.cs" />
     <!-- 根因清扫轮（§17，追加 E）：纯决策逻辑（无 Unity/UE/Roslyn/mcs 依赖）链接进来做真值表离线断言 -->
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\EvaluatorSelector.cs" Link="EvaluatorSelector.cs" />
     <!-- R2（§18）：引用集"档案 + 组装"纯逻辑（无 Verse/Unity/ExplorerCore 依赖）⇒ 可离线断言 -->

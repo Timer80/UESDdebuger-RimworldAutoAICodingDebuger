@@ -28,6 +28,10 @@ namespace UnityExplorer.RoslynBridge
         readonly List<string> s_classes = new List<string>();
         readonly List<KeyValuePair<string, Type>> s_vars = new List<KeyValuePair<string, Type>>();
         readonly List<Assembly> s_sessionAssemblies = new List<Assembly>();
+        // 任务 9（补全）：命名空间表（惰性构建 + 缓存）。**只缓存字符串**——载荷类型符号
+        // （INamespaceSymbol 等）绝不许进字段（C.5：Mono 启动期那次不按 BindingFlags 过滤的字段扫描
+        // 会把字段签名里的载荷 typeref 当"要解析的类型"而炸）。
+        HashSet<string> s_namespaces;
         // 会话唯一标签（构造时 GUID 段）：提交程序集名 = Submission_<tag>_<n>_asm，
         // 全局唯一 → 多会话并存时按名回退（RequestingAssembly==null）也不可能答错会话。
         readonly string s_sessionTag = Guid.NewGuid().ToString("N").Substring(0, 8);
@@ -540,6 +544,117 @@ namespace UnityExplorer.RoslynBridge
             foreach (string d in candidates) s_usings.Remove(d);
             diagnostics = "批量 using 校验失败，已全部撤销本次新增（会话保持可用）：" + Environment.NewLine + firstDiag;
             return accepted;
+        }
+
+        // ══════════════ 任务 9：补全的数据源（语义模型 / 命名空间元数据） ══════════════
+
+        /// <summary>
+        /// 补全用：把接收者表达式交给**语义模型**判定它的类型符号；判不出返回 null（绝不抛）。
+        /// 机制 = 建一个**探测类**（继承**最后一个提交类** ⇒ 会话变量/用户类型/助手都按简单名可见，
+        /// 这正是继承链的用途），把表达式注入 `public static object Get() { return &lt;expr&gt;; }`，
+        /// 然后**只取语义模型**：**不 Emit、不 Assembly.Load、不 Invoke**。三条理由：
+        ///  ① **零副作用**：发射+执行会把接收者表达式**真跑一遍**（属性 getter 有副作用/昂贵）——
+        ///    "用户敲字"不该触发游戏逻辑；
+        ///  ② **不涨内存**：每次按键 Assembly.Load 一个探测程序集，而字节加载**不可卸载**；
+        ///  ③ **快一个量级**：无 IL 生成、无 PE、无加载、无 JIT（每次按键都跑）。
+        /// </summary>
+        internal ITypeSymbol ResolveExpressionSymbol(string expression)
+        {
+            if (string.IsNullOrEmpty(expression)) return null;
+            try
+            {
+                string probeName = "__CompletionProbe_" + Guid.NewGuid().ToString("N");
+                var src = new StringBuilder();
+                src.AppendLine("using System;");
+                if (s_usings.Count > 0)
+                    src.AppendLine(string.Join(Environment.NewLine, s_usings.ToArray()));
+                // 无成功提交时（s_submission==0）没有可继承的提交类：探测量为"孤立表达式"，如实失败即可。
+                src.AppendLine("public class " + probeName
+                    + (s_submission > 0 ? " : Submission_" + s_submission : ""));
+                src.AppendLine("{");
+                src.AppendLine("    public static object Get() { return " + expression + "; }");
+                src.AppendLine("}");
+
+                SyntaxTree tree = CSharpSyntaxTree.ParseText(src.ToString(),
+                    new CSharpParseOptions(LanguageVersion.Latest));
+                var trees = new List<SyntaxTree>
+                {
+                    tree,
+                    // 与提交侧同款：用户类型可能引用 polyfill 提供的类型（isExternalInit/required/params 集合）
+                    CSharpSyntaxTree.ParseText(PolyfillSource.Code, new CSharpParseOptions(LanguageVersion.Latest)),
+                };
+                var refs = new List<MetadataReference>(imageRefs.Count + s_referencePaths.Count);
+                foreach (object r in imageRefs) refs.Add((MetadataReference)r);   // 历史提交件：类型身份在这里
+                foreach (string p in s_referencePaths)
+                {
+                    try { refs.Add(MetadataReference.CreateFromFile(p)); } catch { }
+                }
+
+                CSharpCompilation compilation = CSharpCompilation.Create("CompletionProbe",
+                    trees, refs, new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+                SemanticModel model = compilation.GetSemanticModel(tree);
+
+                // 定位注入的表达式：全树只有我们这一句 return（显式循环——禁 LINQ + Roslyn 类型 lambda，
+                // 非捕获 lambda 也会被缓存成 `<>c` 的 `Func<SyntaxNode,bool>` 字段，泛型实参是载荷类型 ⇒ C.5 炸）。
+                ExpressionSyntax expr = null;
+                foreach (SyntaxNode node in tree.GetRoot().DescendantNodes())
+                {
+                    var ret = node as ReturnStatementSyntax;
+                    if (ret == null || ret.Expression == null) continue;
+                    expr = ret.Expression;
+                    break;
+                }
+                if (expr == null) return null;
+
+                // ① 值表达式（`sb` / `list.Count`）
+                ITypeSymbol value = model.GetTypeInfo(expr).Type;
+                if (value != null && value.TypeKind != TypeKind.Error) return value;
+                // ② 类型名（`System.Text.StringBuilder`）：类型表达式没有"值类型"，符号才是类型
+                var named = model.GetSymbolInfo(expr).Symbol as INamedTypeSymbol;
+                if (named != null) return named;
+                // ③ 其余（命名空间 `System`、解析失败的名字等）⇒ null，调用方回落命名空间来源
+                return null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// 会话引用里的**命名空间全集**（惰性构建 + 缓存）。**只读 Roslyn 元数据**——`MetadataReference`
+        /// 分派只 mmap/读元数据、**不加载程序集**（把本体 106 个 dll 真载入进程的代价见 §3.1 老教训）。
+        /// </summary>
+        public IEnumerable<string> AllNamespaces()
+        {
+            if (s_namespaces != null) return s_namespaces;
+            var set = new HashSet<string>(StringComparer.Ordinal);
+            try
+            {
+                var refs = new List<MetadataReference>();
+                foreach (string p in s_referencePaths)
+                {
+                    try { refs.Add(MetadataReference.CreateFromFile(p)); } catch { }
+                }
+                CSharpCompilation comp = CSharpCompilation.Create("NamespaceProbe", null, refs);
+                foreach (MetadataReference r in refs)
+                {
+                    IAssemblySymbol asm = null;
+                    try { asm = comp.GetAssemblyOrModuleSymbol(r) as IAssemblySymbol; } catch { }
+                    if (asm == null) continue;
+                    CollectNamespaces(asm.GlobalNamespace, set);
+                }
+            }
+            catch { /* 元数据不可读 ⇒ 表为空：命名空间补全退化为"无候选"，成员补全不受影响 */ }
+            s_namespaces = set;
+            return s_namespaces;
+        }
+
+        static void CollectNamespaces(INamespaceSymbol ns, HashSet<string> sink)
+        {
+            foreach (INamespaceSymbol child in ns.GetNamespaceMembers())
+            {
+                string name = child.ToDisplayString();
+                if (name.Length > 0) sink.Add(name);
+                CollectNamespaces(child, sink);
+            }
         }
 
         /// <summary>对当前会话 using 表做一次**只编译不发射**的校验；全部可用返回 null，否则返回诊断文本。</summary>

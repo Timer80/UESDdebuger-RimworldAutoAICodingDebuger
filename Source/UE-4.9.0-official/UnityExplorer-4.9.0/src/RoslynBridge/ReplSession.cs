@@ -45,7 +45,8 @@ namespace UnityExplorer.RoslynBridge
             AppDomain.CurrentDomain.AssemblyResolve += ResolveSessionAssembly;
         }
 
-        /// <summary>摘除 AssemblyResolve 并清空会话程序集注册；幂等，之后不得再 Submit。</summary>
+        /// <summary>摘除 AssemblyResolve 并清空会话程序集注册；幂等。
+        /// Dispose 后再 Submit 返回失败结果（ErrorCount=1、诊断"会话已释放"），不抛异常。</summary>
         public void Dispose()
         {
             if (s_disposed) return;
@@ -66,6 +67,17 @@ namespace UnityExplorer.RoslynBridge
 
         public CompileResult Submit(string code)
         {
+            // Dispose 后防御：返回失败结果（方案 a，与 Submit 全程"失败=带诊断的 CompileResult"
+            // 形态一致；任务 7 求值器统一展示诊断，不打断其调用）。无此防御时首次 Submit 静默
+            // 成功（n=1 无基类可解析）、第二次起运行期 NRE，报错不清晰。
+            if (s_disposed)
+                return new CompileResult
+                {
+                    Success = false,
+                    ErrorCount = 1,
+                    Diagnostics = "会话已释放（ReplSession 已 Dispose，不得再 Submit）",
+                };
+
             int n = s_submission + 1;
             string className = "Submission_" + n;
             string baseName = n == 1 ? null : "Submission_" + (n - 1);
@@ -255,12 +267,13 @@ namespace UnityExplorer.RoslynBridge
         public string GetVars()
         {
             var sb = new StringBuilder();
-            Type start = s_lastAssembly?.GetType("Submission_" + s_submission);
             foreach (var kv in s_vars)
             {
                 object val = null;
                 try
                 {
+                    // GetType 回到 try 内保护（原修复轮 1 移出 try，若抛出会向外传播）。
+                    Type start = s_lastAssembly?.GetType("Submission_" + s_submission);
                     // 单参 GetField 不带 FlattenHierarchy：基类 public static 字段返回 NULL
                     //（探针实证；静态字段不遍历基类）→ 与 RefreshVarTypes 同款逐层上溯取值。
                     FieldInfo f = null;

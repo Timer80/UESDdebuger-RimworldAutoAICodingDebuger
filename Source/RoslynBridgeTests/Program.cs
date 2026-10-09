@@ -145,6 +145,13 @@ namespace RoslynBridgeTests
             bool disposed = true;
             try { s2.Dispose(); s2.Dispose(); } catch { disposed = false; }
             Check("会话 Dispose 摘钩幂等不抛", disposed);
+
+            // 修复轮 2 Important：Dispose 后 Submit 必须清晰拒绝（失败结果 + "会话已释放" 诊断），
+            // 不得静默成功、也不得运行期 NRE。判别推演：旧码无防御——s2 此刻 n=1（无基类需解析），
+            // 提交会编译运行全成功 → ErrorCount=0、Success=true、诊断无关键词 → 本断言必 FAIL。
+            var post = s2.Submit("1 + 1");
+            Check("Dispose 后 Submit 被拒绝（失败+已释放诊断）", !post.Success && post.ErrorCount > 0
+                && post.Diagnostics.Contains("已释放"), post.Diagnostics);
         }
 
         static System.Collections.Generic.List<string> ReferenceSetForThisProcess()

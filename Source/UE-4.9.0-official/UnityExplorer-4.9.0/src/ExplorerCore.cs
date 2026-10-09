@@ -9,6 +9,7 @@ global using UniverseLib;
 global using UniverseLib.Utility;
 using UnityExplorer.Config;
 using UnityExplorer.ObjectExplorer;
+using UnityExplorer.RoslynBridge;
 using UnityExplorer.Runtime;
 using UnityExplorer.UI;
 using UnityExplorer.UI.Panels;
@@ -44,6 +45,27 @@ namespace UnityExplorer
             CheckLegacyExplorerFolder();
             Directory.CreateDirectory(ExplorerFolder);
             ConfigManager.Init(Loader.ConfigHandler);
+
+            // ⚠️ 方案 A 早加载（任务 8 架构修复，2026-10-09 合议裁定，人类保留否决）——勿删。
+            // 根因：RimWorld Verse.StaticConstructorOnStartupUtility.CallAll 在跑完各 mod 的
+            // [StaticConstructorOnStartup] .cctor（含本 UE 的 init 链 → 此处）之后，会以
+            // Parallel.ForEach 对全部 mod 程序集类型做 GetFields 字段扫描
+            // （ReportProbablyMissingAttributes）。扫描到 ReplSession.s_imageRefs
+            // （List<MetadataReference>）与闭包字段 <>c__DisplayClass23_0:v（VariableDeclaratorSyntax）
+            // 时若 Roslyn 载荷未加载 → TypeLoadException（Player.log 实证：Could not load type of
+            // field 'UnityExplorer.RoslynBridge.ReplSession:s_imageRefs' … Microsoft.CodeAnalysis
+            // 4.14.0.0 不可解析）→ Mono 缓存 typeref 解析失败，进程内不可恢复 → 此后
+            // new ReplSession 必败 → 控制台 DisableConsole。
+            // 故必须在字段扫描发生之前无条件加载载荷（不读配置——配置只决定"是否使用"，
+            // 不决定"是否加载"）；ResetConsole 处的 EnsureLoaded 幂等命中缓存，行为不变。
+            // 跨配置安全：RoslynAssemblyLoader 不在 csproj 非 STANDALONE 排除组（排除组仅
+            // ReferenceScanner + RoslynCompiler/DiagnosticFormatter/ReplSession/RoslynScriptEvaluator
+            // 五件，本类仅依赖 System.*），9 配置全编译，无需 #if。
+            try { RoslynAssemblyLoader.EnsureLoaded(Path.Combine(ExplorerFolder, "Roslyn")); }
+            catch (Exception ex)
+            {
+                LogWarning($"[CSConsole] Roslyn 载荷早加载失败（控制台将在 Reset 时回退 mcs）：{ex.Message}");
+            }
 
             Universe.Init(ConfigManager.Startup_Delay_Time.Value, LateInit, Log, new()
             {

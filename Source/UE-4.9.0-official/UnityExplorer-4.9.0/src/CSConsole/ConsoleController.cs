@@ -630,6 +630,10 @@ namespace UnityExplorer.CSConsole
 
         private static void DisableConsole(Exception ex)
         {
+            // 可观测性（任务 8 架构修复轮）：禁用原因必须进日志——此前只写 Input.Text，
+            // 调试者只看到"控制台禁用"却拿不到异常（验收时它把 TypeLoadException 根因藏了一整轮）。
+            // Input.Text 行为保持不变（那是给用户看的，日志是给调试者的）。
+            ExplorerCore.LogWarning($"[CSConsole] 控制台已禁用：{ex}");
             SRENotSupported = true;
             Input.Component.readOnly = true;
             Input.Component.textComponent.color = "5d8556".ToColor();

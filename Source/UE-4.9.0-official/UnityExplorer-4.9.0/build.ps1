@@ -129,13 +129,21 @@ $Path = "Release/UnityExplorer.Standalone.Mono"
 # Assembly-CSharp 引用（RoslynPreScanLoader 的 [StaticConstructorOnStartup] 来自 Verse）——
 # ILRepack 只带 /lib:lib/net35 时解析不了该引用并 exit 1：
 #   Mono.Cecil.AssemblyResolutionException: Failed to resolve 'Assembly-CSharp, Version=1.6.…'
-# 故把本体 Managed 目录一并作为解析目录（沿用 Directory.Build.props 的路径口径：
-# 环境变量 RIMWORLD_GAME_DIR > 脚本位置向上 5 级的同级默认位置）。
-$RimWorldManaged = if ($env:RIMWORLD_GAME_DIR) {
-    Join-Path $env:RIMWORLD_GAME_DIR 'RimWorldWin64_Data\Managed'
+# 故把本体 Managed 目录一并作为解析目录。路径口径与 `Source/Directory.Build.props` **一致**：
+#   ① 环境变量 RIMWORLD_GAME_DIR ② 脚本位置向上 **4** 级（脚本位于 <game>\UESDdebuger\Source\
+#      UE-4.9.0-official\UnityExplorer-4.9.0 ⇒ 向上 4 级 = <game>）③ 常量兜底（与 props 同值）。
+# ⚠️ 复审揪出：曾误写成向上 **5** 级（解析到 <game>\.. 即 …\steamapps\common）⇒ 未设环境变量时必然 throw。
+$RimWorldGameDir = if ($env:RIMWORLD_GAME_DIR) {
+    $env:RIMWORLD_GAME_DIR
 } else {
-    Join-Path (Resolve-Path "$PSScriptRoot\..\..\..\..\..").Path 'RimWorldWin64_Data\Managed'
+    $upstream = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..') -ErrorAction SilentlyContinue).Path
+    if ($upstream -and (Test-Path (Join-Path $upstream 'RimWorldWin64_Data\Managed\Assembly-CSharp.dll'))) {
+        $upstream
+    } else {
+        'C:\SteamLibrary\steamapps\common\RimWorld'   # 与 Directory.Build.props 的常量兜底同口径
+    }
 }
+$RimWorldManaged = Join-Path $RimWorldGameDir 'RimWorldWin64_Data\Managed'
 if (-not (Test-Path (Join-Path $RimWorldManaged 'Assembly-CSharp.dll'))) {
     throw "找不到本体程序集目录：$RimWorldManaged（Assembly-CSharp.dll 缺失）。请设 `$env:RIMWORLD_GAME_DIR。"
 }

@@ -255,8 +255,10 @@ namespace UnityExplorer.CSConsole
                     + (string.IsNullOrEmpty(probeDiag) ? "evaluator probe failed" : probeDiag));
                 return ResetConsoleCore(logSuccess, forceMcs: true);   // 一次性回退，见方法注释
             }
-            if (after == EvaluatorChoice.Disable)
-                return EvaluatorChoice.Disable;
+            // R4（复审必修）：Disable **不再早退** —— 统一收尾（更新 UsingRoslyn + 打"求值器生效"行 +
+            // 类型交叉核对）。早退会让 Disable 时 UsingRoslyn 保留旧值（可能与实际已死的求值器不符），
+            // 且丢掉"求值器生效"锚点（与追加 A/C 的承诺不一致）。
+            // 失败日志由调用方负责（ResetConsole → LogError；Init → throw → DisableConsole），此处不重复打。
 
             // ── 生效判定（追加 A/C）──
             // 追加 C：`UsingRoslyn` 是**唯一**可靠的"当前生效的是 Roslyn"判据（CS1525/record 报错都不是

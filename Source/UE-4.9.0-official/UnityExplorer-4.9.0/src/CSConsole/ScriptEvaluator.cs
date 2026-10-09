@@ -18,6 +18,12 @@ namespace UnityExplorer.CSConsole
         // 新增直读点前须复核此约束。
         internal static StreamReportPrinter _reportPrinter;
 
+        /// <summary>
+        /// 本实例**自己**的打印器（构造时捕获，见 R1）：`_reportPrinter` 是静态字段，`HookInstance`
+        /// 造第二个 ScriptEvaluator 时会把它指向别的实例 ⇒ 用静态字段读 ErrorsCount / 取文本会串包。
+        /// </summary>
+        internal StreamReportPrinter _ownReportPrinter;
+
         private static readonly HashSet<string> StdLib = new(StringComparer.InvariantCultureIgnoreCase)
         {
             "mscorlib",
@@ -29,6 +35,8 @@ namespace UnityExplorer.CSConsole
         public ScriptEvaluator(TextWriter tw) : base(BuildContext(tw))
         {
             _textWriter = tw;
+            // base(BuildContext(tw)) 刚把静态 _reportPrinter 设成本实例的打印器 ⇒ 此刻捕获即为己有。
+            _ownReportPrinter = _reportPrinter;
 
             ImportAppdomainAssemblies();
             AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoad;
@@ -46,17 +54,18 @@ namespace UnityExplorer.CSConsole
         public bool Evaluate(string input, out string output)
         {
             output = null;
-            // ── B3 根因修复（Important）：诊断**不得跨提交累积** ──
-            // 旧实现 `output = _reportPrinter.ErrorsCount > 0 ? _textWriter.ToString() : null;`
-            // 有两个累积源：① `_textWriter`（StringWriter）自上次 ResetConsole 起**从不重置**，
-            // 故一次失败后的每次失败都把**历史全部错误**再吐一遍；② `StreamReportPrinter.ErrorsCount`
-            // 是**粘性**计数器（同一次会话内只增不减）⇒ 一旦出过错，此后每次提交都被判失败。
-            // 实测后果（对端定位）：一条 record 报错后，后续 `q * 3` 的诊断里混进上一条的内容，
-            // 把两个 agent 都带偏去怀疑"record 解析失败"/"CS1525 是 Roslyn 指纹"。
-            // 修法：进 Compile 前对"文本长度 + 错误计数"取快照，只回传**本次新增**的文本、
-            // 只用**增量**判定本次是否失败（成功路径返回值不变）。
+            // ── B3 根因（诊断不跨提交累积）+ R1 勘误（失败判定口径）──
+            // 事实链（复审反编译 `lib/net35/mcs.dll` 实证，本轮据此勘误）：
+            //   `Mono.CSharp.Evaluator.Compile(string, out CompiledMethod)` **开头即调
+            //    `ctx.Report.Printer.Reset()`**（唯一调用者），而 `ReportPrinter.Reset()` 非虚、把
+            //    `ErrorsCount = 0`；`CompilerContext..ctor` 把本类的 `StreamReportPrinter` 接为
+            //    `ctx.Report.Printer` ⇒ **ErrorsCount 每次编译前被清零 = 本次错误数，不是粘性计数器**。
+            //   （§17.3 曾断言"粘性计数器"——**该论断作废**，见报告 §18.1。）按旧论断写的
+            //   `errorsBefore` 快照实为**上一条**的错误数：本条错误数 ≤ 上条时会被判成成功 = 静默假成功。
+            // 故：失败判定 = `ErrorsCount > 0`（Reset 已保证它是本次的）；文本长度增量**只**用于
+            // 取"本次新增的诊断文本"（`_textWriter` 本身仍是从上次 ResetConsole 起累积的）。
+            var printer = _ownReportPrinter ?? _reportPrinter;
             string textBefore = _textWriter.ToString();
-            int errorsBefore = _reportPrinter.ErrorsCount;
 
             CompiledMethod repl = null;
             try { repl = Compile(input); }
@@ -71,7 +80,7 @@ namespace UnityExplorer.CSConsole
                 return true;
             }
 
-            bool failedThisTime = _reportPrinter.ErrorsCount > errorsBefore;
+            bool failedThisTime = printer != null && printer.ErrorsCount > 0;
             if (failedThisTime)
             {
                 string textNow = _textWriter.ToString();

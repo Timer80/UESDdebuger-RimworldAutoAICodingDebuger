@@ -21,29 +21,15 @@ namespace UnityExplorer.RoslynBridge
     /// </summary>
     public static class ReferenceScanner
     {
-        /// <summary>唯一引用集：**22** 个 = 本体 21（实测残差 0）+ UE 侧 1（UniverseLib.Mono）。
-        /// ⚠️ 前 21 项的**顺序契约不变**（本体 Managed 解析、先加载的在前）；第 22 项追加在末尾。</summary>
-        public static readonly string[] SmallProfile =
-        {
-            "mscorlib", "netstandard", "System", "System.Core", "System.Xml", "System.Xml.Linq",
-            "Assembly-CSharp", "Assembly-CSharp-firstpass",
-            "UnityEngine", "UnityEngine.CoreModule", "UnityEngine.IMGUIModule", "UnityEngine.UI",
-            "UnityEngine.AudioModule", "UnityEngine.TextRenderingModule",
-            "UnityEngine.PhysicsModule", "UnityEngine.AnimationModule", "UnityEngine.ParticleSystemModule",
-            "UnityEngine.AssetBundleModule",
-            "Unity.Collections", "Unity.Mathematics", "com.rlabrecque.steamworks.net",
-            // ↓ 第 22 件：**UE 侧**程序集（非本体 Managed），来源目录见 UeAssemblyDir()
-            "UniverseLib.Mono",
-        };
+        /// <summary>唯一引用集（**22** 个，定义在 <see cref="ReferenceProfile"/>，那里可离线单测）。
+        /// 保留本转发名以免调用方/文档断裂。</summary>
+        public static string[] SmallProfile => ReferenceProfile.SmallProfile;
 
-        /// <summary>22 件里哪些来自 UE 自身程序集目录（其余来自本体 Managed）。</summary>
-        public static readonly HashSet<string> UeSideProfile = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "UniverseLib.Mono",
-        };
+        /// <summary>22 件里哪些来自 UE 自身程序集目录（转发，见 <see cref="ReferenceProfile"/>）。</summary>
+        public static HashSet<string> UeSideProfile => ReferenceProfile.UeSideProfile;
 
         /// <summary>报告分母（`refs: small=&lt;n&gt;/22 total=&lt;m&gt;`）。</summary>
-        public const int ExpectedProfileCount = 22;
+        public const int ExpectedProfileCount = ReferenceProfile.ExpectedProfileCount;
 
         /// <summary>本体根目录（实测 Application.dataPath == &lt;game&gt;/RimWorldWin64_Data）。</summary>
         public static string GameRootOfThisProcess()
@@ -98,40 +84,15 @@ namespace UnityExplorer.RoslynBridge
         /// 组装引用集。`unavailableDefaultUsings` = 引用集缺其来源程序集的**默认 using 根命名空间**
         /// （B1 护栏：调用方须把它们从本会话默认 using 里剔除并明确告警，否则一条 using 会拖垮整条 Roslyn 路径）。
         /// 报告格式：`refs: small=&lt;n&gt;/22 total=&lt;m&gt;`；UE 侧缺件时**响亮**写明目录与后果（不静默降级）。
+        /// ⚠️ 纯逻辑在 <see cref="ReferenceProfile.CollectFrom"/>（可离线单测）；本方法只负责**推导目录**
+        /// （依赖 Unity/UE 类型，故不能进离线测试程序集）。R2：UE 侧命中要求**文件存在**。
         /// </summary>
         public static ReferenceSet Collect(string blacklist, out string report,
             out List<string> unavailableDefaultUsings)
         {
-            var set = new ReferenceSet();
-            int fromManaged = 0, fromUe = 0;
-            string managed = ManagedDir();
-            string ueDir = UeAssemblyDir();
-
-            foreach (string simple in SmallProfile)
-            {
-                // 黑名单照旧生效（TryAdd 内部判定），顺序契约不变（先加载的在前）。
-                if (UeSideProfile.Contains(simple))
-                {
-                    if (ueDir != null && set.TryAdd(Path.Combine(ueDir, simple + ".dll"), simple, blacklist))
-                        fromUe++;
-                    continue;
-                }
-
-                if (!Directory.Exists(managed)) continue;
-                string f = Path.Combine(managed, simple + ".dll");
-                if (File.Exists(f) && set.TryAdd(f, simple, blacklist)) fromManaged++;
-            }
-
-            unavailableDefaultUsings = DefaultUsings.Unavailable(DefaultUsings.BuiltIn, set.Contains);
-
-            report = $"refs: small={fromManaged + fromUe}/{ExpectedProfileCount} total={set.Paths.Count}"
-                + $" (managed={fromManaged} ue={fromUe})";
-            if (fromUe == 0 && !set.Contains("UniverseLib.Mono"))
-                report += "；⚠ UE 侧引用 UniverseLib.Mono.dll 缺失（UE 程序集目录="
-                    + (ueDir ?? "<不可判定>") + "）→ 本会话默认 using 剔除 "
-                    + string.Join(",", unavailableDefaultUsings.ToArray());
-
-            return set;
+            List<string> missingUe;
+            return ReferenceProfile.CollectFrom(ManagedDir(), UeAssemblyDir(), blacklist,
+                out report, out unavailableDefaultUsings, out missingUe);
         }
 
         /// <summary>

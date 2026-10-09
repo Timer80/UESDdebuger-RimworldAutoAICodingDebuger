@@ -19,6 +19,10 @@
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\RoslynScriptEvaluator.cs" Link="RoslynScriptEvaluator.cs" />
     <!-- 根因清扫轮（§17，追加 E）：纯决策逻辑（无 Unity/UE/Roslyn/mcs 依赖）链接进来做真值表离线断言 -->
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\EvaluatorSelector.cs" Link="EvaluatorSelector.cs" />
+    <!-- R2（§18）：引用集"档案 + 组装"纯逻辑（无 Verse/Unity/ExplorerCore 依赖）⇒ 可离线断言 -->
+    <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\ReferenceProfile.cs" Link="ReferenceProfile.cs" />
+    <!-- R1（§18）：mcs 侧语义 harness 需要真实的 Mono.CSharp（net35 mcs.dll，本仓库 vendor 副本） -->
+    <Reference Include="mcs"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\net35\mcs.dll</HintPath></Reference>
     <Reference Include="Microsoft.CodeAnalysis"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\Microsoft.CodeAnalysis.dll</HintPath></Reference>
     <Reference Include="Microsoft.CodeAnalysis.CSharp"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\Microsoft.CodeAnalysis.CSharp.dll</HintPath></Reference>
     <!-- 任务 5：RoslynCompiler.cs 触碰 ImmutableArray<Diagnostic>（CS0012 → 必须引用 Immutable）；

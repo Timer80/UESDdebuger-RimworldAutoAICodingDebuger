@@ -104,9 +104,26 @@ namespace UnityExplorer.RoslynBridge
             if (trimmedInput.Length > 0)
             {
                 char last = trimmedInput[trimmedInput.Length - 1];
-                // `}` 结尾（块/类型声明）与 `;` 结尾都是完整输入；其余补分号
-                //（末行有行注释时补的分号会落进注释——与旧逐语句补法同等行为，无回归）。
-                if (last != ';' && last != '}') toParse = code + ";";
+                // `}` 结尾（块/类型声明）与 `;` 结尾都是完整输入；其余补分号。
+                // §18 顺手修（F 残留）：末行是**行注释**时直接尾部追加会把 `;` 补进注释里
+                //（`x + 1 // note;` → 注释吃掉分号，语句仍缺分号）⇒ 改为插到注释标记**之前**。
+                // 只认"引号之外的第一个 //"（避免 `"http://x"` 这种字符串里的 // 被误判）。
+                if (last != ';' && last != '}')
+                {
+                    int commentAt = LineCommentIndex(trimmedInput);
+                    if (commentAt >= 0)
+                    {
+                        string head = trimmedInput.Substring(0, commentAt).TrimEnd();
+                        if (head.Length > 0 && head[head.Length - 1] != ';' && head[head.Length - 1] != '}')
+                            toParse = code.Substring(0, commentAt) + "; " + code.Substring(commentAt);
+                        else
+                            toParse = code;
+                    }
+                    else
+                    {
+                        toParse = code + ";";
+                    }
+                }
             }
 
             SyntaxTree tree = CSharpSyntaxTree.ParseText(toParse, new CSharpParseOptions(LanguageVersion.Latest));
@@ -158,7 +175,8 @@ namespace UnityExplorer.RoslynBridge
                         if (!HasAccessibility(fn.Modifiers))
                             fn = fn.AddModifiers(PublicToken());
                         classes.AppendLine(fn.ToFullString());
-                        if (!s_classes.Contains(lfs.Identifier.Text)) s_classes.Add(lfs.Identifier.Text);
+                        // R5c（复审次要项）：**不**把方法名登记进 s_classes —— 那是"类清单"，
+                        // 混进方法名会污染 GetClasses() 展示；只登记类型/委托名。
                     }
                     else if (stmt is LocalDeclarationStatementSyntax local && local.UsingKeyword == default)
                     {
@@ -477,6 +495,10 @@ namespace UnityExplorer.RoslynBridge
             }
 
             // 第二次：按错误归因剔除（CS0246/CS0103 的消息里带命名空间首段）
+            // R5a（复审次要项，已知偏保守，可接受）：归因用"首段 + 引号"匹配，CS0234
+            //（`'Planet' does not exist in namespace 'RimWorld'`）会把**有效**根项 `RimWorld` 一起剔除。
+            // 取舍：宁可少一条 using（有日志可查、用户可用 add_using_directive 补回），
+            // 也不要让"一条坏 using 拖垮整条 Roslyn 路径"（B1 的杀伤形态）复活。
             var blamed = new List<string>();
             foreach (string d in candidates)
             {
@@ -541,6 +563,24 @@ namespace UnityExplorer.RoslynBridge
         }
 
         /// <summary>
+        /// 返回 <paramref name="text"/> 里第一个"引号之外"的 `//` 位置（无则 -1）。
+        /// 只处理行注释定位这一件事：逐字符跟踪双引号/单引号状态与转义，够用且不引入新依赖。
+        /// </summary>
+        static int LineCommentIndex(string text)
+        {
+            bool inString = false, inChar = false;
+            for (int i = 0; i < text.Length - 1; i++)
+            {
+                char c = text[i];
+                if (c == '\\') { i++; continue; }              // 转义：跳过下一个字符
+                if (c == '"' && !inChar) { inString = !inString; continue; }
+                if (c == '\'' && !inString) { inChar = !inChar; continue; }
+                if (c == '/' && text[i + 1] == '/' && !inString && !inChar) return i;
+            }
+            return -1;
+        }
+
+        /// <summary>
         /// 嵌入类体的成员一律补足可访问性：生成类里的嵌套成员"无修饰符 = private"，
         /// 而后续提交是**派生类**（Submission_N+1 : Submission_N）——private 成员按简单名找不到
         /// （实测 `static int Twice(int a) => a*2;` 提交成功却在下一次提交报 CS0103 'Twice'）。
@@ -559,11 +599,15 @@ namespace UnityExplorer.RoslynBridge
 
             var method = m as MethodDeclarationSyntax;
             if (method != null)
-                return HasAccessibility(method.Modifiers) ? m : method.AddModifiers(PublicToken());
+                // R5b：显式接口实现（`void IFoo.Bar(){}`）**禁止**可访问性修饰符，加了会 CS0106；
+                // 这类成员只在"用户显式实现接口"时出现（此前被静默丢弃，现在至少能编译）。
+                return method.ExplicitInterfaceSpecifier != null || HasAccessibility(method.Modifiers)
+                    ? m : method.AddModifiers(PublicToken());
 
             var prop = m as PropertyDeclarationSyntax;
             if (prop != null)
-                return HasAccessibility(prop.Modifiers) ? m : prop.AddModifiers(PublicToken());
+                return prop.ExplicitInterfaceSpecifier != null || HasAccessibility(prop.Modifiers)
+                    ? m : prop.AddModifiers(PublicToken());
 
             var field = m as FieldDeclarationSyntax;
             if (field != null)

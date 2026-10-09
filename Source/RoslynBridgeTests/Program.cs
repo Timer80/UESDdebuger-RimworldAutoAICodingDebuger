@@ -44,6 +44,10 @@ namespace RoslynBridgeTests
             TestAnonymousTypeReadable();
             TestEvaluatorSelection();
             TestUsingPrimeEquivalence();
+            // 复审修订轮（§18）
+            TestMcsErrorCountingSemantics();
+            TestReferenceProfileUeSide();
+            TestR5MinorFixes();
             Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
             return failures == 0 ? 0 : 1;
         }
@@ -563,6 +567,128 @@ namespace RoslynBridgeTests
             Check("C：UsingRoslyn(Roslyn)=true", EvaluatorSelector.UsingRoslyn(EvaluatorChoice.Roslyn));
             Check("C：UsingRoslyn(mcs)=false", !EvaluatorSelector.UsingRoslyn(EvaluatorChoice.Mcs));
             Check("C：UsingRoslyn(Disable)=false", !EvaluatorSelector.UsingRoslyn(EvaluatorChoice.Disable));
+        }
+
+        /// <summary>
+        /// R1（§18）mcs 语义 harness：用**真实的 Mono.CSharp** 管线验证失败判定口径（复审反编译结论）。
+        /// 关键事实：`Evaluator.Compile` 开头调 `ctx.Report.Printer.Reset()`（把 ErrorsCount 清零）
+        /// ⇒ ErrorsCount 是**本次**错误数、**不是粘性计数器** ⇒ 判失败必须用 `ErrorsCount > 0`；
+        /// 而"与上一次之差 > 0"（§17.3 的旧口径）在"连续两次失败且错误数相同"时会**静默假成功**。
+        /// </summary>
+        static void TestMcsErrorCountingSemantics()
+        {
+            var sw = new System.IO.StringWriter();
+            var printer = new Mono.CSharp.StreamReportPrinter(sw);
+            var settings = new Mono.CSharp.CompilerSettings
+            {
+                Version = Mono.CSharp.LanguageVersion.Experimental,
+                GenerateDebugInfo = false,
+                StdLib = true,
+                Target = Mono.CSharp.Target.Library,
+                WarningLevel = 0,
+                EnhancedWarnings = false,
+            };
+            var evaluator = new Mono.CSharp.Evaluator(new Mono.CSharp.CompilerContext(settings, printer));
+
+            Func<string, int> compileErrors = input =>
+            {
+                try { evaluator.Compile(input, out Mono.CSharp.CompiledMethod m); }
+                catch { /* 编译期异常也读本次计数 */ }
+                return printer.ErrorsCount;
+            };
+
+            int e1 = compileErrors("class {");
+            Check("R1 mcs：失败编译 → 本次 ErrorsCount > 0", e1 > 0, "count=" + e1);
+
+            int prev = e1;
+            int e2 = compileErrors("class {");
+            Check("R1 mcs：连续两次同样失败 → 错误数相同（⇒ 每次编译前被 Reset 清零）",
+                e2 > 0 && e2 == prev, "prev=" + prev + " now=" + e2);
+            Check("R1 mcs：新口径 ErrorsCount>0 判失败（正确）", e2 > 0);
+            Check("R1 mcs：旧口径 Δ>0 在同一场景判**成功** = RED 依据（§18.1 勘误）",
+                !(e2 - prev > 0), "Δ=" + (e2 - prev));
+
+            int e3 = compileErrors("int r1ok = 1;");
+            Check("R1 mcs：成功编译后 ErrorsCount 归零", e3 == 0, "count=" + e3);
+            Check("R1 mcs：报告文本仍累积（故长度增量只用于取本次文本）", sw.ToString().Length > 0);
+        }
+
+        /// <summary>
+        /// R2（§18）：UE 侧命中必须按**文件存在性**判定。原实现只判 `ueDir != null`
+        /// ⇒ 目录在而 dll 缺失时名字仍进集合 ⇒ report 假报 22/22、响亮告警永不触发、
+        /// `DefaultUsings.Unavailable` 判为可用 ⇒ `using UniverseLib;` 不剔除 ⇒ B1 症状静默回归。
+        /// </summary>
+        static void TestReferenceProfileUeSide()
+        {
+            string managed = FindUpwards("RimWorldWin64_Data\\Managed");
+            string ueAssemblies = FindUpwards("Assemblies");
+            if (managed == null || ueAssemblies == null)
+            {
+                Check("R2：前置（能找到本体 Managed 与 UE Assemblies）", false,
+                    "managed=" + managed + " ue=" + ueAssemblies);
+                return;
+            }
+
+            string report;
+            System.Collections.Generic.List<string> unavailable, missingUe;
+
+            var set1 = ReferenceProfile.CollectFrom(managed, ueAssemblies, "",
+                out report, out unavailable, out missingUe);
+            Check("R2：UE 侧齐备 → 集合 = 22", set1.Paths.Count == 22, report);
+            Check("R2：report 分母 22 且 ue=1", report.Contains("/22") && report.Contains("ue=1"), report);
+            Check("R2：齐备时无缺失、无可剔默认 using",
+                missingUe.Count == 0 && unavailable.Count == 0, report);
+
+            // 目录存在但 dll 缺失：用本体 Data 目录（存在且无 UniverseLib.Mono.dll）
+            string noUe = System.IO.Path.GetDirectoryName(managed);
+            var set2 = ReferenceProfile.CollectFrom(managed, noUe, "",
+                out report, out unavailable, out missingUe);
+            Check("R2：UE 侧 dll 缺失 → 集合 = 21（旧码此处假报 22 且静默）",
+                set2.Paths.Count == 21, report);
+            Check("R2：ue=0 且告警点名缺失件与目录",
+                report.Contains("ue=0") && report.Contains("UniverseLib.Mono") && report.Contains(noUe), report);
+            Check("R2：缺件 ⇒ UniverseLib 进'不可用默认 using'（护栏据此剔除）",
+                unavailable.Contains("UniverseLib"), string.Join(",", unavailable.ToArray()));
+
+            var set3 = ReferenceProfile.CollectFrom(managed, null, "",
+                out report, out unavailable, out missingUe);
+            Check("R2：ueDir=null 也判为缺件（不抛、不假报）",
+                set3.Paths.Count == 21 && unavailable.Contains("UniverseLib"), report);
+
+            var set4 = ReferenceProfile.CollectFrom(managed, ueAssemblies, "UniverseLib.Mono",
+                out report, out unavailable, out missingUe);
+            Check("R2：黑名单对 UE 侧新增项生效（21 + 告警）",
+                set4.Paths.Count == 21 && !set4.Contains("UniverseLib.Mono"), report);
+        }
+
+        /// <summary>R5（§18）次要项回归：显式接口实现不被加 public、方法名不污染 GetClasses、末行注释不吃分号。</summary>
+        static void TestR5MinorFixes()
+        {
+            var refs = ReferenceSetForThisProcess();
+
+            var s = new ReplSession(refs);
+            var def = s.Submit("public interface IFoo { int Bar(); } public class Impl : IFoo { int IFoo.Bar() => 7; }");
+            Check("R5b：显式接口实现可编译（旧行为：补 public ⇒ CS0106）", def.Success, def.Diagnostics);
+            var use = s.Submit("((IFoo)new Impl()).Bar()");
+            Check("R5b：显式接口实现可用", use.Success && s.LastValue?.ToString() == "7",
+                "diag=" + use.Diagnostics);
+
+            var s2 = new ReplSession(refs);
+            var fn = s2.Submit("static int H1() => 1;");
+            Check("R5c：方法声明提交成功", fn.Success, fn.Diagnostics);
+            Check("R5c：GetClasses 不混入方法名（只登记类型/委托）",
+                !s2.GetClasses().Contains("H1"), s2.GetClasses());
+            var fnUse = s2.Submit("H1()");
+            Check("R5c：方法仍跨提交可用", fnUse.Success && s2.LastValue?.ToString() == "1",
+                "diag=" + fnUse.Diagnostics);
+
+            var s3 = new ReplSession(refs);
+            var cmt = s3.Submit("var cmt = 3 // trailing comment");
+            Check("§18：末行注释不吃掉补的分号（旧码把 ';' 补进注释 ⇒ 语法错误）",
+                cmt.Success, "diag=" + cmt.Diagnostics + " src=" + cmt.GeneratedSource);
+            var cmtUse = s3.Submit("cmt // 带注释的表达式");
+            Check("§18：带行注释的表达式求值正确", cmtUse.Success && s3.LastValue?.ToString() == "3",
+                "diag=" + cmtUse.Diagnostics);
         }
 
         /// <summary>B4：批量预置与逐条提交**行为等价**，且成本可见（打印实测毫秒，供报告引用）。</summary>

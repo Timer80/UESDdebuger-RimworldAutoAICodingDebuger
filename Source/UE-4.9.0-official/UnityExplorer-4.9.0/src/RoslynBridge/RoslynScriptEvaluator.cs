@@ -23,8 +23,17 @@ namespace UnityExplorer.RoslynBridge
 
         public RoslynScriptEvaluator(IEnumerable<string> referencePaths, string blacklist = "",
             bool allowModTypeResolution = false)
+            : this(referencePaths, blacklist, allowModTypeResolution, ReplSession.HostBaseTypeName) { }
+
+        /// <summary>
+        /// §19：可注入生成类继承链根（<paramref name="hostBaseTypeName"/>）。生产走上面的公开 ctor
+        /// （链根 = 助手基类）；离线测试传 null 绕过"测试进程里没有宿主程序集"，
+        /// 以便继续单测门面自身语义（Evaluate/GetVars/AddUsing/Dispose）。
+        /// </summary>
+        internal RoslynScriptEvaluator(IEnumerable<string> referencePaths, string blacklist,
+            bool allowModTypeResolution, string hostBaseTypeName)
         {
-            s_session = new ReplSession(referencePaths);
+            s_session = new ReplSession(referencePaths, hostBaseTypeName);
             AllowModTypeResolution = allowModTypeResolution;
             IsAvailable = true;
         }

@@ -21,16 +21,28 @@ namespace UnityExplorer.RoslynBridge
             "System", "System.Linq", "System.Text", "System.Collections", "System.Collections.Generic",
             "System.Reflection", "UnityEngine", "UniverseLib",
             "Verse", "RimWorld", "Verse.AI", "RimWorld.Planet",
+            // §19：UE 自身命名空间（由**宿主自引用**提供）——裸名 ConsoleController/InspectorManager 可直接用。
+            // ⚠️ 既有 config.cfg 里存的是**旧 12 项字符串**（配置值优先于默认值）⇒ 老配置不会自动获得本项；
+            //    助手本身不依赖它（继承成员 + 全限定名都能用），属便利项。
+            "UnityExplorer",
         };
 
         /// <summary>
-        /// 默认 using 根命名空间 → **提供该命名空间的程序集简单名**（B1 一致性表，12/12 全覆盖；
+        /// "来源 = 宿主自引用（UE 自己的程序集）"标记（§19）。UE 程序集的简单名随配置变化
+        /// （`UnityExplorer.STANDALONE.Mono` / `UnityExplorer.ML.Mono` …），故用标记代替硬编码；
+        /// `ReferenceProfile.CollectFrom` 把它翻译成"自引用是否真的进了引用集"。
+        /// </summary>
+        public const string SelfAssemblyToken = "@self";
+
+        /// <summary>
+        /// 默认 using 根命名空间 → **提供该命名空间的程序集简单名**（B1 一致性表，13/13 全覆盖；
         /// 由测试 <c>TestDefaultUsingsSources</c> 断言"每个 BuiltIn 项都有来源"，新增默认项漏标即红）。
         /// 用途：`ReferenceScanner.Collect` 用引用集实际可用性过滤默认 using（缺失→剔除+明确日志），
         /// 把"一个 using 拖垮整条 Roslyn 路径"从**硬编码特判**升级为**数据驱动护栏**。
         /// 说明：Verse/RimWorld/Verse.AI/RimWorld.Planet 的根命名空间都在本体 Assembly-CSharp；
         ///       System.* 都在 mscorlib（System.Core 只需为 System.Linq 提供 Enumerable 的根命名空间
-        ///       —— using 解析按**根命名空间**判定，故标 mscorlib 与标 System.Core 等价，取更保守的 mscorlib）。
+        ///       —— using 解析按**根命名空间**判定，故标 mscorlib 与标 System.Core 等价，取更保守的 mscorlib）；
+        ///       `UnityExplorer` 在宿主自引用里（见 <see cref="SelfAssemblyToken"/>）。
         /// </summary>
         public static readonly Dictionary<string, string> SourceAssembly = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -46,6 +58,7 @@ namespace UnityExplorer.RoslynBridge
             { "RimWorld", "Assembly-CSharp" },
             { "Verse.AI", "Assembly-CSharp" },
             { "RimWorld.Planet", "Assembly-CSharp" },
+            { "UnityExplorer", SelfAssemblyToken },
         };
 
         /// <summary>该默认 using 需要引用集里出现哪个程序集简单名（未标注 → 返回 null = 无法判定，按可用处理）。</summary>

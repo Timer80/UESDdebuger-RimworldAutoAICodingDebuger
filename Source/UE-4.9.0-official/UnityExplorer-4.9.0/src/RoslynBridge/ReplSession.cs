@@ -35,6 +35,8 @@ namespace UnityExplorer.RoslynBridge
         int s_submission;
         bool s_disposed;
         Assembly s_lastAssembly;
+        /// <summary>生成类继承链根（默认 <see cref="HostBaseTypeName"/>；离线测试可注入以绕过宿主程序集）。</summary>
+        readonly string s_hostBaseTypeName;
 
         public object LastValue { get; private set; }
         public CompileResult LastResult { get; private set; }
@@ -42,13 +44,44 @@ namespace UnityExplorer.RoslynBridge
         // A1（合并修复轮）观测点：引用集大小恒等于入参集合（开关不得放大它，测试断言用）。
         public int ReferenceCount => s_referencePaths.Count;
 
+        /// <summary>§19：生成类的**继承链根** = 宿主助手基类（在 UE 程序集里，见 <see cref="ReplHostBase"/>）。</summary>
+        public const string HostBaseTypeName = "UnityExplorer.RoslynBridge.ReplHostBase";
+
+        /// <summary>
+        /// §19 纯函数（离线可断言）：第 <paramref name="submissionIndex"/> 个提交（从 1 起）的**基类全名**。
+        /// 第 1 个提交继承**助手基类**（于是 `Log(...)`/`Inspect(...)`/`GetVars()` 等裸名在 `Run()` 里直接可用，
+        /// 且**继承成员优先于 using 导入的类型**——这正是 mcs 路径 `ScriptInteraction.Log` 遮蔽 `Verse.Log` 类型的机制）；
+        /// 之后每个提交继承上一个提交，形成线性链（与改造前一致，只换了链根）。
+        /// 调用方需保证 <paramref name="hostBaseTypeName"/> 在提交编译的引用集里（宿主自引用，§19 (i)）。
+        /// </summary>
+        public static string BaseTypeNameFor(int submissionIndex, string hostBaseTypeName = HostBaseTypeName)
+            => submissionIndex <= 1 ? hostBaseTypeName : "Submission_" + (submissionIndex - 1);
+
         public ReplSession(IEnumerable<string> referencePaths)
+            : this(referencePaths, HostBaseTypeName) { }
+
+        /// <summary>
+        /// <paramref name="hostBaseTypeName"/>：生成类继承链根（默认 <see cref="HostBaseTypeName"/>）。
+        /// 离线测试无法解析宿主程序集，故留此注入位以继续单测 REPL 机制本身
+        /// （宿主基类的形态另有 §19 的生成源码/纯函数断言覆盖）。
+        /// </summary>
+        public ReplSession(IEnumerable<string> referencePaths, string hostBaseTypeName)
         {
             s_referencePaths = new List<string>(referencePaths);
+            s_hostBaseTypeName = string.IsNullOrEmpty(hostBaseTypeName) ? null : hostBaseTypeName;
             // 跨提交继承链的运行期绑定：Assembly.Load(byte[]) 产物不进默认加载上下文，
             // Submission_N 按名解析基类 Submission_{N-1} 时默认探测必失败（实测
             // FileNotFoundException → ReflectionTypeLoadException → GetType 返回 null）。
             // 自挂 AssemblyResolve：只应答"请求方是本会话提交程序集"且本会话按名持有的程序集。
+            // §19 追加：把**宿主程序集**（自引用）也登记进来——提交类现在还要解析基类 `ReplHostBase`，
+            // 而 Unity Mono 的 typeref 绑定一向脆弱（C.5 全轮教训）：宿主虽已在默认上下文，
+            // 仍按名兜底应答一次（Identity/FullName 匹配，只有本会话提交程序集发起的请求才走这里）。
+            try
+            {
+                Assembly host = Assembly.GetExecutingAssembly();
+                if (host != null && !s_sessionAssemblies.Contains(host)) s_sessionAssemblies.Add(host);
+            }
+            catch { /* 动态程序集无 GetName：跳过兜底，正常绑定仍可解析宿主 */ }
             // 生命周期契约（任务 7 消费方义务）：会话替换/控制台卸载时调用 Dispose() 摘钩；
             // Dispose 后不得再 Submit；不 Dispose 也无害（唯一名下死处理器只直通 null）。
             AppDomain.CurrentDomain.AssemblyResolve += ResolveSessionAssembly;
@@ -89,7 +122,9 @@ namespace UnityExplorer.RoslynBridge
 
             int n = s_submission + 1;
             string className = "Submission_" + n;
-            string baseName = n == 1 ? null : "Submission_" + (n - 1);
+            // §19：只动继承链根——n==1 现在继承**助手基类**（原来是"无基类 + 自声明 __result"），
+            // n>1 仍是上一个提交。`__result` 由助手基类承载（见 ReplHostBase），故此处不再声明它。
+            string baseName = BaseTypeNameFor(n, s_hostBaseTypeName);
 
             // 输入归一化（§17 根因清扫，替换原"逐语句补分号"补丁）：
             // REPL 输入常缺末尾分号；**缺分号时解析器的错误恢复会把后面的语句并进前一条声明**——
@@ -299,6 +334,8 @@ namespace UnityExplorer.RoslynBridge
             foreach (string d in pendingUsings)
                 if (!emittedUsings.Contains(d)) emittedUsings.Add(d);
             src.AppendLine(string.Join(Environment.NewLine, emittedUsings.ToArray()));
+            // §19：继承链根是助手基类；`__result` 现由基类承载（ReplHostBase.__result），故此处不再声明。
+            // 若注入的 hostBaseTypeName 为空（离线测试用"无基类"形态），则退回自声明 __result（等价旧行为）。
             src.AppendLine($"public class {className}" + (baseName != null ? " : " + baseName : ""));
             src.AppendLine("{");
             if (baseName == null) src.AppendLine("    public static object __result;");

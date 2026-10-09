@@ -48,6 +48,12 @@ namespace RoslynBridgeTests
             TestMcsErrorCountingSemantics();
             TestReferenceProfileUeSide();
             TestR5MinorFixes();
+            // §19 REPL 助手轮
+            TestHostBaseTypeNameFor();
+            TestHostBaseGeneratedSourceShape();
+            TestHostBaseSignatureAlignment();
+            TestHostSelfReferenceNeeded();
+            TestHostHelperNameShadowing();
             Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
             return failures == 0 ? 0 : 1;
         }
@@ -101,7 +107,7 @@ namespace RoslynBridgeTests
         static void TestReplSession()
         {
             var refs = ReferenceSetForThisProcess();
-            var s = new ReplSession(refs);
+            var s = NewSession(refs);
 
             var r1 = s.Submit("var x = 5;");
             Check("提交1 无错误", r1.ErrorCount == 0, r1.Diagnostics);
@@ -150,7 +156,7 @@ namespace RoslynBridgeTests
                 "value=" + s.LastValue + " diag=" + afterBoom.Diagnostics);
 
             // 修复轮 1 #3：会话唯一程序集前缀 → 多会话并存互不串值，Dispose 幂等摘钩。
-            var s2 = new ReplSession(refs);
+            var s2 = NewSession(refs);
             var q1 = s2.Submit("var a = 1;");
             var q2 = s2.Submit("a + 41");
             Check("多会话：第二会话独立求值", q1.ErrorCount == 0 && q2.ErrorCount == 0
@@ -179,7 +185,7 @@ namespace RoslynBridgeTests
         static void TestRoslynEvaluatorFacade()
         {
             var refs = ReferenceSetForThisProcess();
-            using (var ev = new RoslynScriptEvaluator(refs))
+            using (var ev = NewEvaluator(refs))
             {
                 Check("门面可用", ev.IsAvailable);
 
@@ -200,8 +206,8 @@ namespace RoslynBridgeTests
             // 判别力：旧码构造器无第三参 → 本段编译期 RED（CS1729/CS1501）；引用计数断言证伪
             // 旧三参设计"把 ModAssemblyPaths 预加进引用集"行为的复活。
             // ⚠️ 登记语句：任务 13 自愈器落地前该开关不改变引用集行为（转对端会话登记为待验收项）。
-            using (var evT = new RoslynScriptEvaluator(refs, "", true))
-            using (var evF = new RoslynScriptEvaluator(refs, "", false))
+            using (var evT = NewEvaluator(refs, "", true))
+            using (var evF = NewEvaluator(refs, "", false))
             {
                 Check("A1 开关true 构造往返", evT.AllowModTypeResolution);
                 Check("A1 开关false（默认）构造往返", !evF.AllowModTypeResolution);
@@ -214,7 +220,7 @@ namespace RoslynBridgeTests
             // 坑 1（任务 6 生命周期契约）：求值器 Dispose 必须转发 s_session.Dispose（摘 AssemblyResolve 钩）。
             // 判别推演：若 Dispose 为空转发（简报原文），此处 Evaluate("1 + 1") 会静默成功 → 断言 FAIL。
             string outp2;
-            var ev2 = new RoslynScriptEvaluator(refs);
+            var ev2 = NewEvaluator(refs);
             ev2.Dispose();
             Check("Dispose 后 Evaluate 返回 false", !ev2.Evaluate("1 + 1", out outp2), outp2);
         }
@@ -225,6 +231,17 @@ namespace RoslynBridgeTests
             return ev.GetUsing().Contains("System.Text");
         }
 
+        /// <summary>
+        /// §19：离线测试用"无宿主基类"形态构造会话（注入 null）——宿主程序集（UE）在测试进程里不存在，
+        /// 若用生产默认（继承 ReplHostBase）所有离线提交都会 CS0246 而失去意义。
+        /// 生产形态（默认 ctor + 继承 ReplHostBase）由 TestHostBase* 三个用例单独断言。
+        /// </summary>
+        /// <summary>§19：离线门面（注入 null 宿主基类，理由同 NewSession）。</summary>
+        static RoslynScriptEvaluator NewEvaluator(System.Collections.Generic.IEnumerable<string> refs,
+            string blacklist = "", bool allowMod = false)
+            => new RoslynScriptEvaluator(refs, blacklist, allowMod, null);
+        static ReplSession NewSession(System.Collections.Generic.IEnumerable<string> refs)
+            => new ReplSession(refs, null);
         static System.Collections.Generic.List<string> ReferenceSetForThisProcess()
         {
             var list = new System.Collections.Generic.List<string>();
@@ -328,7 +345,7 @@ namespace RoslynBridgeTests
             var refs = ReferenceSetForThisProcess();
 
             // ① 单条失败 using 不得留表
-            var s1 = new ReplSession(refs);
+            var s1 = NewSession(refs);
             var bad = s1.Submit("using UniverseLib;");       // 离线引用集里没有 UniverseLib
             Check("B1/D ①：无用引用的 using 提交失败（前置）", !bad.Success, bad.Diagnostics);
             Check("B1/D ①：失败 using 未进会话表", s1.GetUsing().IndexOf("UniverseLib", StringComparison.Ordinal) < 0,
@@ -339,7 +356,7 @@ namespace RoslynBridgeTests
                 "diag=" + after.Diagnostics);
 
             // ② 批量预置：不可用项被剔除、可用项保留、会话不毒化
-            var s2 = new ReplSession(refs);
+            var s2 = NewSession(refs);
             string diag;
             var accepted = s2.AddUsings(new[] { "System.Linq", "UniverseLib", "System.Text" }, out diag);
             Check("B1/D ②：批量预置剔除不可用项（保留 2 项）",
@@ -377,7 +394,7 @@ namespace RoslynBridgeTests
         {
             var refs = ReferenceSetForThisProcess();
 
-            var s = new ReplSession(refs);
+            var s = NewSession(refs);
             var def = s.Submit("public record Point(int X, int Y);");
             Check("B2 回归：record 提交成功", def.Success, def.Diagnostics);
             var use = s.Submit("new Point(3, 4).X + new Point(3, 4).Y");
@@ -385,14 +402,14 @@ namespace RoslynBridgeTests
                 use.Success && s.LastValue?.ToString() == "7", "diag=" + use.Diagnostics);
             Check("B2 回归：GetClasses 含 Point", s.GetClasses().Contains("Point"), s.GetClasses());
 
-            var s2 = new ReplSession(refs);
+            var s2 = NewSession(refs);
             var rs = s2.Submit("public record struct Vec(int X, int Y);");
             Check("B2 回归：record struct 提交成功", rs.Success, rs.Diagnostics);
             var use2 = s2.Submit("new Vec(2, 5).X * new Vec(2, 5).Y");
             Check("B2 回归：record struct 后续提交可用", use2.Success && s2.LastValue?.ToString() == "10",
                 "diag=" + use2.Diagnostics + " src=" + use2.GeneratedSource);
 
-            var s3 = new ReplSession(refs);
+            var s3 = NewSession(refs);
             var dg = s3.Submit("public delegate int Doubler(int a);");
             Check("B2 清扫：delegate 声明提交成功（旧码静默丢弃）", dg.Success, dg.Diagnostics);
             var du = s3.Submit("Doubler d = a => a * 2; d(21)");
@@ -431,7 +448,7 @@ namespace RoslynBridgeTests
 
             foreach (var c in cases)
             {
-                var s = new ReplSession(refs);
+                var s = NewSession(refs);
                 var d1 = s.Submit(c.Def);
                 bool ok = d1.Success;
                 string why = d1.Success ? "" : FirstError(d1.Diagnostics);
@@ -449,7 +466,7 @@ namespace RoslynBridgeTests
 
             // 已知语法歧义（本轮实测，**非本实现引入**）：Roslyn 把 `a.b * c.d;` 解析成"指针类型局部声明"，
             // 与乘号表达式同形。此处如实记录，报告 §17 写清未做理由与修法（词法切分 + 括号消歧）。
-            var sAmb = new ReplSession(refs);
+            var sAmb = NewSession(refs);
             sAmb.Submit("var pp = new System.Drawing.Point(2, 3);");   // 该类型在离线引用集里可能没有 → 忽略结果
             var amb = sAmb.Submit("1 * 2;");
             Console.WriteLine("MATRIX 顶层 `expr.A * expr.B`（乘号 vs 指针类型歧义）= "
@@ -471,7 +488,7 @@ namespace RoslynBridgeTests
         {
             var refs = ReferenceSetForThisProcess();
 
-            var s = new ReplSession(refs);
+            var s = NewSession(refs);
             var r1 = s.Submit("var noSemi = 3");            // 无分号声明
             Check("§17：裸声明（无分号）提交成功", r1.Success, r1.Diagnostics);
             var r2 = s.Submit("noSemi * 2");                // 无分号表达式
@@ -479,7 +496,7 @@ namespace RoslynBridgeTests
                 "diag=" + r2.Diagnostics);
 
             // 多条语句同一行、末条缺分号：旧码会并把两条并进一条声明（生成垃圾字段）
-            var s2 = new ReplSession(refs);
+            var s2 = NewSession(refs);
             var r3 = s2.Submit("var a = 4; var b = 5; a + b");
             Check("§17：同行多语句 + 末条缺分号 → 正确求值（旧码生成垃圾字段）",
                 r3.Success && s2.LastValue?.ToString() == "9", "diag=" + r3.Diagnostics + " src=" + r3.GeneratedSource);
@@ -488,7 +505,7 @@ namespace RoslynBridgeTests
         /// <summary>追加 F.2：未识别形态必须**响亮拒绝**（旧码静默丢弃 ⇒ 后续"类型莫名找不到"）。</summary>
         static void TestUnrecognizedMemberRejected()
         {
-            var s = new ReplSession(ReferenceSetForThisProcess());
+            var s = NewSession(ReferenceSetForThisProcess());
             var r = s.Submit("namespace Foo { public class Bar { } }");
             Check("F.2：namespace 成员被明确拒绝（不静默丢弃）",
                 !r.Success && r.Diagnostics.Contains("不支持的顶层成员形态"), r.Diagnostics);
@@ -502,7 +519,7 @@ namespace RoslynBridgeTests
         /// <summary>B3：诊断**不得跨提交累积**（Important；这条污染曾把两个 agent 一起带偏）。</summary>
         static void TestDiagnosticsDoNotLeakAcrossSubmissions()
         {
-            var s = new ReplSession(ReferenceSetForThisProcess());
+            var s = NewSession(ReferenceSetForThisProcess());
 
             var fail = s.Submit("this is not valid C# at all");
             Check("B3：非法提交失败（前置）", !fail.Success && !string.IsNullOrEmpty(fail.Diagnostics));
@@ -524,7 +541,7 @@ namespace RoslynBridgeTests
         /// <summary>B3：匿名类型不再产生"半截无意义"的诊断 —— 按 object 提升 + 可读提示。</summary>
         static void TestAnonymousTypeReadable()
         {
-            var s = new ReplSession(ReferenceSetForThisProcess());
+            var s = NewSession(ReferenceSetForThisProcess());
             var decl = s.Submit("var anon = new { Name = \"a\", Age = 1 };");
             Check("B3：匿名类型声明提交成功（旧码生成非法字段类型 ⇒ 解析错误）", decl.Success, decl.Diagnostics);
             Check("B3：给出可读提示（已按 object 提升）",
@@ -631,13 +648,23 @@ namespace RoslynBridgeTests
 
             string report;
             System.Collections.Generic.List<string> unavailable, missingUe;
+            string ueSelf = FindBuiltUeAssembly();
 
-            var set1 = ReferenceProfile.CollectFrom(managed, ueAssemblies, "",
-                out report, out unavailable, out missingUe);
-            Check("R2：UE 侧齐备 → 集合 = 22", set1.Paths.Count == 22, report);
-            Check("R2：report 分母 22 且 ue=1", report.Contains("/22") && report.Contains("ue=1"), report);
-            Check("R2：齐备时无缺失、无可剔默认 using",
+            // §19：默认 using 现在含 `UnityExplorer`（来源 = 宿主自引用 `@self`）⇒ "齐备"必须连自引用一起给
+            var set1 = ReferenceProfile.CollectFrom(managed, ueAssemblies, ueSelf,
+                "UnityExplorer.STANDALONE.Mono", "", out report, out unavailable, out missingUe);
+            Check("R2/§19：UE 侧 + 宿主自引用齐备 → 集合 = 23", set1.Paths.Count == 23, report);
+            Check("R2：report 口径 small=22/22 且 ue=1 self=1",
+                report.Contains("small=22/22") && report.Contains("ue=1") && report.Contains("self=1"), report);
+            Check("R2/§19：齐备时无缺失、无可剔默认 using",
                 missingUe.Count == 0 && unavailable.Count == 0, report);
+
+            // 同一输入但**不给自引用** ⇒ self=0 + 响亮告警 + `UnityExplorer` 进剔除表（护栏即时生效）
+            ReferenceProfile.CollectFrom(managed, ueAssemblies, "",
+                out report, out unavailable, out missingUe);
+            Check("R2/§19：缺宿主自引用 ⇒ self=0 + 告警 + 剔除 UnityExplorer（不静默）",
+                report.Contains("self=0") && report.Contains("宿主自引用缺失")
+                && unavailable.Contains("UnityExplorer"), report);
 
             // 目录存在但 dll 缺失：用本体 Data 目录（存在且无 UniverseLib.Mono.dll）
             string noUe = System.IO.Path.GetDirectoryName(managed);
@@ -666,14 +693,14 @@ namespace RoslynBridgeTests
         {
             var refs = ReferenceSetForThisProcess();
 
-            var s = new ReplSession(refs);
+            var s = NewSession(refs);
             var def = s.Submit("public interface IFoo { int Bar(); } public class Impl : IFoo { int IFoo.Bar() => 7; }");
             Check("R5b：显式接口实现可编译（旧行为：补 public ⇒ CS0106）", def.Success, def.Diagnostics);
             var use = s.Submit("((IFoo)new Impl()).Bar()");
             Check("R5b：显式接口实现可用", use.Success && s.LastValue?.ToString() == "7",
                 "diag=" + use.Diagnostics);
 
-            var s2 = new ReplSession(refs);
+            var s2 = NewSession(refs);
             var fn = s2.Submit("static int H1() => 1;");
             Check("R5c：方法声明提交成功", fn.Success, fn.Diagnostics);
             Check("R5c：GetClasses 不混入方法名（只登记类型/委托）",
@@ -682,7 +709,7 @@ namespace RoslynBridgeTests
             Check("R5c：方法仍跨提交可用", fnUse.Success && s2.LastValue?.ToString() == "1",
                 "diag=" + fnUse.Diagnostics);
 
-            var s3 = new ReplSession(refs);
+            var s3 = NewSession(refs);
             var cmt = s3.Submit("var cmt = 3 // trailing comment");
             Check("§18：末行注释不吃掉补的分号（旧码把 ';' 补进注释 ⇒ 语法错误）",
                 cmt.Success, "diag=" + cmt.Diagnostics + " src=" + cmt.GeneratedSource);
@@ -691,20 +718,337 @@ namespace RoslynBridgeTests
                 "diag=" + cmtUse.Diagnostics);
         }
 
+        // ══════════════ §19 REPL 助手轮：宿主自引用 + ReplHostBase ══════════════
+
+        /// <summary>§19 ①：baseName 取值逻辑（纯函数，离线可断言）。</summary>
+        static void TestHostBaseTypeNameFor()
+        {
+            Check("§19：第 1 个提交的基类 = 助手基类",
+                ReplSession.BaseTypeNameFor(1) == ReplSession.HostBaseTypeName
+                && ReplSession.HostBaseTypeName == "UnityExplorer.RoslynBridge.ReplHostBase",
+                ReplSession.BaseTypeNameFor(1));
+            Check("§19：第 2/3 个提交仍继承上一个提交",
+                ReplSession.BaseTypeNameFor(2) == "Submission_1"
+                && ReplSession.BaseTypeNameFor(3) == "Submission_2",
+                ReplSession.BaseTypeNameFor(2) + "," + ReplSession.BaseTypeNameFor(3));
+            Check("§19：可注入宿主基类名（离线测试用）",
+                ReplSession.BaseTypeNameFor(1, "object") == "object");
+        }
+
+        /// <summary>§19 ③：生产形态的生成源码——链根是助手基类，且 `__result` 交由基类承载。</summary>
+        static void TestHostBaseGeneratedSourceShape()
+        {
+            var s = new ReplSession(ReferenceSetForThisProcess());   // **生产默认**：继承 ReplHostBase
+            var r = s.Submit("1 + 1");
+            string src = r.GeneratedSource;
+            Check("§19：生成类链根 = ReplHostBase",
+                src.Contains("public class Submission_1 : UnityExplorer.RoslynBridge.ReplHostBase"), src);
+            Check("§19：生成类不再自声明 __result（由基类承载，避免值通道丢失）",
+                !src.Contains("public static object __result;"), src);
+            Check("§19：离线无宿主自引用时如实证诊断 ReplHostBase（生产侧由自引用解决）",
+                !r.Success && r.Diagnostics.Contains("ReplHostBase"), r.Diagnostics);
+        }
+
+        /// <summary>
+        /// §19 ②：助手基类成员与 `ScriptInteraction` 的**可移植子集逐一对齐**。
+        /// 用 Roslyn 做**源码级结构断言**（名字 + static + 返回/参数类型文本）：
+        /// 不必装载宿主程序集、不依赖任何 UE 类型，比反射更稳且同样可判别。
+        /// </summary>
+        static void TestHostBaseSignatureAlignment()
+        {
+            string host = FindFileUpwards("ReplHostBase.cs");
+            string mcsSide = FindFileUpwards("ScriptInteraction.cs");
+            if (host == null || mcsSide == null)
+            {
+                Check("§19：前置（能找到 ReplHostBase.cs 与 ScriptInteraction.cs）", false,
+                    "host=" + host + " mcs=" + mcsSide);
+                return;
+            }
+
+            var hostMembers = MemberSignatures(System.IO.File.ReadAllText(host), "ReplHostBase");
+            var mcsMembers = MemberSignatures(System.IO.File.ReadAllText(mcsSide), "ScriptInteraction");
+
+            string[] portable =
+            {
+                "CurrentTarget", "AllTargets", "Log", "Start", "Stop",
+                "Copy", "Paste", "GetUsing", "GetVars", "GetClasses",
+            };
+            foreach (string name in portable)
+            {
+                string a, b;
+                bool inHost = hostMembers.TryGetValue(name, out a);
+                bool inMcs = mcsMembers.TryGetValue(name, out b);
+                Check("§19 对齐：" + name + " 两侧同名同签名同 static"
+                    + (inHost ? "（" + a + "）" : "（宿主缺失）"),
+                    inHost && inMcs && a == b, "host=" + a + " mcs=" + b);
+            }
+            // `Inspect` 有两个重载：上面按名取到的是最后一个，这里单独断言两个重载都在且一致
+            Check("§19 对齐：Inspect 有 (object) 与 (Type) 两个重载且一致",
+                hostMembers.ContainsKey("Inspect2") && mcsMembers.ContainsKey("Inspect2")
+                && hostMembers["Inspect2"] == mcsMembers["Inspect2"],
+                "host=" + (hostMembers.ContainsKey("Inspect2") ? hostMembers["Inspect2"] : "<缺>")
+                + " mcs=" + (mcsMembers.ContainsKey("Inspect2") ? mcsMembers["Inspect2"] : "<缺>"));
+
+            string hostText = System.IO.File.ReadAllText(host);
+            // 断"基类列表为空"（语义），而非文本里是否出现 InteractiveBase——注释里说明"不继承 …"是正常的
+            bool hostHasNoBase = true;
+            var hostTree = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(hostText);
+            foreach (var node in hostTree.GetRoot().DescendantNodes())
+            {
+                var cls = node as Microsoft.CodeAnalysis.CSharp.Syntax.ClassDeclarationSyntax;
+                if (cls != null && cls.Identifier.Text == "ReplHostBase" && cls.BaseList != null)
+                    hostHasNoBase = false;
+            }
+            Check("§19：ReplHostBase **不继承**任何基类（尤其不接 mcs 的 InteractiveBase）",
+                hostHasNoBase, host);
+            Check("§19：ReplHostBase 承载 __result 值通道字段",
+                hostText.Contains("public static object __result;"), host);
+        }
+
+        /// <summary>
+        /// 取一个类里的成员签名（名字 → "static 返回类型 名字(参数类型…)"）；重载用 名字2/名字3 追加登记。
+        /// </summary>
+        static System.Collections.Generic.Dictionary<string, string> MemberSignatures(
+            string source, string className)
+        {
+            var map = new System.Collections.Generic.Dictionary<string, string>();
+            var tree = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(source);
+            foreach (var node in tree.GetRoot().DescendantNodes())
+            {
+                var cls = node as Microsoft.CodeAnalysis.CSharp.Syntax.ClassDeclarationSyntax;
+                if (cls == null || cls.Identifier.Text != className) continue;
+                foreach (var member in cls.Members)
+                {
+                    var method = member as Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax;
+                    if (method != null)
+                    {
+                        var ptypes = new System.Collections.Generic.List<string>();
+                        foreach (var p in method.ParameterList.Parameters) ptypes.Add(p.Type.ToString());
+                        string sig = (HasModifier(method.Modifiers,
+                                Microsoft.CodeAnalysis.CSharp.SyntaxKind.StaticKeyword) ? "static " : "")
+                            + method.ReturnType + " " + method.Identifier.Text + "("
+                            + string.Join(",", ptypes.ToArray()) + ")";
+                        map[UniqueMemberKey(map, method.Identifier.Text)] = sig;
+                        continue;
+                    }
+                    var prop = member as Microsoft.CodeAnalysis.CSharp.Syntax.PropertyDeclarationSyntax;
+                    if (prop != null)
+                        map[UniqueMemberKey(map, prop.Identifier.Text)] =
+                            (HasModifier(prop.Modifiers,
+                                Microsoft.CodeAnalysis.CSharp.SyntaxKind.StaticKeyword) ? "static " : "")
+                            + prop.Type + " " + prop.Identifier.Text;
+                }
+            }
+            return map;
+        }
+
+        /// <summary>修饰符判定（用 RawKind，避免依赖 Roslyn 的 `Any/​Kind` 扩展——本文件 `using System.Linq` 会遮蔽它们）。</summary>
+        static bool HasModifier(Microsoft.CodeAnalysis.SyntaxTokenList modifiers,
+            Microsoft.CodeAnalysis.CSharp.SyntaxKind kind)
+        {
+            foreach (var m in modifiers)
+                if (m.RawKind == (int)kind) return true;
+            return false;
+        }
+
+        static string UniqueMemberKey(System.Collections.Generic.Dictionary<string, string> map, string name)        {
+            if (!map.ContainsKey(name)) return name;
+            for (int i = 2; ; i++)
+                if (!map.ContainsKey(name + i)) return name + i;
+        }
+
+        /// <summary>
+        /// §19 (i) 判别力：**宿主自引用**是否真的必需 —— 同一份"生成类形态"源码，
+        /// 带 UE 程序集引用 ⇒ 编译成功；不带 ⇒ CS0246 `ReplHostBase`（= 游戏内实测症状）。
+        /// </summary>
+        static void TestHostSelfReferenceNeeded()
+        {
+            string ue = FindBuiltUeAssembly();
+            if (ue == null)
+            {
+                Check("§19：前置（能找到已构建的 UE 程序集）", false,
+                    @"未找到 Release\UnityExplorer.Standalone.Mono\UnityExplorer.STANDALONE.Mono.dll");
+                return;
+            }
+
+            var refs = ReferenceSetForThisProcess();
+            var refsWithSelf = new System.Collections.Generic.List<string>(refs);
+            refsWithSelf.Add(ue);
+            const string src =
+                "public class Submission_1 : UnityExplorer.RoslynBridge.ReplHostBase\n"
+                + "{ public static void Run() { __result = 42; } }\n";
+
+            var withSelf = RoslynCompiler.Compile("SelfRefOk", src, refsWithSelf, includePolyfills: false);
+            Check("§19 (i)：带宿主自引用 ⇒ 继承 ReplHostBase 的提交类编译成功（GREEN）",
+                withSelf.Success, withSelf.Diagnostics);
+
+            var withoutSelf = RoslynCompiler.Compile("SelfRefFail", src, refs, includePolyfills: false);
+            Check("§19 (i)：不带宿主自引用 ⇒ CS0246 ReplHostBase（RED 依据 = 游戏内实测症状）",
+                !withoutSelf.Success && withoutSelf.Diagnostics.Contains("ReplHostBase"),
+                withoutSelf.Diagnostics);
+
+            // 游戏内的**决定性探针**：`typeof(UnityExplorer.CSConsole.ConsoleController).Name` 曾报 CS0246
+            // ⇒ 提交编译解析不到 UE 程序集。带自引用后必须成功（这是 §19 的验收判据之一）。
+            const string probe = "public class P { public static string N() "
+                + "=> typeof(UnityExplorer.CSConsole.ConsoleController).Name; }";
+            var probeWithSelf = RoslynCompiler.Compile("SelfProbeOk", probe, refsWithSelf, includePolyfills: false);
+            Check("§19 (i)：`typeof(UnityExplorer.CSConsole.ConsoleController).Name` 带自引用可编译（游戏内判据）",
+                probeWithSelf.Success, probeWithSelf.Diagnostics);
+            var probeWithout = RoslynCompiler.Compile("SelfProbeFail", probe, refs, includePolyfills: false);
+            Check("§19 (i)：同探针不带自引用 ⇒ CS0246（复现游戏内实测症状）",
+                !probeWithout.Success && probeWithout.Diagnostics.Contains("ConsoleController"),
+                probeWithout.Diagnostics);
+
+            // §19 副作用核验：宿主程序集进了引用集后，**是否会把载荷类型拖进引用面**？
+            // UE 的公开面里凡涉及 Roslyn 的类型都不带载荷类型签名（C.5 擦除的附带收益）——
+            // 这里**不引用任何载荷程序集**，直接用 `CompileResult`（UE 类型）编译，成功即证明不拖载荷。
+            const string surface = "public class S { public static bool M() "
+                + "{ var r = new UnityExplorer.RoslynBridge.CompileResult(); r.Success = true; return r.Success; } }";
+            // ⚠️ 离线特有：测试程序集自己**也**link 了同一批源码（同名类型）⇒ 会出现 CS0433 歧义，
+            // 那不是产品问题（游戏内只有一个 UE 程序集）。故这次编译把测试程序集自身从引用里剔除。
+            var refsUeOnly = new System.Collections.Generic.List<string>();
+            foreach (string r in refsWithSelf)
+                if (!System.IO.Path.GetFileNameWithoutExtension(r)
+                        .Equals("RoslynBridgeTests", StringComparison.OrdinalIgnoreCase))
+                    refsUeOnly.Add(r);
+            var surfaceOk = RoslynCompiler.Compile("SelfSurface", surface, refsUeOnly, includePolyfills: false);
+            Check("§19 副作用：引用宿主程序集**不**把载荷类型拖进引用面（无需 Roslyn 程序集即可用 UE 类型）",
+                surfaceOk.Success, surfaceOk.Diagnostics);
+        }
+
+        /// <summary>
+        /// G1：**实测** 12 个助手名在真实 `using` 环境下的绑定行为，并证明"继承成员优先于 using 导入的类型"。
+        /// 变体 A（继承 ReplHostBase）应全部可用；变体 B（不继承）逐名记录真实失败码
+        /// （`Log` 应为 **CS1955** —— 被 `Verse.Log` **类型**吃掉，正是游戏内实测的机理）。
+        /// </summary>
+        static void TestHostHelperNameShadowing()
+        {
+            string ue = FindBuiltUeAssembly();
+            string managed = FindUpwards("RimWorldWin64_Data\\Managed");
+            if (ue == null || managed == null)
+            {
+                Check("G1：前置（UE 程序集 + 本体 Managed 可得）", false, "ue=" + ue + " managed=" + managed);
+                return;
+            }
+
+            var refs = ReferenceSetForThisProcess();
+            refs.Add(ue);
+            foreach (string extra in new[]
+            {
+                "Assembly-CSharp", "UnityEngine", "UnityEngine.CoreModule",
+                "UnityEngine.IMGUIModule", "UnityEngine.UI",
+            })
+            {
+                string p = System.IO.Path.Combine(managed, extra + ".dll");
+                if (System.IO.File.Exists(p)) refs.Add(p);
+            }
+            string ueDir = FindUpwards("Assemblies");
+            if (ueDir != null)
+            {
+                string ul = System.IO.Path.Combine(ueDir, "UniverseLib.Mono.dll");
+                if (System.IO.File.Exists(ul)) refs.Add(ul);
+            }
+
+            const string usings = "using System; using System.Linq; using System.Text; using System.Collections; "
+                + "using System.Collections.Generic; using System.Reflection; using UnityEngine; using UniverseLib; "
+                + "using Verse; using RimWorld; using Verse.AI; using RimWorld.Planet; using UnityExplorer; ";
+
+            var calls = new (string Name, string Body)[]
+            {
+                ("CurrentTarget", "var a = CurrentTarget;"),
+                ("AllTargets", "var a = AllTargets;"),
+                ("Log", "Log(\"hello\");"),
+                ("Inspect(object)", "Inspect((object)null);"),
+                ("Inspect(Type)", "Inspect((Type)null);"),
+                ("Start", "Start((IEnumerator)null);"),
+                ("Stop", "Stop((Coroutine)null);"),
+                ("Copy", "Copy((object)null);"),
+                ("Paste", "var p = Paste();"),
+                ("GetUsing", "GetUsing();"),
+                ("GetVars", "GetVars();"),
+                ("GetClasses", "GetClasses();"),
+            };
+
+            int okWithBase = 0, i = 0;
+            foreach (var c in calls)
+            {
+                i++;
+                string withBase = usings + "public class A : UnityExplorer.RoslynBridge.ReplHostBase "
+                    + "{ public static void Run() { " + c.Body + " } }";
+                var ra = RoslynCompiler.Compile("ShadowA" + i, withBase, refs, includePolyfills: false);
+                if (ra.Success) okWithBase++;
+                else Console.WriteLine("HELPERMAP " + c.Name + " = 有基类:FAIL[" + FirstError(ra.Diagnostics) + "]");
+
+                string noBase = usings + "public class B { public static void Run() { " + c.Body + " } }";
+                var rb = RoslynCompiler.Compile("ShadowB" + i, noBase, refs, includePolyfills: false);
+                Console.WriteLine("HELPERMAP " + c.Name + " = 有基类:" + (ra.Success ? "OK" : "FAIL")
+                    + " / 无基类:" + (rb.Success ? "OK" : FirstError(rb.Diagnostics)));
+            }
+            Check("G1：12 个助手名在继承 ReplHostBase 后**全部可用**（" + okWithBase + "/" + calls.Length + "）",
+                okWithBase == calls.Length, "只成功 " + okWithBase);
+
+            // 机理实证：无基类时 `Log("hello")` 被 `Verse.Log` **类型**吃掉 ⇒ CS1955（游戏内实测码）
+            var rlog = RoslynCompiler.Compile("ShadowLogNoBase",
+                usings + "public class C { public static void Run() { Log(\"hello\"); } }",
+                refs, includePolyfills: false);
+            Check("G1：无基类时 Log 报 CS1955（= 解析到类型 `Verse.Log`，G1 归因实证）",
+                !rlog.Success && rlog.Diagnostics.Contains("CS1955"), rlog.Diagnostics);
+            Check("G1：无基类时 GetVars 报 CS0103（UE 特有名字，using 链无同名物）",
+                !(RoslynCompiler.Compile("ShadowGetVarsNoBase",
+                    usings + "public class D { public static void Run() { GetVars(); } }",
+                    refs, includePolyfills: false)).Success);
+
+            // 对等后果：助手 `Log` 成员遮蔽 `Verse.Log` **类型** ⇒ 要用本体日志须全限定（与 mcs 路径一致）
+            var qualified = RoslynCompiler.Compile("ShadowQualified",
+                usings + "public class E : UnityExplorer.RoslynBridge.ReplHostBase "
+                + "{ public static void Run() { Verse.Log.Message(\"x\"); } }",
+                refs, includePolyfills: false);
+            Check("G1：全限定 `Verse.Log.Message(...)` 仍可用（对等后果，非缺陷）",
+                qualified.Success, qualified.Diagnostics);
+        }
+
+        /// <summary>找已构建的 UE 程序集（Release 输出；§19 的宿主自引用/助手断言都拿它当元数据引用）。</summary>
+        static string FindBuiltUeAssembly()
+        {
+            var dir = new System.IO.DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
+            while (dir != null)
+            {
+                string p = System.IO.Path.Combine(dir.FullName,
+                    @"UE-4.9.0-official\UnityExplorer-4.9.0\Release\UnityExplorer.Standalone.Mono\UnityExplorer.STANDALONE.Mono.dll");
+                if (System.IO.File.Exists(p)) return p;
+                dir = dir.Parent;
+            }
+            return null;
+        }
+
+        /// <summary>从测试程序目录向上按文件名找文件（§19 源码级签名断言用）。</summary>
+        static string FindFileUpwards(string fileName)
+        {
+            var dir = new System.IO.DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
+            while (dir != null)
+            {
+                foreach (string p in System.IO.Directory.GetFiles(dir.FullName, fileName,
+                             System.IO.SearchOption.AllDirectories))
+                    return p;
+                dir = dir.Parent;
+            }
+            return null;
+        }
+
         /// <summary>B4：批量预置与逐条提交**行为等价**，且成本可见（打印实测毫秒，供报告引用）。</summary>
         static void TestUsingPrimeEquivalence()
         {
             var refs = ReferenceSetForThisProcess();
             string[] namespaces = { "System.Linq", "System.Text", "System.Collections.Generic" };
 
-            var bulk = new ReplSession(refs);
+            var bulk = NewSession(refs);
             var sw1 = System.Diagnostics.Stopwatch.StartNew();
             string diag;
             var accepted = bulk.AddUsings(namespaces, out diag);
             sw1.Stop();
             var r1 = bulk.Submit("System.Linq.Enumerable.Range(1, 3).Sum()");
 
-            var perItem = new ReplSession(refs);
+            var perItem = NewSession(refs);
             var sw2 = System.Diagnostics.Stopwatch.StartNew();
             foreach (string ns in namespaces) perItem.Submit("using " + ns + ";");
             sw2.Stop();

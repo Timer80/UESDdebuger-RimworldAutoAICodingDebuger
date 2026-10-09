@@ -50,8 +50,24 @@ namespace UnityExplorer.RoslynBridge
             out string report, out List<string> unavailableDefaultUsings,
             out List<string> missingUeSideAssemblies)
         {
+            return CollectFrom(managedDir, ueDir, null, null, blacklist,
+                out report, out unavailableDefaultUsings, out missingUeSideAssemblies);
+        }
+
+        /// <summary>
+        /// 带**宿主自引用**的完整口径（§19 (i)）：报告形如
+        /// `refs: small=22/22 total=23 (managed=21 ue=1 self=1)`。
+        /// 自引用 = UE 自己的程序集（<paramref name="selfAssemblyPath"/>/<paramref name="selfSimpleName"/>）：
+        /// 它**不计入 `small=`**（那是"本体 21 + UE 侧 1"的口径），单独以 `self=` 呈现；
+        /// 但必须进引用集——Roslyn 生成类继承 `ReplHostBase`（宿主程序集里的类型），缺它每次提交都 CS0246。
+        /// </summary>
+        public static ReferenceSet CollectFrom(string managedDir, string ueDir,
+            string selfAssemblyPath, string selfSimpleName, string blacklist,
+            out string report, out List<string> unavailableDefaultUsings,
+            out List<string> missingUeSideAssemblies)
+        {
             var set = new ReferenceSet();
-            int fromManaged = 0, fromUe = 0;
+            int fromManaged = 0, fromUe = 0, self = 0;
             missingUeSideAssemblies = new List<string>();
 
             bool managedUsable = !string.IsNullOrEmpty(managedDir) && Directory.Exists(managedDir);
@@ -74,15 +90,25 @@ namespace UnityExplorer.RoslynBridge
                 if (File.Exists(f) && set.TryAdd(f, simple, blacklist)) fromManaged++;
             }
 
-            unavailableDefaultUsings = DefaultUsings.Unavailable(DefaultUsings.BuiltIn, set.Contains);
+            // 宿主自引用：**最后**加入（不改前 22 项的解析顺序）；走 TryAdd ⇒ 黑名单/去重照常生效
+            if (!string.IsNullOrEmpty(selfAssemblyPath) && !string.IsNullOrEmpty(selfSimpleName)
+                && File.Exists(selfAssemblyPath) && set.TryAdd(selfAssemblyPath, selfSimpleName, blacklist))
+                self = 1;
+
+            // 默认 using 可用性：`@self` 标记按"自引用是否真进了引用集"判定
+            unavailableDefaultUsings = DefaultUsings.Unavailable(DefaultUsings.BuiltIn,
+                owner => owner == DefaultUsings.SelfAssemblyToken ? self == 1 : set.Contains(owner));
 
             report = $"refs: small={fromManaged + fromUe}/{ExpectedProfileCount} total={set.Paths.Count}"
-                + $" (managed={fromManaged} ue={fromUe})";
+                + $" (managed={fromManaged} ue={fromUe} self={self})";
             // 响亮告警：按**实际缺失**触发（R2 前是 `!set.Contains(...)`，缺件时因假命中而永不触发）
             if (missingUeSideAssemblies.Count > 0)
                 report += "；⚠ UE 侧引用缺失 " + string.Join(",", missingUeSideAssemblies.ToArray())
                     + "（UE 程序集目录=" + (ueDir ?? "<不可判定>") + "）"
                     + "→ 本会话默认 using 剔除 " + string.Join(",", unavailableDefaultUsings.ToArray());
+            if (self == 0)
+                report += "；⚠ 宿主自引用缺失（selfAssemblyPath=" + (selfAssemblyPath ?? "<不可判定>")
+                    + "）→ 提交类继承 `ReplHostBase` 会 CS0246、REPL 助手不可用";
 
             return set;
         }

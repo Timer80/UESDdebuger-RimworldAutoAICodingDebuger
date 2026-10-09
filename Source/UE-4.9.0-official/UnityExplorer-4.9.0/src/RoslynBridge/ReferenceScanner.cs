@@ -83,15 +83,26 @@ namespace UnityExplorer.RoslynBridge
         /// <summary>
         /// 组装引用集。`unavailableDefaultUsings` = 引用集缺其来源程序集的**默认 using 根命名空间**
         /// （B1 护栏：调用方须把它们从本会话默认 using 里剔除并明确告警，否则一条 using 会拖垮整条 Roslyn 路径）。
-        /// 报告格式：`refs: small=&lt;n&gt;/22 total=&lt;m&gt;`；UE 侧缺件时**响亮**写明目录与后果（不静默降级）。
-        /// ⚠️ 纯逻辑在 <see cref="ReferenceProfile.CollectFrom"/>（可离线单测）；本方法只负责**推导目录**
+        /// 报告格式：`refs: small=&lt;n&gt;/22 total=&lt;m&gt; (managed=… ue=… self=…)`；缺件时**响亮**写明目录与后果。
+        /// ⚠️ 纯逻辑在 <see cref="ReferenceProfile.CollectFrom"/>（可离线单测）；本方法只负责**推导路径**
         /// （依赖 Unity/UE 类型，故不能进离线测试程序集）。R2：UE 侧命中要求**文件存在**。
         /// </summary>
         public static ReferenceSet Collect(string blacklist, out string report,
             out List<string> unavailableDefaultUsings)
         {
             List<string> missingUe;
-            return ReferenceProfile.CollectFrom(ManagedDir(), UeAssemblyDir(), blacklist,
+            // §19 (i) 宿主自引用：UE 自己的程序集（提交类要继承 `ReplHostBase`，缺它每次提交都 CS0246）。
+            // 报告里以 `self=` 单独呈现，**不计入 `small=`**（后者是"本体 21 + UE 侧 1"的口径）。
+            string selfPath = null, selfName = null;
+            try
+            {
+                Assembly self = Assembly.GetExecutingAssembly();
+                selfPath = self.Location;
+                selfName = self.GetName().Name;
+            }
+            catch { /* 动态程序集无 Location/Name：报 self=0 并响亮告警（见 ReferenceProfile） */ }
+
+            return ReferenceProfile.CollectFrom(ManagedDir(), UeAssemblyDir(), selfPath, selfName, blacklist,
                 out report, out unavailableDefaultUsings, out missingUe);
         }
 

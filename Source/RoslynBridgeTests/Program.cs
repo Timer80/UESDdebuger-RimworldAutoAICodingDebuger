@@ -167,11 +167,29 @@ namespace RoslynBridgeTests
                 string outp;
                 Check("执行 x=1", ev.Evaluate("var x = 1;", out outp), outp);
                 Check("执行 x+41 得 42", ev.Evaluate("x + 41", out outp) && ev.LastValueText == "42", "value=" + ev.LastValueText);
+                // A2（合并修复轮）：REPL 返回值经 output 带回（对齐 mcs 语义，HELP_REPL 承诺兑现）。
+                // 判别力：旧码成功路径 output=r.Diagnostics（空串）→ outp=="42" 必 FAIL。
+                Check("REPL 表达式成功后 output 带回结果值", ev.Evaluate("x + 41", out outp) && outp == "42", "out=" + outp);
                 Check("GetVars 含 x", ev.GetVars().Contains("x"));
                 Check("AddUsing 后 using 列表更新", AddUsingAndCheck(ev));
 
                 Check("语法错误返回 false", !ev.Evaluate("var = ;", out outp));
                 Check("错误后仍可用", ev.Evaluate("x", out outp) && ev.LastValueText == "1");
+            }
+
+            // A1（合并修复轮）：Allow_Mod_Type_Resolution 开关落位——构造往返 + 引用集不被放大 + 求值正常。
+            // 判别力：旧码构造器无第三参 → 本段编译期 RED（CS1729/CS1501）；引用计数断言证伪
+            // 旧三参设计"把 ModAssemblyPaths 预加进引用集"行为的复活。
+            // ⚠️ 登记语句：任务 13 自愈器落地前该开关不改变引用集行为（转对端会话登记为待验收项）。
+            using (var evT = new RoslynScriptEvaluator(refs, "", true))
+            using (var evF = new RoslynScriptEvaluator(refs, "", false))
+            {
+                Check("A1 开关true 构造往返", evT.AllowModTypeResolution);
+                Check("A1 开关false（默认）构造往返", !evF.AllowModTypeResolution);
+                Check("A1 引用集不被开关放大", evT.ReferenceCount == refs.Count && evF.ReferenceCount == refs.Count,
+                    "true=" + evT.ReferenceCount + " false=" + evF.ReferenceCount + " input=" + refs.Count);
+                string outA1;
+                Check("A1 开关true 求值仍正常", evT.Evaluate("1 + 1", out outA1) && evT.LastValueText == "2", "out=" + outA1);
             }
 
             // 坑 1（任务 6 生命周期契约）：求值器 Dispose 必须转发 s_session.Dispose（摘 AssemblyResolve 钩）。

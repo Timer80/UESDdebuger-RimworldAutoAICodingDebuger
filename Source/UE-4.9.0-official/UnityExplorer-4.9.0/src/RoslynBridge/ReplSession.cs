@@ -33,6 +33,9 @@ namespace UnityExplorer.RoslynBridge
         public object LastValue { get; private set; }
         public CompileResult LastResult { get; private set; }
 
+        // A1（合并修复轮）观测点：引用集大小恒等于入参集合（开关不得放大它，测试断言用）。
+        public int ReferenceCount => s_referencePaths.Count;
+
         public ReplSession(IEnumerable<string> referencePaths)
         {
             s_referencePaths = new List<string>(referencePaths);

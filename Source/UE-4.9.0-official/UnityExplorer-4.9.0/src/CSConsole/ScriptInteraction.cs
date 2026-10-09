@@ -1,6 +1,4 @@
-﻿using HarmonyLib;
-using System.Collections;
-using System.Text;
+﻿using System.Collections;
 using UnityExplorer.UI.Panels;
 
 namespace UnityExplorer.CSConsole
@@ -36,8 +34,10 @@ namespace UnityExplorer.CSConsole
         public static object Paste()
             => ClipboardPanel.Current;
 
-        // 注意：裸 Evaluator 会解析到继承自 Mono.CSharp.Evaluator 的**实例**属性（只对 mcs 有效），
-        // 必须显式走 ConsoleController.Evaluator（IScriptEvaluator），否则 Roslyn 路径下拿到 null。
+        // 注意：裸 Evaluator 会解析到直接基类 Mono.CSharp.InteractiveBase 的 public static 字段
+        // Evaluator（类型为 Mono.CSharp.Evaluator）——审查者反编译 mcs.dll 实测：Mono.CSharp.Evaluator
+        // 类本身并无该成员，此前"继承实例属性"的注释说法有误（C1 勘误）。
+        // 该字段只对 mcs 路径有效（Roslyn 下为 null），必须显式走 ConsoleController.Evaluator（IScriptEvaluator）。
         public static void GetUsing()
             => Log(ConsoleController.Evaluator.GetUsing());
 

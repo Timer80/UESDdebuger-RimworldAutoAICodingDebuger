@@ -15,17 +15,34 @@ namespace UnityExplorer.RoslynBridge
         public bool IsAvailable { get; private set; }
         public string FailureReason { get; private set; }
 
-        public RoslynScriptEvaluator(IEnumerable<string> referencePaths, string blacklist = "")
+        // A1（合并修复轮）：配置项 CSharp_Console_Allow_Mod_Type_Resolution 的落位载体。
+        // ⚠️ 铁律（对端审查裁定）：任务 13 自愈器落地前，本开关【不改变任何引用集行为】——
+        // 严禁把 ReferenceScanner.ModAssemblyPaths() 的产物预加进引用集（那是旧三参设计，已裁定废弃）；
+        // 模组程序集只允许经"编译诊断触发"的自愈路径进入（任务 13 实现）。
+        public bool AllowModTypeResolution { get; }
+
+        public RoslynScriptEvaluator(IEnumerable<string> referencePaths, string blacklist = "",
+            bool allowModTypeResolution = false)
         {
             s_session = new ReplSession(referencePaths);
+            AllowModTypeResolution = allowModTypeResolution;
             IsAvailable = true;
         }
+
+        // A1 观测点：引用集大小透传（测试断言"开关不放大引用集"用）。
+        public int ReferenceCount => s_session.ReferenceCount;
 
         public bool Evaluate(string input, out string output)
         {
             CompileResult r = s_session.Submit(input);
             LastValue = s_session.LastValue;
-            output = r.Diagnostics;
+            // A2（合并修复轮）：REPL 返回值对齐 mcs 侧语义（HELP_REPL 承诺"末表达式返回值会打印"）：
+            // 成功且无诊断且有值 → output 带回值文本。LastValue 由 ReplSession 逐提交重置（Submit :217），
+            // 类/using 提交恒为 null → output 仍走 Diagnostics（="Code compiled without errors."，与 mcs 一致）。
+            if (r.Success && string.IsNullOrEmpty(r.Diagnostics) && LastValue != null)
+                output = LastValueText;
+            else
+                output = r.Diagnostics;
             return r.Success;
         }
 

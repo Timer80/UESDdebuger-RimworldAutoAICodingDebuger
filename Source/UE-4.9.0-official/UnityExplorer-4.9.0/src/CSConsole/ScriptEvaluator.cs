@@ -12,6 +12,10 @@ namespace UnityExplorer.CSConsole
     public class ScriptEvaluator : Evaluator, IScriptEvaluator
     {
         internal TextWriter _textWriter;
+        // C4（合并修复轮）：static 字段，HookInstance 构造第二个 ScriptEvaluator 时其 BuildContext
+        // 会覆盖本字段（mcs 报告打印器本质是进程级单例）。任务 8 重构已消除跨实例串包路径
+        // （ConsoleController.Evaluate 不再直读 _reportPrinter，现仅本类 Evaluate 与 HookInstance 读）；
+        // 新增直读点前须复核此约束。
         internal static StreamReportPrinter _reportPrinter;
 
         private static readonly HashSet<string> StdLib = new(StringComparer.InvariantCultureIgnoreCase)
@@ -92,15 +96,21 @@ namespace UnityExplorer.CSConsole
 
         private void OnAssemblyLoad(object sender, AssemblyLoadEventArgs args)
         {
+            // B4（合并修复轮）：name 声明提升到 try 外——catch 内复用 try 段已捕获的变量，
+            // 不再二次调用 args.LoadedAssembly.GetName()（原 catch 里的第二次 GetName 理论可再抛，
+            // 异常逃出 AssemblyLoad 事件处理器 = 控制台初始化崩）。改法依据：声明提升后 catch 体内
+            // 再无可抛调用（仅 LogWarning + 字符串插值），比"catch 体再套一层 try"少一层嵌套且
+            // 彻底消除失败模式，而非把它埋深一层。
+            string name = null;
             try
             {
-                string name = args.LoadedAssembly.GetName().Name;
+                name = args.LoadedAssembly.GetName().Name;
                 if (StdLib.Contains(name)) return;
                 Reference(args.LoadedAssembly);
             }
             catch (Exception ex)
             {
-                ExplorerCore.LogWarning($"[CSConsole] 引用新加载程序集失败（已忽略）：{args.LoadedAssembly.GetName().Name} - {ex.GetType().Name}");
+                ExplorerCore.LogWarning($"[CSConsole] 引用新加载程序集失败（已忽略）：{name ?? "<unknown>"} - {ex.GetType().Name}");
             }
         }
 

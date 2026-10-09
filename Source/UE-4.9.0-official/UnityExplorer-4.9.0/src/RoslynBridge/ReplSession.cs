@@ -17,7 +17,13 @@ namespace UnityExplorer.RoslynBridge
     public sealed class ReplSession : IDisposable
     {
         readonly List<string> s_referencePaths;
-        readonly List<MetadataReference> s_imageRefs = new List<MetadataReference>();
+        // C.5-lite（任务 8）：原 `List<MetadataReference> s_imageRefs`（s_ 前缀名不副实——实为实例字段）。
+        // RimWorld 启动期 GetFields 字段扫描解析字段签名时**不按 BindingFlags 过滤，实例字段一样炸**
+        // （Player.log 实证：TypeLoadException: Could not load type of field
+        // 'UnityExplorer.RoslynBridge.ReplSession:s_imageRefs' ——前置包载荷在场仍发生，属 Mono
+        // 元数据遍历行为）。载荷类型只许活在方法体内（局部变量对扫描不可见）→ object 擦除，
+        // 使用点 (MetadataReference) 转型；逐提交累积语义不变。
+        readonly List<object> imageRefs = new List<object>();
         readonly List<string> s_usings = new List<string>();
         readonly List<string> s_classes = new List<string>();
         readonly List<KeyValuePair<string, Type>> s_vars = new List<KeyValuePair<string, Type>>();
@@ -137,7 +143,14 @@ namespace UnityExplorer.RoslynBridge
                             if (v.Initializer != null)
                                 statements.Add(SyntaxFactory.ParseStatement(
                                     $"{v.Identifier.Text} = {v.Initializer.Value};"));
-                            if (!s_vars.Any(p => p.Key == v.Identifier.Text))
+                            // C.5-lite：原 `s_vars.Any(p => p.Key == v.Identifier.Text)` 捕获载荷类型局部 v，
+                            // 被提升为 <>c__DisplayClass 实例字段（Player.log 实证 TypeLoadException：
+                            // <>c__DisplayClass23_0:v = VariableDeclaratorSyntax）——改显式循环，
+                            // v 的使用留在方法体内，闭包类整个消失。
+                            bool varExists = false;
+                            for (int i = 0; i < s_vars.Count; i++)
+                                if (s_vars[i].Key == v.Identifier.Text) { varExists = true; break; }
+                            if (!varExists)
                                 s_vars.Add(new KeyValuePair<string, Type>(v.Identifier.Text, null));
                         }
                     }
@@ -187,7 +200,8 @@ namespace UnityExplorer.RoslynBridge
                 CSharpSyntaxTree.ParseText(PolyfillSource.Code, new CSharpParseOptions(LanguageVersion.Latest)),
             };
 
-            var metadataRefs = new List<MetadataReference>(s_imageRefs);
+            var metadataRefs = new List<MetadataReference>(imageRefs.Count);
+            foreach (object r in imageRefs) metadataRefs.Add((MetadataReference)r);
             foreach (string p in s_referencePaths)
             {
                 try { metadataRefs.Add(MetadataReference.CreateFromFile(p)); } catch { }
@@ -203,7 +217,15 @@ namespace UnityExplorer.RoslynBridge
             {
                 var emit = compilation.Emit(ms);
                 result.Diagnostics = DiagnosticFormatter.FormatAll(emit.Diagnostics);
-                result.ErrorCount = emit.Diagnostics.Count(d => d.Severity == DiagnosticSeverity.Error);
+                // C.5-lite：原 `Count(d => d.Severity == DiagnosticSeverity.Error)` 虽非捕获式，
+                // 但编译器会把 lambda 缓存为 <>c.<>9__* 静态字段（Func<Diagnostic,bool>——泛型实参
+                // =载荷类型，字段签名解析连带解析实参 typeref，与 List<MetadataReference> 同款炸法）
+                // → 改显式循环，杜绝委托缓存字段。
+                // ⚠️ 脆弱点：载荷类型仅以方法组/表达式形式出现，禁止改为捕获式（否则闭包
+                // <>c__DisplayClass* 字段复活、启动扫描再炸）；非捕获 lambda 亦禁止（<>c 委托缓存字段）。
+                result.ErrorCount = 0;
+                foreach (Diagnostic d in emit.Diagnostics)
+                    if (d.Severity == DiagnosticSeverity.Error) result.ErrorCount++;
                 result.Success = emit.Success && result.ErrorCount == 0;
                 pe = result.Success ? ms.ToArray() : null;
                 result.PeBytes = pe;
@@ -212,7 +234,7 @@ namespace UnityExplorer.RoslynBridge
             LastResult = result;
             if (!result.Success) return result;   // 失败：会话状态不变（不推进 submission 计数）
 
-            s_imageRefs.Add(MetadataReference.CreateFromImage(pe));
+            imageRefs.Add(MetadataReference.CreateFromImage(pe));
             s_submission = n;
             Assembly asm = Assembly.Load(pe);
             s_sessionAssemblies.Add(asm);
@@ -247,12 +269,30 @@ namespace UnityExplorer.RoslynBridge
             {
                 var comp = CSharpCompilation.Create("infer",
                     new[] { tree },
-                    s_referencePaths.Where(File.Exists).Select(p => MetadataReference.CreateFromFile(p)),
+                    RoslynRefsFromPaths(s_referencePaths),
                     new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
                 SemanticModel model = comp.GetSemanticModel(tree);
                 return model.GetTypeInfo(v.Initializer.Value).Type;
             }
             catch { return null; }
+        }
+
+        // C.5-lite：原 `Where(File.Exists).Select(p => MetadataReference.CreateFromFile(p))` 同款
+        // 委托缓存雷（Func<string,MetadataReference> 泛型实参=载荷类型，字段签名解析炸）→ 显式循环；
+        // File.Exists 过滤与 CreateFromFile 的 try-catch 跳坏 dll 语义保留（外层 GetInferredType
+        // 亦有 catch，双保险）。
+        // ⚠️ 脆弱点：载荷类型仅以方法组/表达式形式出现，禁止改为捕获式（否则闭包字段复活、
+        // 启动扫描再炸）；此处若改回 `Where(...).Select(p => ...)`，编译器生成的 <>c 委托缓存字段
+        // 签名含载荷类型，与 s_imageRefs 同款炸法。
+        static List<MetadataReference> RoslynRefsFromPaths(IEnumerable<string> paths)
+        {
+            var refs = new List<MetadataReference>();
+            foreach (string p in paths)
+            {
+                if (!File.Exists(p)) continue;
+                try { refs.Add(MetadataReference.CreateFromFile(p)); } catch { }
+            }
+            return refs;
         }
 
         void RefreshVarTypes(Assembly asm, string className)

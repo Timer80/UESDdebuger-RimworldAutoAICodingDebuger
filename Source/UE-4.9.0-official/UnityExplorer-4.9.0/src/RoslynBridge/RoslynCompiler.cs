@@ -19,23 +19,24 @@ namespace UnityExplorer.RoslynBridge
     /// <summary>parse → compile → emit 到内存。不负责加载（调用方决定 Assembly.Load 或 CreateFromImage）。</summary>
     public static class RoslynCompiler
     {
-        static readonly CSharpParseOptions ParseOptions =
-            new CSharpParseOptions(LanguageVersion.Latest);
-
-        static readonly CSharpCompilationOptions CompileOptions =
-            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary);
-
         public static CompileResult Compile(string assemblyName, string source,
                                             IEnumerable<string> referencePaths, bool includePolyfills,
                                             IEnumerable<string> extraSources = null,
                                             string extraBaseSource = null)
         {
-            var trees = new List<SyntaxTree> { CSharpSyntaxTree.ParseText(source, ParseOptions) };
+            // C.5-lite（任务 8）：ParseOptions/CompileOptions 原为 static readonly 载荷类型字段——
+            // RimWorld 启动期 GetFields 字段扫描解析字段签名时不按 BindingFlags 过滤，载荷未加载
+            // 即 TypeLoadException。载荷类型只许活在方法体内（局部变量对扫描不可见），
+            // 故降为每次调用局部构造（开销相对编译本身可忽略）。
+            var parseOptions = new CSharpParseOptions(LanguageVersion.Latest);
+            var compileOptions = new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary);
+
+            var trees = new List<SyntaxTree> { CSharpSyntaxTree.ParseText(source, parseOptions) };
             if (extraSources != null)
                 foreach (string s in extraSources)
-                    trees.Add(CSharpSyntaxTree.ParseText(s, ParseOptions));
+                    trees.Add(CSharpSyntaxTree.ParseText(s, parseOptions));
             if (includePolyfills)
-                trees.Add(CSharpSyntaxTree.ParseText(PolyfillSource.Code, ParseOptions));
+                trees.Add(CSharpSyntaxTree.ParseText(PolyfillSource.Code, parseOptions));
 
             var refs = new List<MetadataReference>();
             foreach (string p in referencePaths)
@@ -45,7 +46,7 @@ namespace UnityExplorer.RoslynBridge
             }
 
             CSharpCompilation compilation = CSharpCompilation.Create(
-                assemblyName, trees, refs, CompileOptions);
+                assemblyName, trees, refs, compileOptions);
 
             var result = new CompileResult();
             using (var ms = new MemoryStream())

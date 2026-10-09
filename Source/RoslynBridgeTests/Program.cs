@@ -29,6 +29,7 @@ namespace RoslynBridgeTests
             TestDiagnosticFormat();
             TestReplSession();
             TestRoslynEvaluatorFacade();
+            TestC5Guard();
             Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
             return failures == 0 ? 0 : 1;
         }
@@ -281,8 +282,48 @@ namespace RoslynBridgeTests
             }
             Check("子进程：EnsureLoaded(真实载荷目录)==true", ok, detail);
             Check("子进程：IsAvailable==true", RoslynAssemblyLoader.IsAvailable);
+
+            // ── 追加 8 行为断言（只能在本子进程做：父进程已被 TestLoadFailureDoesNotThrow 的一次性锁
+            //    锁成失败态，映射必空、处理器必未挂）──────────────
+            // ① 映射在挂载前已填满（先填后挂，扫描期工作线程只读）；
+            // ② 处理器应答载荷简单名：按名返回**已载实例**（版本号由 AssemblyName 解析，与 identity 无关）；
+            // ③ 非载荷名一律 null → 对第三方零干扰（处理器不得吞别家请求，也不得抛异常）。
+            int mapped = PayloadMapCount();
+            Check("子进程：载荷映射已填充 8 条（先填后挂）", mapped == 8, "count=" + mapped);
+
+            object answered = InvokePayloadResolver(
+                "Microsoft.CodeAnalysis, Version=4.14.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35");
+            Check("子进程：应答器按简单名应答载荷（版本无关）",
+                answered is System.Reflection.Assembly
+                && ((System.Reflection.Assembly)answered).GetName().Name == "Microsoft.CodeAnalysis",
+                answered == null ? "返回 null" : answered.ToString());
+
+            object foreign = InvokePayloadResolver(
+                "Newtonsoft.Json, Version=13.0.3.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed");
+            Check("子进程：应答器对非载荷名返回 null（第三方零干扰）", foreign == null,
+                foreign == null ? null : foreign.ToString());
+
             Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
             return failures == 0 ? 0 : 1;
+        }
+
+        /// <summary>反射读 RoslynAssemblyLoader 的载荷映射条数（internal 静态字段，测试程序集无 InternalsVisibleTo）。</summary>
+        static int PayloadMapCount()
+        {
+            var f = typeof(RoslynAssemblyLoader).GetField("PayloadAssembliesByName",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            if (f == null) return -1;
+            var d = f.GetValue(null) as System.Collections.IDictionary;
+            return d == null ? -1 : d.Count;
+        }
+
+        /// <summary>反射调私有的 AppDomain 级应答器（模拟 Mono 的绑定回调）；方法缺失即抛（测试要响）。</summary>
+        static object InvokePayloadResolver(string assemblyFullName)
+        {
+            var m = typeof(RoslynAssemblyLoader).GetMethod("PayloadAssemblyResolver",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            if (m == null) throw new InvalidOperationException("PayloadAssemblyResolver 方法不存在");
+            return m.Invoke(null, new object[] { null, new ResolveEventArgs(assemblyFullName) });
         }
 
         static void TestSuccessPathViaChildProcess()
@@ -341,6 +382,67 @@ namespace RoslynBridgeTests
             bool second = RoslynAssemblyLoader.EnsureLoaded(real);
             Check("幂等：锁定后对真实载荷目录仍返回 false", second == false);
             Check("幂等：锁定后 IsAvailable 仍为 false", RoslynAssemblyLoader.IsAvailable == false);
+        }
+
+        // ── C.5-lite 护栏（任务 8）：防复发断言 ──
+        // UnityExplorer.RoslynBridge 全类型（含编译器生成嵌套 <>c*/<>c__DisplayClass*）的全部字段
+        // （Static|Instance|Public|NonPublic），字段类型不得指向 8 件载荷程序集。
+        // 判别力：修复前旧码 ≥6 处命中（RoslynCompiler.ParseOptions/CompileOptions 静态字段、
+        // ReplSession.s_imageRefs 实例字段、<>c__DisplayClass23_0.v 闭包字段、<>c 上
+        // Func<Diagnostic,bool>/Func<string,MetadataReference> 委托缓存字段）→ 必 FAIL。
+        // 机制更正（Player.log 实证）：Mono GetFields 元数据遍历不按 BindingFlags 过滤即解析字段
+        // 签名——实例/闭包/委托缓存字段一样炸；泛型字段签名解析连带解析**泛型实参** typeref
+        // （List<MetadataReference> 炸在 MetadataReference 而非 List）→ 护栏必须递归泛型实参。
+        // 边界：护栏只断**字段类型**；方法体/局部变量/参数使用载荷类型合法（那是 Roslyn 功能本身）。
+        static void TestC5Guard()
+        {
+            string[] payloadAsms = new[]
+            {
+                "Microsoft.CodeAnalysis", "Microsoft.CodeAnalysis.CSharp",
+                "System.Collections.Immutable", "System.Reflection.Metadata",
+                "System.Memory", "System.Threading.Tasks.Extensions",
+                "System.Runtime.CompilerServices.Unsafe", "System.Numerics.Vectors",
+            };
+
+            Type[] types;
+            try { types = typeof(ReplSession).Assembly.GetTypes(); }
+            catch (System.Reflection.ReflectionTypeLoadException rtle)
+            { types = rtle.Types.Where(t => t != null).ToArray(); }
+            catch (Exception e) { Check("C.5 护栏：类型枚举可执行", false, e.GetType().Name); return; }
+
+            var bad = new System.Text.StringBuilder();
+            const System.Reflection.BindingFlags AllF = System.Reflection.BindingFlags.Static
+                | System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.Public
+                | System.Reflection.BindingFlags.NonPublic;
+            int scanned = 0;
+            foreach (Type t in types)
+            {
+                if (t == null || t.Namespace != "UnityExplorer.RoslynBridge") continue;
+                System.Reflection.FieldInfo[] fs;
+                try { fs = t.GetFields(AllF); } catch { continue; }
+                scanned++;
+                foreach (System.Reflection.FieldInfo f in fs)
+                    if (FieldTouchesPayload(f.FieldType, payloadAsms))
+                        bad.AppendLine(t.Name + " . " + f.Name + " -> " + f.FieldType);
+            }
+            Check("C.5 护栏：RoslynBridge 全类型零载荷类型字段（扫描 " + scanned + " 型）",
+                bad.Length == 0, bad.ToString().TrimEnd());
+        }
+
+        // 泛型实参递归：FieldType.Assembly 只给泛型定义所在程序集（List<MetadataReference>→mscorlib），
+        // 必须下钻 GetGenericArguments 才能抓到载荷实参（与 Mono 字段签名解析行为对齐）。
+        static bool FieldTouchesPayload(Type t, string[] payloadAsms)
+        {
+            if (t == null) return false;
+            while (t.IsArray || t.IsByRef || t.IsPointer) t = t.GetElementType();
+            if (t == null) return false;
+            string asm = t.Assembly.GetName().Name;
+            foreach (string p in payloadAsms) if (asm == p) return true;
+            if (t.IsGenericType)
+                foreach (Type a in t.GetGenericArguments())
+                    if (FieldTouchesPayload(a, payloadAsms)) return true;
+            return false;
         }
 
         /// <summary>从测试程序目录向上找到仓库里的真实载荷目录；找不到返回 null（用例据此报错）。</summary>

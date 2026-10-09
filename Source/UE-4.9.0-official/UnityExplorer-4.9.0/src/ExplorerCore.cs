@@ -47,26 +47,36 @@ namespace UnityExplorer
             ConfigManager.Init(Loader.ConfigHandler);
 
             // ⚠️ 方案 A 早加载（任务 8 架构修复，2026-10-09 合议裁定，人类保留否决）——勿删。
-            // 根因：RimWorld Verse.StaticConstructorOnStartupUtility.CallAll 在跑完各 mod 的
-            // [StaticConstructorOnStartup] .cctor（含本 UE 的 init 链 → 此处）之后，会以
-            // Parallel.ForEach 对全部 mod 程序集类型做 GetFields 字段扫描
-            // （ReportProbablyMissingAttributes）。扫描到 ReplSession.s_imageRefs
-            // （List<MetadataReference>）与闭包字段 <>c__DisplayClass23_0:v（VariableDeclaratorSyntax）
-            // 时若 Roslyn 载荷未加载 → TypeLoadException（Player.log 实证：Could not load type of
-            // field 'UnityExplorer.RoslynBridge.ReplSession:s_imageRefs' … Microsoft.CodeAnalysis
-            // 4.14.0.0 不可解析）→ Mono 缓存 typeref 解析失败，进程内不可恢复 → 此后
-            // new ReplSession 必败 → 控制台 DisableConsole。
-            // 故必须在字段扫描发生之前无条件加载载荷（不读配置——配置只决定"是否使用"，
-            // 不决定"是否加载"）；ResetConsole 处的 EnsureLoaded 幂等命中缓存，行为不变。
+            // 位置更正（C.5-lite 追加 7，Player.log 上机实证）：本调用**不早于**字段扫描。
+            // RimWorld Verse.StaticConstructorOnStartupUtility.CallAll 跑完全部 [StaticConstructorOnStartup]
+            // .cctor 之后，才以 Parallel.ForEach 对全部 mod 程序集类型做 GetFields 字段扫描
+            // （ReportProbablyMissingAttributes）；而本 UE 没有 [StaticConstructorOnStartup]，其 init 链
+            // （UELoader → ExplorerStandalone → 此处）由 UELoaderMod 的 SceneManager.sceneLoaded 触发，
+            // 整体晚于 CallAll。上机时序：:1393 前置包 cctor → :1457 扫描 → :1566 仍炸，全日志无
+            // "UnityExplorer 4.9.0 initializing"（该行在 Loader 赋值后、本链更后面才打）。
+            // ⇒ 扫描前的加载与钩子安装由壳类 RoslynPreScanLoader（#if STANDALONE_MONO，唯一可靠的
+            // 扫描前注入点）承担，此处无法替代它。
+            // 此处保留的价值（第二层防御）：在 Universe.Init 之前装好载荷与解析钩子，防 UniverseLib/UI
+            // 期的反射触雷——它只能保护"此处之后的反射"，保护不了字段扫描。
+            // 根因三层：① 本程序集原有 4 个"载荷类型字段"（RoslynCompiler.ParseOptions/CompileOptions、
+            // ReplSession.s_imageRefs、闭包 <>c__DisplayClass23_0:v）——Mono 字段签名解析不按
+            // BindingFlags 过滤，载荷未加载即 TypeLoadException
+            // （Player.log 实证：Could not load type of field 'UnityExplorer.RoslynBridge.ReplSession:s_imageRefs'
+            // … Microsoft.CodeAnalysis 4.14.0.0 不可解析），且 Mono 缓存 typeref 解析失败、进程内不可恢复
+            // → 此后 new ReplSession 必败 → 控制台 DisableConsole；② 载荷只 LoadFrom 不够：typeref 绑定
+            // 必须有人应答（Type.GetType 直探已载程序集所以过，GetFields 走引用表绑定所以炸）；
+            // ③ ExplorerCore 无 [StaticConstructorOnStartup]，早加载不可能先于扫描。
+            // 对应修复三层：① 擦除载荷字段（C.5-lite）；② AppDomain 级 AssemblyResolve 应答器
+            // （RoslynAssemblyLoader，追加 8）；③ 壳类扫描前注入（追加 6）。
+            // 不读配置——配置只决定"是否使用"，不决定"是否加载"；ResetConsole 处的 EnsureLoaded
+            // 幂等命中缓存（s_attempted 锁 + 应答器 "-="/"+=" 重挂），行为不变，与壳类谁先谁生效。
             // 跨配置安全：RoslynAssemblyLoader 不在 csproj 非 STANDALONE 排除组（排除组仅
             // ReferenceScanner + RoslynCompiler/DiagnosticFormatter/ReplSession/RoslynScriptEvaluator
             // 五件，本类仅依赖 System.*），9 配置全编译，无需 #if。
-            // ⚠️ 位置约束与已知盲区（对端会话审查提出）：本调用是【UE 初始化链的一部分】，
-            // 不是"比 UE 更早"——它依赖本链被完整执行到此处；若将来链序调整或前序步骤抛异常
-            // 致此处被跳过，早加载会静默失效（字段依赖并未消除——本修复属止血，非治本）。
-            // 升级路径（已登记任务 12 矩阵/最终审查）：若未来任何早期反射器（UniverseLib/Harmony/
-            // 第三方 mod 检查器）再报同类 TypeLoadException，直接上 C 方案（Roslyn 四件移出主程序集
-            // 为卫星程序集），勿再加时序类补丁。
+            // 升级路径（C 方案，已登记任务 12 矩阵/最终审查）：以上三层均为同一程序集内的止血；
+            // 治本 = Roslyn 四件移出主程序集为卫星程序集（本调用点随之下沉/迁走）。前置包与壳类已是
+            // 该路径的第一步；若再有早期反射器（UniverseLib/Harmony/第三方 mod 检查器）报同类
+            // TypeLoadException，直接上 C 方案，勿再加时序类补丁。
             try { RoslynAssemblyLoader.EnsureLoaded(Path.Combine(ExplorerFolder, "Roslyn")); }
             catch (Exception ex)
             {

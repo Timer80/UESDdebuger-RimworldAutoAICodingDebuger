@@ -1,4 +1,3 @@
-﻿using Mono.CSharp;
 using System.Collections;
 using System.Text;
 using UnityExplorer.Config;
@@ -12,7 +11,11 @@ namespace UnityExplorer.CSConsole
 {
     public static class ConsoleController
     {
-        public static ScriptEvaluator Evaluator { get; private set; }
+        public static IScriptEvaluator Evaluator { get; private set; }
+
+        /// <summary>本次会话实际生效的求值器：true=Roslyn，false=mcs（回退）。</summary>
+        public static bool UsingRoslyn { get; private set; }
+
         public static LexerBuilder Lexer { get; private set; }
         public static CSAutoCompleter Completer { get; private set; }
 
@@ -55,8 +58,11 @@ namespace UnityExplorer.CSConsole
             try
             {
                 ResetConsole(false);
+
                 // ensure the compiler is supported (if this fails then SRE is probably stripped)
-                Evaluator.Compile("0 == 0");
+                // 求值器自检：任一实现（mcs / Roslyn）都必须能编译一个平凡表达式
+                if (!Evaluator.Evaluate("0 == 0", out string probeDiag))
+                    throw new Exception(string.IsNullOrEmpty(probeDiag) ? "evaluator probe failed" : probeDiag);
             }
             catch (Exception ex)
             {
@@ -117,14 +123,47 @@ namespace UnityExplorer.CSConsole
             if (SRENotSupported)
                 return;
 
-            if (Evaluator != null)
-                Evaluator.Dispose();
+            // 替换/卸载会话时 Dispose（任务 6 生命周期契约：Roslyn 侧转发 s_session.Dispose 摘钩）
+            Evaluator?.Dispose();
 
+            // mcs 路径（回退）需要 TextWriter 传给 ScriptEvaluator 构造，Roslyn 路径不用。
+            // 无条件生成，避免回退分支拿到 null writer。
             GenerateTextWriter();
+
+#if STANDALONE_MONO
+            string blacklist = ConfigManager.CSConsole_Assembly_Blacklist.Value;
+            // Roslyn 侧只在 STANDALONE_Mono 参与编译（net472 能消费 netstandard2.0 载荷）。
+            // ⚠️ 不能用 #if STANDALONE：STANDALONE_Cpp 同样定义 STANDALONE，但那份程序集不含
+            // RoslynScriptEvaluator/ReferenceScanner（csproj Compile Remove 排除四件），会 CS0246。
+            // STANDALONE_MONO 由 SDK 按 Configuration 隐式注入（ImplicitDefineConstants）。
+            bool wantRoslyn = ConfigManager.CSharp_Console_Use_Roslyn.Value;
+            string payloadDir = Path.Combine(ExplorerCore.ExplorerFolder, "Roslyn");
+
+            if (wantRoslyn && RoslynAssemblyLoader.EnsureLoaded(payloadDir))
+            {
+                ReferenceSet refs = ReferenceScanner.Collect(blacklist, out string report);
+                Evaluator = new RoslynScriptEvaluator(refs.Paths, blacklist);
+                UsingRoslyn = true;
+                ExplorerCore.Log($"[CSConsole] Roslyn 求值器就绪（{report}）");
+            }
+            else
+            {
+                Evaluator = new ScriptEvaluator(evaluatorStringWriter)
+                {
+                    InteractiveBaseClass = typeof(ScriptInteraction)
+                };
+                UsingRoslyn = false;
+                if (wantRoslyn)
+                    ExplorerCore.LogWarning($"[CSConsole] 回退 mcs：{RoslynAssemblyLoader.FailureReason}");
+            }
+#else
+            // 其余配置没有 Roslyn 实现（未编译进程序集），恒用 mcs。
             Evaluator = new ScriptEvaluator(evaluatorStringWriter)
             {
                 InteractiveBaseClass = typeof(ScriptInteraction)
             };
+            UsingRoslyn = false;
+#endif
 
             usingDirectives = new HashSet<string>();
             foreach (string use in DefaultUsings.Parse(ConfigManager.CSharp_Console_Default_Usings.Value))
@@ -160,55 +199,19 @@ namespace UnityExplorer.CSConsole
             if (SRENotSupported)
                 return;
 
-            if (evaluatorStringWriter == null || evaluatorOutput == null)
-            {
-                GenerateTextWriter();
-                Evaluator._textWriter = evaluatorStringWriter;
-            }
-
             try
             {
-                // Compile the code. If it returned a CompiledMethod, it is REPL.
-                CompiledMethod repl = Evaluator.Compile(input);
-
-                if (repl != null)
+                if (Evaluator.Evaluate(input, out string output))
                 {
-                    // Valid REPL, we have a delegate to the evaluation.
-                    try
-                    {
-                        object ret = null;
-                        repl.Invoke(ref ret);
-                        string result = ret?.ToString();
-                        if (!string.IsNullOrEmpty(result))
-                            ExplorerCore.Log($"Invoked REPL, result: {ret}");
-                        else
-                            ExplorerCore.Log($"Invoked REPL (no return value)");
-                    }
-                    catch (Exception ex)
-                    {
-                        ExplorerCore.LogWarning($"Exception invoking REPL: {ex}");
-                    }
-                }
-                else
-                {
-                    // The compiled code was not REPL, so it was a using directive or it defined classes.
-
-                    string output = Evaluator._textWriter.ToString();
-                    string[] outputSplit = output.Split('\n');
-                    if (outputSplit.Length >= 2)
-                        output = outputSplit[outputSplit.Length - 2];
-                    evaluatorOutput.Clear();
-
-                    if (ScriptEvaluator._reportPrinter.ErrorsCount > 0)
-                        throw new FormatException($"Unable to compile the code. Evaluator's last output was:\r\n{output}");
+                    if (!string.IsNullOrEmpty(output))
+                        ExplorerCore.Log($"Invoked REPL, result: {output}");
                     else if (!supressLog)
-                        ExplorerCore.Log($"Code compiled without errors.");
+                        ExplorerCore.Log("Code compiled without errors.");
                 }
-            }
-            catch (FormatException fex)
-            {
-                if (!supressLog)
-                    ExplorerCore.LogWarning(fex.Message);
+                else if (!supressLog)
+                {
+                    ExplorerCore.LogWarning($"Unable to compile the code.{Environment.NewLine}{output}");
+                }
             }
             catch (Exception ex)
             {

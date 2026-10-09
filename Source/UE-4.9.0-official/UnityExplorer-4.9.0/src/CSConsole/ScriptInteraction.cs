@@ -1,12 +1,13 @@
 ﻿using HarmonyLib;
-using Mono.CSharp;
 using System.Collections;
 using System.Text;
 using UnityExplorer.UI.Panels;
 
 namespace UnityExplorer.CSConsole
 {
-    public class ScriptInteraction : InteractiveBase
+    // mcs InteractiveBase 是 mcs 求值器要求的基类契约（ConsoleController 用它设 InteractiveBaseClass），
+    // 唯一残留的 mcs 依赖；三个 helper 的 mcs 内部反射已在任务 7 搬进 ScriptEvaluator.GetClasses()。
+    public class ScriptInteraction : Mono.CSharp.InteractiveBase
     {
         public static object CurrentTarget
             => InspectorManager.ActiveInspector?.Target;
@@ -35,12 +36,14 @@ namespace UnityExplorer.CSConsole
         public static object Paste()
             => ClipboardPanel.Current;
 
+        // 注意：裸 Evaluator 会解析到继承自 Mono.CSharp.Evaluator 的**实例**属性（只对 mcs 有效），
+        // 必须显式走 ConsoleController.Evaluator（IScriptEvaluator），否则 Roslyn 路径下拿到 null。
         public static void GetUsing()
-            => Log(Evaluator.GetUsing());
+            => Log(ConsoleController.Evaluator.GetUsing());
 
         public static void GetVars()
         {
-            string vars = Evaluator.GetVars()?.Trim();
+            string vars = ConsoleController.Evaluator.GetVars();
             if (string.IsNullOrEmpty(vars))
                 ExplorerCore.LogWarning("No variables seem to be defined!");
             else
@@ -49,23 +52,11 @@ namespace UnityExplorer.CSConsole
 
         public static void GetClasses()
         {
-            if (AccessTools.Field(typeof(Evaluator), "source_file")
-                    .GetValue(Evaluator) is CompilationSourceFile sourceFile
-                && sourceFile.Containers.Any())
-            {
-                StringBuilder sb = new();
-                sb.Append($"There are {sourceFile.Containers.Count} defined classes:");
-                foreach (TypeDefinition type in sourceFile.Containers.Where(it => it is TypeDefinition))
-                {
-                    sb.Append($"\n\n{type.MemberName.Name}:");
-                    foreach (MemberCore member in type.Members)
-                        sb.Append($"\n\t- {member.AttributeTargets}: \"{member.MemberName.Name}\" ({member.ModFlags})");
-                }
-                Log(sb.ToString());
-            }
-            else
+            string classes = ConsoleController.Evaluator.GetClasses();
+            if (string.IsNullOrEmpty(classes))
                 ExplorerCore.LogWarning("No classes seem to be defined.");
-
+            else
+                Log(classes);
         }
     }
 }

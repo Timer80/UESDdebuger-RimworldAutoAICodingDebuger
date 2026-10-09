@@ -77,7 +77,7 @@ namespace UnityExplorer.CSConsole
             }
             string input = InputField.Text.Substring(startIdx, caret - startIdx + 1);
 
-            // Get MCS completions
+            // Get evaluator completions (mcs or Roslyn; both behind IScriptEvaluator)
 
             string[] evaluatorCompletions = ConsoleController.Evaluator.GetCompletions(input, out string prefix);
 

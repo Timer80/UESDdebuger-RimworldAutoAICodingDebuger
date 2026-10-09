@@ -21,8 +21,31 @@ namespace RoslynBridgeTests
             TestLoadFailureDoesNotThrow();
             TestEnsureLoadedIsIdempotent();
             TestSuccessPathViaChildProcess();
+            TestReferenceSet();
             Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
             return failures == 0 ? 0 : 1;
+        }
+
+        static void TestReferenceSet()
+        {
+            var set = new ReferenceSet();
+            Check("空集为空", set.Paths.Count == 0);
+
+            Check("加一条路径成功", set.TryAdd(@"C:\a\mscorlib.dll", "mscorlib", ""));
+            Check("同 simple name 去重（先到先得）", !set.TryAdd(@"C:\b\mscorlib.dll", "mscorlib", ""));
+            Check("去重后仍只有 1 条", set.Paths.Count == 1);
+            Check("去重保留先到的那条", set.Paths[0] == @"C:\a\mscorlib.dll");
+
+            Check("dynamic 程序集跳过", !set.TryAdd(@"", "eval-3", ""));
+            Check("空路径跳过", !set.TryAdd(null, "Foo", ""));
+            Check("completions 跳过", !set.TryAdd(@"C:\a\completions.dll", "completions", ""));
+
+            Check("黑名单命中跳过", !set.TryAdd(@"C:\a\Bad.dll", "Bad", "Bad;Other"));
+            Check("黑名单带 .dll 后缀也能命中", !set.TryAdd(@"C:\a\Bad2.dll", "Bad2", "Bad2.dll;"));
+            Check("黑名单大小写不敏感", !set.TryAdd(@"C:\a\Bad3.dll", "Bad3", "bad3"));
+            Check("未命中黑名单可加入", set.TryAdd(@"C:\a\Good.dll", "Good", "Bad;Other"));
+
+            Check("顺序稳定（先加载的在前）", set.Paths[0] == @"C:\a\mscorlib.dll");
         }
 
         /// <summary>

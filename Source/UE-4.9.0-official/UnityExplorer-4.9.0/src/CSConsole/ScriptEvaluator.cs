@@ -1,11 +1,15 @@
-﻿using Mono.CSharp;
+﻿using HarmonyLib;
+using Mono.CSharp;
+using System.Linq;
+using System.Reflection;
+using System.Text;
 using UnityExplorer.Config;
 
 // Thanks to ManlyMarco for this
 
 namespace UnityExplorer.CSConsole
 {
-    public class ScriptEvaluator : Evaluator, IDisposable
+    public class ScriptEvaluator : Evaluator, IScriptEvaluator
     {
         internal TextWriter _textWriter;
         internal static StreamReportPrinter _reportPrinter;
@@ -32,14 +36,72 @@ namespace UnityExplorer.CSConsole
             _textWriter.Dispose();
         }
 
+        public bool IsAvailable => true;
+        public string FailureReason => null;
+
+        public bool Evaluate(string input, out string output)
+        {
+            output = null;
+            CompiledMethod repl = null;
+            try { repl = Compile(input); }
+            catch (Exception ex) { output = ex.Message; return false; }
+
+            if (repl != null)
+            {
+                object ret = null;
+                try { repl.Invoke(ref ret); }
+                catch (Exception ex) { output = ex.Message; return false; }
+                output = ret?.ToString();
+                return true;
+            }
+            output = _reportPrinter.ErrorsCount > 0 ? _textWriter.ToString() : null;
+            return _reportPrinter.ErrorsCount == 0;
+        }
+
+        // 以下三个成员与基类 Mono.CSharp.Evaluator 的同名同签名方法构成隐藏：
+        // 不加 new 会报 CS0108（破坏 0 警告），故显式声明隐藏意图（对简报的偏离，见报告）。
+        public new string[] GetCompletions(string input, out string prefix)
+        {
+            try { return base.GetCompletions(input, out prefix); }
+            catch { prefix = ""; return new string[0]; }
+        }
+
+        public new string GetUsing() => base.GetUsing();
+        public new string GetVars() => base.GetVars();
+        public void AddUsing(string ns) => Run("using " + ns + ";");
+
+        // 原来在 ScriptInteraction.GetClasses 里的 mcs 内部反射，集中搬到这里（接口要求两边都能给类清单）
+        static readonly FieldInfo fi_sourceFile = AccessTools.Field(typeof(Evaluator), "source_file");
+
+        public string GetClasses()
+        {
+            if (fi_sourceFile.GetValue(this) is CompilationSourceFile sourceFile && sourceFile.Containers.Any())
+            {
+                var sb = new StringBuilder();
+                sb.Append($"There are {sourceFile.Containers.Count} defined classes:");
+                foreach (TypeDefinition type in sourceFile.Containers.Where(it => it is TypeDefinition))
+                {
+                    sb.Append($"\n\n{type.MemberName.Name}:");
+                    foreach (MemberCore member in type.Members)
+                        sb.Append($"\n\t- {member.AttributeTargets}: \"{member.MemberName.Name}\" ({member.ModFlags})");
+                }
+                return sb.ToString();
+            }
+            return null;
+        }
+
         private void OnAssemblyLoad(object sender, AssemblyLoadEventArgs args)
         {
-            string name = args.LoadedAssembly.GetName().Name;
-
-            if (StdLib.Contains(name))
-                return;
-
-            Reference(args.LoadedAssembly);
+            try
+            {
+                string name = args.LoadedAssembly.GetName().Name;
+                if (StdLib.Contains(name)) return;
+                Reference(args.LoadedAssembly);
+            }
+            catch (Exception ex)
+            {
+                ExplorerCore.LogWarning($"[CSConsole] 引用新加载程序集失败（已忽略）：{args.LoadedAssembly.GetName().Name} - {ex.GetType().Name}");
+            }
         }
 
         private void Reference(Assembly asm)

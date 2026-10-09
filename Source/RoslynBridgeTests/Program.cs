@@ -28,6 +28,7 @@ namespace RoslynBridgeTests
             TestCompiler();
             TestDiagnosticFormat();
             TestReplSession();
+            TestRoslynEvaluatorFacade();
             Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
             return failures == 0 ? 0 : 1;
         }
@@ -154,6 +155,37 @@ namespace RoslynBridgeTests
             var post = s2.Submit("1 + 1");
             Check("Dispose 后 Submit 被拒绝（失败+已释放诊断）", !post.Success && post.ErrorCount > 0
                 && post.Diagnostics.Contains("已释放"), post.Diagnostics);
+        }
+
+        static void TestRoslynEvaluatorFacade()
+        {
+            var refs = ReferenceSetForThisProcess();
+            using (var ev = new RoslynScriptEvaluator(refs))
+            {
+                Check("门面可用", ev.IsAvailable);
+
+                string outp;
+                Check("执行 x=1", ev.Evaluate("var x = 1;", out outp), outp);
+                Check("执行 x+41 得 42", ev.Evaluate("x + 41", out outp) && ev.LastValueText == "42", "value=" + ev.LastValueText);
+                Check("GetVars 含 x", ev.GetVars().Contains("x"));
+                Check("AddUsing 后 using 列表更新", AddUsingAndCheck(ev));
+
+                Check("语法错误返回 false", !ev.Evaluate("var = ;", out outp));
+                Check("错误后仍可用", ev.Evaluate("x", out outp) && ev.LastValueText == "1");
+            }
+
+            // 坑 1（任务 6 生命周期契约）：求值器 Dispose 必须转发 s_session.Dispose（摘 AssemblyResolve 钩）。
+            // 判别推演：若 Dispose 为空转发（简报原文），此处 Evaluate("1 + 1") 会静默成功 → 断言 FAIL。
+            string outp2;
+            var ev2 = new RoslynScriptEvaluator(refs);
+            ev2.Dispose();
+            Check("Dispose 后 Evaluate 返回 false", !ev2.Evaluate("1 + 1", out outp2), outp2);
+        }
+
+        static bool AddUsingAndCheck(RoslynScriptEvaluator ev)
+        {
+            ev.AddUsing("System.Text");
+            return ev.GetUsing().Contains("System.Text");
         }
 
         static System.Collections.Generic.List<string> ReferenceSetForThisProcess()

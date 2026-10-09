@@ -195,12 +195,13 @@
          ① 常规 <Reference> 被 RAR 丢弃（MSB3258/3268）；
          ② RAR 后注入 ReferencePath + 游戏 netstandard.dll facade → CS0012×105；
          ③ 注入游戏 mscorlib 4.0 → CS0433/CS7069（Func<> 双定义，转发链在 net35 引用集不可解）。
-         裁定：STANDALONE_Mono 重定目标 net472（spike 实测 0 警告 0 错误），此三文件进 glob（任务 6 加 ReplSession）；
+         裁定：STANDALONE_Mono 重定目标 net472（spike 实测 0 警告 0 错误），此四文件进 glob（任务 6 加 ReplSession、任务 7 加 RoslynScriptEvaluator）；
          其余 8 个配置（含 3 个非交付 net35 Mono 配置）维持排除，保持各自可编译。 -->
     <ItemGroup Condition="'$(Configuration)'!='STANDALONE_Mono'">
         <Compile Remove="RoslynBridge\RoslynCompiler.cs" />
         <Compile Remove="RoslynBridge\DiagnosticFormatter.cs" />
         <Compile Remove="RoslynBridge\ReplSession.cs" />
+        <Compile Remove="RoslynBridge\RoslynScriptEvaluator.cs" />
     </ItemGroup>
     <!-- 架构 A 正式接线：net472 可直接消费 netstandard2.0，按计划原样常规 <Reference>
          引 lib/roslyn 载荷（Private=false：不进输出，由部署脚本单独搬运）。 -->

@@ -4,9 +4,9 @@
 
 **目标：** 把 `UESDdebuger` 内嵌 UnityExplorer 的 C# 控制台从 `Mono.CSharp`（语言上限≈C# 7.2，无本地函数/无 C# 8+）换成 **Roslyn 4.14**，让控制台能编译执行到 C# 13，同时保留 mcs 作为可开关回退。
 
-**架构：** 新增 `UnityExplorer.RoslynBridge` 命名空间（依赖加载器 / 引用集合 / 编译内核 / 诊断 / polyfill / REPL 会话 / 求值器门面），通过新的 `IScriptEvaluator` 抽象与既有 `ScriptEvaluator`(mcs) 并列；`ConsoleController` 只面向抽象，用配置项 `CSharp Console Use Roslyn` 切换，Roslyn 不可用时自动回退 mcs。Roslyn 依赖 8 个 DLL 作为**载荷随包分发**（`lib/roslyn/`），**不**用 NuGet 还原（本机缓存缺 Immutable/Metadata 9.0.0 等，离线还原会失败）。
+**架构：** 新增 `UnityExplorer.RoslynBridge` 命名空间（依赖加载器 / 引用集合 / 编译内核 / 诊断 / polyfill / REPL 会话 / 求值器门面），通过新的 `IScriptEvaluator` 抽象与既有 `ScriptEvaluator`(mcs) 并列；`ConsoleController` 只面向抽象，用配置项 `CSharp Console Use Roslyn` 切换，Roslyn 不可用时自动回退 mcs。Roslyn 依赖 8 个 DLL 作为**载荷随包分发**（`lib/roslyn/`），**不**用 NuGet 还原（离线环境包缓存不全必然失败；缺件按 §0 表的包路径经 nuget.org flat-container 显式下载 nupkg 解压取 dll，任务 1/4 先例）。
 
-**技术栈：** C#（net35 目标框架，`LangVersion 10.0`）、Microsoft.CodeAnalysis.CSharp 4.14.0（netstandard2.0 构建）、Unity 2022.3.35f1 的 Mono 6.13、RimWorld 1.6.4871、测试用 net472 控制台工程 + 手写 `Check()` runner（沿用 `Source/HotReloadTests` 约定）。
+**技术栈：** C#（交付配置 **STANDALONE_Mono 目标框架 net472**——2026-10-09 人类裁定架构 A 重定目标，net35 实测无法编译期消费 netstandard2.0；其余 3 个非交付 Mono 配置维持 net35、Roslyn 编译文件对其排除；`LangVersion 10.0`）、Microsoft.CodeAnalysis.CSharp 4.14.0（netstandard2.0 构建）、Unity 2022.3.35f1 的 Mono 6.13、RimWorld 1.6.4871、测试用 net472 控制台工程 + 手写 `Check()` runner（沿用 `Source/HotReloadTests` 约定）。
 
 ---
 
@@ -54,12 +54,14 @@
 |---|---|---|
 | `Microsoft.CodeAnalysis.dll` | 4.14.0 | NuGet `microsoft.codeanalysis.common/4.14.0/lib/netstandard2.0` |
 | `Microsoft.CodeAnalysis.CSharp.dll` | 4.14.0 | NuGet `microsoft.codeanalysis.csharp/4.14.0/lib/netstandard2.0` |
-| `System.Collections.Immutable.dll` | 8.0.0 | NuGet `system.collections.immutable/8.0.0/lib/netstandard2.0` |
-| `System.Reflection.Metadata.dll` | 8.0.0 | NuGet `system.reflection.metadata/8.0.0/lib/netstandard2.0` |
-| `System.Memory.dll` | 4.5.3 | NuGet `system.memory/4.5.3/lib/netstandard2.0` |
+| `System.Collections.Immutable.dll` | 9.0.0（程序集 9.0.0.0） | NuGet `system.collections.immutable/9.0.0/lib/netstandard2.0` |
+| `System.Reflection.Metadata.dll` | 9.0.0（程序集 9.0.0.0） | NuGet `system.reflection.metadata/9.0.0/lib/netstandard2.0` |
+| `System.Memory.dll` | 4.5.5（程序集 4.0.1.2） | NuGet `system.memory/4.5.5/lib/netstandard2.0` |
 | `System.Runtime.CompilerServices.Unsafe.dll` | 6.0.0 | NuGet `system.runtime.compilerservices.unsafe/6.0.0/lib/netstandard2.0` |
-| `System.Threading.Tasks.Extensions.dll` | 4.5.2 | NuGet `system.threading.tasks.extensions/4.5.2/lib/netstandard2.0` |
+| `System.Threading.Tasks.Extensions.dll` | 4.5.4（程序集 4.2.0.1） | NuGet `system.threading.tasks.extensions/4.5.4/lib/netstandard2.0` |
 | `System.Numerics.Vectors.dll` | 4.1.3.0 | 取 NuGet 包 **`system.numerics.vectors/4.4.0`** 的 `lib/net46`（实测该包=程序集 4.1.3.0，与 PoC 一致；**4.5.0 包是 4.1.4.0、与 PoC 实测不符，不要用**。可行性验证时曾临时用 VS 安装目录的副本，不可再分发） |
+
+> **2026-10-09 换版裁定（人类）**：Immutable / Reflection.Metadata / Memory / Tasks.Extensions 四件的版本**必须与 CodeAnalysis 4.14.0 的 AssemblyRef 实测一致**（9.0.0.0 / 9.0.0.0 / 4.0.1.2 / 4.2.0.1；对应包 9.0.0 / 9.0.0 / 4.5.5 / 4.5.4），**旧 8.0.0 线废除**——旧线在 net472 测试工程触发 CS1705 版本倒挂硬错误与运行期绑定失败（任务 4/5 实验轮实测），换版后离线 53 断言全绿、STANDALONE_Mono 构建 0 警告 0 错误。`Numerics.Vectors` 不在倒挂表内，维持 4.1.3.0。载荷每件 SHA256 与换版记录见 `lib/roslyn/VERSIONS.md`。游戏内 Mono 加载验证落在任务 8。
 
 ---
 
@@ -94,7 +96,7 @@
 | `src/CSConsole/Lexers/KeywordLexer.cs` | 补 C# 8+ 关键字（`record/init/required/with/global/not/and/or`…） |
 | `src/Hooks/HookInstance.cs` | patch 类编译改走抽象 |
 | `src/Config/ConfigManager.cs` | 新增 `CSharp_Console_Use_Roslyn`(bool, 默认 true)、`CSharp_Console_Allow_Mod_Type_Resolution`(bool, 默认 true)、`CSharp_Console_Default_Usings`(string, 默认扩展表)。**不设引用档位配置**（引用集恒为 21，额外全靠诊断自愈） |
-| `src/UnityExplorer.csproj` | 新增 `<Reference>` 指向 `lib/roslyn/*.dll`（`Private=false`，不复制到输出，由部署脚本单独搬运）；新增 `RoslynBridge` 编译项 |
+| `src/UnityExplorer.csproj` | **（2026-10-09 架构 A，人类裁定）** STANDALONE_Mono 目标框架 net35→**net472**（spike 实测 0 警告 0 错误），使主工程可按本行原设计用常规 `<Reference>` 指向 `lib/roslyn/*.dll`（`Private=false`，不复制到输出，由部署脚本单独搬运）；`RoslynCompiler`/`DiagnosticFormatter`/`ReferenceScanner` 由默认 glob 纳入（前两者对非 STANDALONE_Mono 配置排除、ReferenceScanner 对 5 个非 Mono 配置排除）。**背景**：net35 无法编译期消费 netstandard2.0（任务 4/5 实验轮三路实测死：RAR 拒引用 MSB3258/3268、注入 netstandard facade 后 CS0012×105、注入游戏 mscorlib 4.0 后 CS0433/CS7069）。**任务 8 须补验**：① 9.0 载荷游戏 Mono 加载 ② net472 重定目标产物游戏内加载运行 ③ build.ps1 的 mcs.dll ILRepack 在 net472 主程序集下合并成功 |
 | `Source/UE-4.9.0-official/UnityExplorer-4.9.0/build.ps1` | STANDALONE_Mono 段：产物旁复制 8 件套；**ILRepack 不吸收 Roslyn**（体积+内部化会让 `Type.GetType` 失败） |
 | `MODIFICATIONS.md` / `THIRD_PARTY_NOTICES.md` | 声明 Roslyn(MIT) 及 7 个依赖；载荷分发说明 |
 | `MCP/index.js` | `execute_csharp_code` 的 `notes` 文案（第 2937 行）改为「默认引用本体 21 个程序集，缺件与模组类型靠诊断自愈现场补入，可直接用 Verse/RimWorld 裸类型名」 |
@@ -118,11 +120,11 @@ $dst = "Source\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn"
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
 Copy-Item "$u\microsoft.codeanalysis.common\4.14.0\lib\netstandard2.0\Microsoft.CodeAnalysis.dll" $dst -Force
 Copy-Item "$u\microsoft.codeanalysis.csharp\4.14.0\lib\netstandard2.0\Microsoft.CodeAnalysis.CSharp.dll" $dst -Force
-Copy-Item "$u\system.collections.immutable\8.0.0\lib\netstandard2.0\System.Collections.Immutable.dll" $dst -Force
-Copy-Item "$u\system.reflection.metadata\8.0.0\lib\netstandard2.0\System.Reflection.Metadata.dll" $dst -Force
-Copy-Item "$u\system.memory\4.5.3\lib\netstandard2.0\System.Memory.dll" $dst -Force
+Copy-Item "$u\system.collections.immutable\9.0.0\lib\netstandard2.0\System.Collections.Immutable.dll" $dst -Force
+Copy-Item "$u\system.reflection.metadata\9.0.0\lib\netstandard2.0\System.Reflection.Metadata.dll" $dst -Force
+Copy-Item "$u\system.memory\4.5.5\lib\netstandard2.0\System.Memory.dll" $dst -Force
 Copy-Item "$u\system.runtime.compilerservices.unsafe\6.0.0\lib\netstandard2.0\System.Runtime.CompilerServices.Unsafe.dll" $dst -Force
-Copy-Item "$u\system.threading.tasks.extensions\4.5.2\lib\netstandard2.0\System.Threading.Tasks.Extensions.dll" $dst -Force
+Copy-Item "$u\system.threading.tasks.extensions\4.5.4\lib\netstandard2.0\System.Threading.Tasks.Extensions.dll" $dst -Force
 # System.Numerics.Vectors 不在本机缓存：从官方 NuGet 包取（勿用 VS 安装目录副本 —— 那是不可再分发的产物）
 # 用 4.4.0（实测 lib/net46 = 程序集 4.1.3.0，与 PoC 一致）；4.5.0 包是 4.1.4.0、与 PoC 不符，不要用
 nuget install System.Numerics.Vectors -Version 4.4.0 -OutputDirectory temp\pkg

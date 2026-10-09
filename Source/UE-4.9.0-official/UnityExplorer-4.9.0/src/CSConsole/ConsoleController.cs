@@ -58,27 +58,14 @@ namespace UnityExplorer.CSConsole
         {
             try
             {
-                ResetConsole(false);
-
                 // 求值器自检：任一实现（mcs / Roslyn）都必须能编译一个平凡表达式。
-                // B1（合并修复轮）：Roslyn 探针失败时【先回退 mcs 路径再探针】，两路都失败才禁用控制台。
-                // 可达路径：refs=21/21 但 Managed 路径解析错 → ReplSession 零引用编译 `0 == 0`
-                // （__result = 0 == 0; 需 object/mscorlib）→ CS0518 → 探针失败（不是 mcs 坏）。
-                if (!Evaluator.Evaluate("0 == 0", out string probeDiag))
-                {
-                    // UsingRoslyn 读取点：仅当失败发生在 Roslyn 侧才值得回退；mcs 侧失败无路可退。
-                    if (!UsingRoslyn)
-                        throw new Exception(string.IsNullOrEmpty(probeDiag) ? "evaluator probe failed" : probeDiag);
-
-                    ExplorerCore.LogWarning(
-                        $"[CSConsole] Roslyn 探针失败，回退 mcs：{(string.IsNullOrEmpty(probeDiag) ? "evaluator probe failed" : probeDiag)}");
-                    ResetConsole(false, forceMcs: true);
-
-                    if (!Evaluator.Evaluate("0 == 0", out string mcsProbeDiag))
-                        throw new Exception(string.IsNullOrEmpty(mcsProbeDiag) ? "mcs evaluator probe failed" : mcsProbeDiag);
-
-                    ExplorerCore.Log("[CSConsole] 使用 mcs 求值器（Roslyn 探针失败回退）");
-                }
+                // 追加 B（2026-10-09 根因清扫轮）：**探针已并入 ResetConsoleCore**——每次构造求值器
+                // （Init、面板 Reset、配置切换）都跑，失败即按结果回退；此处只需看终态：
+                // Disable = 两条路都编不了（原 B1 语义：Roslyn 探针失败先回退 mcs 再探针，两路都失败才禁用）。
+                EvaluatorChoice choice = ResetConsoleCore(logSuccess: false, forceMcs: false);
+                if (choice == EvaluatorChoice.Disable)
+                    throw new Exception(string.IsNullOrEmpty(LastProbeDiagnostics)
+                        ? "evaluator probe failed" : LastProbeDiagnostics);
             }
             catch (Exception ex)
             {
@@ -134,11 +121,32 @@ namespace UnityExplorer.CSConsole
 
         public static void ResetConsole() => ResetConsole(true);
 
+        /// <summary>
+        /// 面板 Reset / 配置切换入口。追加 B：**现在就探针**（旧实现只在 Init 探针一次，
+        /// 后续 Reset 只新建求值器 ⇒ 可能留下"Roslyn 已就绪但实际编译不了"的静默坏态）。
+        /// 失败到 Disable 时不 Disable 整个控制台（面板重置不该把控制台打死），只打错误日志。
+        /// </summary>
         public static void ResetConsole(bool logSuccess = true, bool forceMcs = false)
         {
             if (SRENotSupported)
                 return;
 
+            EvaluatorChoice choice = ResetConsoleCore(logSuccess, forceMcs);
+            if (choice == EvaluatorChoice.Disable)
+                ExplorerCore.LogError("[CSConsole] 重置失败：两条求值器都不可用（"
+                    + (LastProbeDiagnostics ?? "evaluator probe failed") + "）");
+        }
+
+        /// <summary>最近一次探针的诊断文本（Init 把它交给 DisableConsole；面板日志也用它）。</summary>
+        static string LastProbeDiagnostics;
+
+        /// <summary>
+        /// 构造求值器 + 预置默认 using + **探针**，返回终态（追加 E 的纯决策函数在此被喂入三个输入）。
+        /// 顺序（追加 D 明确要求）：先按引用集可用性组装**有效** using → 再构造 → 再探针；
+        /// 探针失败且初始是 Roslyn → 以 forceMcs 递归一次（forceMcs=true 时不再进 Roslyn 分支，无深度风险）。
+        /// </summary>
+        static EvaluatorChoice ResetConsoleCore(bool logSuccess, bool forceMcs)
+        {
             // 替换/卸载会话时 Dispose（任务 6 生命周期契约：Roslyn 侧转发 s_session.Dispose 摘钩）
             Evaluator?.Dispose();
 
@@ -146,25 +154,59 @@ namespace UnityExplorer.CSConsole
             // 无条件生成，避免回退分支拿到 null writer。
             GenerateTextWriter();
 
-#if STANDALONE_MONO
             string blacklist = ConfigManager.CSConsole_Assembly_Blacklist.Value;
-            // Roslyn 侧只在 STANDALONE_Mono 参与编译（net472 能消费 netstandard2.0 载荷）。
-            // ⚠️ 不能用 #if STANDALONE：STANDALONE_Cpp 同样定义 STANDALONE，但那份程序集不含
-            // RoslynScriptEvaluator/ReferenceScanner（csproj Compile Remove 排除四件），会 CS0246。
-            // STANDALONE_MONO 由 SDK 按 Configuration 隐式注入（ImplicitDefineConstants）。
-            // forceMcs（B1）：Init 的 Roslyn 探针失败回退时强制走 mcs 路径；其余调用方恒为 false。
             bool wantRoslyn = !forceMcs && ConfigManager.CSharp_Console_Use_Roslyn.Value;
-            string payloadDir = Path.Combine(ExplorerCore.ExplorerFolder, "Roslyn");
+            // 配置判定只在一处（EvaluatorSelector）；用局部变量接收，避免恒假 const 触发 CS0162 不可达告警。
+            bool roslynCompiled = EvaluatorSelector.RoslynCompiledIn;
 
-            if (wantRoslyn && RoslynAssemblyLoader.EnsureLoaded(payloadDir))
+            // 本会话的默认 using 候选：配置项（默认值 = DefaultUsings.BuiltIn 12 项）+ CPP 追加项
+            List<string> defaultUsings = DefaultUsings.Parse(ConfigManager.CSharp_Console_Default_Usings.Value);
+#if CPP
+            foreach (string use in DefaultUsing)
+                if (!defaultUsings.Contains(use)) defaultUsings.Add(use);
+#endif
+
+            // 输入 ③：载荷是否就绪（只有真要走 Roslyn 时才付这个代价）
+            bool payloadLoaded = false;
+#if STANDALONE_MONO
+            if (roslynCompiled && wantRoslyn)
             {
-                ReferenceSet refs = ReferenceScanner.Collect(blacklist, out string report);
+                string payloadDir = Path.Combine(ExplorerCore.ExplorerFolder, "Roslyn");
+                payloadLoaded = RoslynAssemblyLoader.EnsureLoaded(payloadDir);
+            }
+#endif
+
+            // 输入 ①②③ → 纯函数决策（追加 E：真值表离线可断言）
+            EvaluatorChoice choice = EvaluatorSelector.ChooseInitial(roslynCompiled, wantRoslyn, payloadLoaded);
+
+            if (choice == EvaluatorChoice.Roslyn)
+            {
+#if STANDALONE_MONO
+                ReferenceSet refs = ReferenceScanner.Collect(blacklist, out string report, out List<string> unavailable);
+
+                // ── B1 护栏（数据驱动，非硬编码）：引用集缺件 ⇒ 把对应默认 using 先从本会话剔除 ──
+                // 不剔除的实测症状：`UniverseLib` 缺引用时**每一次提交**都带 `using UniverseLib;` 去编译，
+                // 连 `new[]{1,2,3}.Sum()` 都报 CS0246 'UniverseLib'，而求值器仍是 Roslyn
+                // ⇒ 用户"看得见 Roslyn 却什么都写不了、报错还指向他从没写过的命名空间"。
+                if (unavailable.Count > 0)
+                {
+                    var detail = new StringBuilder();
+                    foreach (string ns in unavailable)
+                    {
+                        if (detail.Length > 0) detail.Append("、");
+                        detail.Append(ns).Append("（需 ").Append(DefaultUsings.OwnerOf(ns) ?? "?").Append("）");
+                    }
+                    ExplorerCore.LogWarning("[CSConsole] 因程序集不可用，已从本次会话默认 using 中剔除："
+                        + detail + "；其余默认项不受影响。" + report);
+                    foreach (string ns in unavailable) defaultUsings.Remove(ns);
+                }
+
                 // A1（合并修复轮）：Allow_Mod_Type_Resolution 落位为第三参。铁律：任务 13 自愈器落地前
                 // 该开关不改变引用集行为（实现侧 RoslynScriptEvaluator 仅存储，不预加 ModAssemblyPaths）。
                 Evaluator = new RoslynScriptEvaluator(refs.Paths, blacklist,
                     ConfigManager.CSharp_Console_Allow_Mod_Type_Resolution.Value);
-                UsingRoslyn = true;
                 ExplorerCore.Log($"[CSConsole] Roslyn 求值器就绪（{report}）");
+#endif
             }
             else
             {
@@ -172,33 +214,68 @@ namespace UnityExplorer.CSConsole
                 {
                     InteractiveBaseClass = typeof(ScriptInteraction)
                 };
-                UsingRoslyn = false;
-                if (wantRoslyn)
+                if (roslynCompiled && wantRoslyn && !payloadLoaded)
                     ExplorerCore.LogWarning($"[CSConsole] 回退 mcs：{RoslynAssemblyLoader.FailureReason}");
-                else if (!forceMcs) // C2：仅配置显式关闭 Roslyn 时打此行；forceMcs 回退路径由 Init 的
-                                    // "Roslyn 探针失败回退"行覆盖，此处静默以免误标（复审 Minor 修复：
-                                    // 原 `else if (!UsingRoslyn)` 恒真死条件且会污染回退路径文案）。
+                else if (roslynCompiled && !forceMcs)   // C2：仅配置显式关闭 Roslyn 时打此行；forceMcs 回退路径
+                                                        // 由"Roslyn 探针失败，回退 mcs"行覆盖，此处静默以免误标。
                     ExplorerCore.Log("[CSConsole] 使用 mcs 求值器（配置关闭 Roslyn）");
+                else if (!roslynCompiled)
+                    ExplorerCore.Log("[CSConsole] 使用 mcs 求值器（本配置未编入 Roslyn 实现）");
             }
-#else
-            // 其余配置没有 Roslyn 实现（未编译进程序集），恒用 mcs。
-            Evaluator = new ScriptEvaluator(evaluatorStringWriter)
-            {
-                InteractiveBaseClass = typeof(ScriptInteraction)
-            };
-            UsingRoslyn = false;
-#endif
 
+            // ── 预置 using：Roslyn 侧一次校验编译（B4：旧路径 = 每项一次完整提交 + Assembly.Load），
+            //    mcs 侧沿用逐条 Run（其 using 处理不走本机制）──
             usingDirectives = new HashSet<string>();
-            foreach (string use in DefaultUsings.Parse(ConfigManager.CSharp_Console_Default_Usings.Value))
-                AddUsing(use);
-#if CPP
-            foreach (string use in DefaultUsing)
-                AddUsing(use);
+#if STANDALONE_MONO
+            var roslynEvaluator = Evaluator as RoslynScriptEvaluator;
+            if (roslynEvaluator != null)
+            {
+                string usingDiag;
+                List<string> accepted = roslynEvaluator.PrimeUsings(defaultUsings, out usingDiag);
+                foreach (string ns in accepted) usingDirectives.Add(ns);
+                if (!string.IsNullOrEmpty(usingDiag))
+                    ExplorerCore.LogWarning("[CSConsole] 默认 using 预置：" + usingDiag);
+            }
+            else
 #endif
+            {
+                foreach (string use in defaultUsings)
+                    AddUsing(use);
+            }
+
+            // ── 探针（追加 B：每次 Reset 都跑；结果驱动回退）──
+            string probeDiag;
+            bool probeOk = Evaluator.Evaluate("0 == 0", out probeDiag);
+            LastProbeDiagnostics = probeDiag;
+
+            EvaluatorChoice after = EvaluatorSelector.ChooseAfterProbe(choice, probeOk);
+            if (after == EvaluatorChoice.Mcs && choice == EvaluatorChoice.Roslyn)
+            {
+                ExplorerCore.LogWarning("[CSConsole] Roslyn 探针失败，回退 mcs："
+                    + (string.IsNullOrEmpty(probeDiag) ? "evaluator probe failed" : probeDiag));
+                return ResetConsoleCore(logSuccess, forceMcs: true);   // 一次性回退，见方法注释
+            }
+            if (after == EvaluatorChoice.Disable)
+                return EvaluatorChoice.Disable;
+
+            // ── 生效判定（追加 A/C）──
+            // 追加 C：`UsingRoslyn` 是**唯一**可靠的"当前生效的是 Roslyn"判据（CS1525/record 报错都不是
+            // 指纹：mcs 对未知关键字同样报 CS1525 风格错误，实测那次 `record` 失败正落在 mcs 生效区间）。
+            UsingRoslyn = EvaluatorSelector.UsingRoslyn(after);
+#if STANDALONE_MONO
+            // 运行时交叉核对：标志与**实际类型**不符即告警（把"日志说 Roslyn 而实际不是"这类归因陷阱堵死）
+            if ((Evaluator is RoslynScriptEvaluator) != UsingRoslyn)
+                ExplorerCore.LogWarning("[CSConsole] 内部不一致：UsingRoslyn=" + UsingRoslyn
+                    + " 但实际求值器是 " + Evaluator.GetType().Name + "，请报告此日志");
+#endif
+            // 追加 A：探针判定完成后打一行"最终生效者"，类型名现算（勿硬编码）
+            ExplorerCore.Log("[CSConsole] 求值器生效：" + EvaluatorSelector.Describe(after)
+                + " (" + Evaluator.GetType().Name + ")");
 
             if (logSuccess)
                 ExplorerCore.Log($"C# Console reset");//. Using directives:\r\n{Evaluator.GetUsing()}");
+
+            return after;
         }
 
         public static void AddUsing(string assemblyName)

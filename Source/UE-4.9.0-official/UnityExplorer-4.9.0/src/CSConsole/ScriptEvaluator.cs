@@ -46,6 +46,18 @@ namespace UnityExplorer.CSConsole
         public bool Evaluate(string input, out string output)
         {
             output = null;
+            // ── B3 根因修复（Important）：诊断**不得跨提交累积** ──
+            // 旧实现 `output = _reportPrinter.ErrorsCount > 0 ? _textWriter.ToString() : null;`
+            // 有两个累积源：① `_textWriter`（StringWriter）自上次 ResetConsole 起**从不重置**，
+            // 故一次失败后的每次失败都把**历史全部错误**再吐一遍；② `StreamReportPrinter.ErrorsCount`
+            // 是**粘性**计数器（同一次会话内只增不减）⇒ 一旦出过错，此后每次提交都被判失败。
+            // 实测后果（对端定位）：一条 record 报错后，后续 `q * 3` 的诊断里混进上一条的内容，
+            // 把两个 agent 都带偏去怀疑"record 解析失败"/"CS1525 是 Roslyn 指纹"。
+            // 修法：进 Compile 前对"文本长度 + 错误计数"取快照，只回传**本次新增**的文本、
+            // 只用**增量**判定本次是否失败（成功路径返回值不变）。
+            string textBefore = _textWriter.ToString();
+            int errorsBefore = _reportPrinter.ErrorsCount;
+
             CompiledMethod repl = null;
             try { repl = Compile(input); }
             catch (Exception ex) { output = ex.Message; return false; }
@@ -58,8 +70,19 @@ namespace UnityExplorer.CSConsole
                 output = ret?.ToString();
                 return true;
             }
-            output = _reportPrinter.ErrorsCount > 0 ? _textWriter.ToString() : null;
-            return _reportPrinter.ErrorsCount == 0;
+
+            bool failedThisTime = _reportPrinter.ErrorsCount > errorsBefore;
+            if (failedThisTime)
+            {
+                string textNow = _textWriter.ToString();
+                output = textNow.Length > textBefore.Length
+                    ? textNow.Substring(textBefore.Length)
+                    : textNow;   // 兜底：报告器未写字（罕见）时退回全量，绝不返回 null 让上层拿不到原因
+                return false;
+            }
+
+            output = null;
+            return true;
         }
 
         // 以下三个成员与基类 Mono.CSharp.Evaluator 的同名同签名方法构成隐藏：

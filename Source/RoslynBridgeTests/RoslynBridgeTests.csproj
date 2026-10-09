@@ -17,6 +17,8 @@
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\ReplSession.cs" Link="ReplSession.cs" />
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\CSConsole\IScriptEvaluator.cs" Link="IScriptEvaluator.cs" />
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\RoslynScriptEvaluator.cs" Link="RoslynScriptEvaluator.cs" />
+    <!-- 根因清扫轮（§17，追加 E）：纯决策逻辑（无 Unity/UE/Roslyn/mcs 依赖）链接进来做真值表离线断言 -->
+    <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\EvaluatorSelector.cs" Link="EvaluatorSelector.cs" />
     <Reference Include="Microsoft.CodeAnalysis"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\Microsoft.CodeAnalysis.dll</HintPath></Reference>
     <Reference Include="Microsoft.CodeAnalysis.CSharp"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\Microsoft.CodeAnalysis.CSharp.dll</HintPath></Reference>
     <!-- 任务 5：RoslynCompiler.cs 触碰 ImmutableArray<Diagnostic>（CS0012 → 必须引用 Immutable）；

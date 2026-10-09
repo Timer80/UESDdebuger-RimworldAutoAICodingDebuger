@@ -11,6 +11,13 @@ namespace UnityExplorer.RoslynBridge
 
         public IList<string> Paths => s_paths;
 
+        /// <summary>该 simple name 是否已进引用集（B1 护栏按可用性过滤默认 using 时用；纯查询，无副作用）。</summary>
+        public bool Contains(string simpleName)
+            => !string.IsNullOrEmpty(simpleName) && s_names.Contains(simpleName);
+
+        /// <summary>已收录的 simple name 快照（顺序无关，供诊断/测试打印）。</summary>
+        public ICollection<string> SimpleNames => s_names;
+
         public bool TryAdd(string location, string simpleName, string blacklist)
         {
             if (string.IsNullOrEmpty(location)) return false;

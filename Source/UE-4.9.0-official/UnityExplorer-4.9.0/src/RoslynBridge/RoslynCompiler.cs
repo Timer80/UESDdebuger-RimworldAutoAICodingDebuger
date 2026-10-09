@@ -14,6 +14,12 @@ namespace UnityExplorer.RoslynBridge
         public byte[] PeBytes;
         public string Diagnostics = "";
         public int ErrorCount;
+        /// <summary>成功提交的可读提示（B3：如"匿名类型已按 object 提升"）。与 Diagnostics 分开存，
+        /// 免得把提示混进错误文本、或顶掉本次的值回显（调用方按需展示）。</summary>
+        public string Notes = "";
+        /// <summary>本次提交**实际编译的生成源码**（REPL 会重写用户输入：usings/字段提升/类体包裹）。
+        /// 诊断里的行列号指的就是它；排错时看它比猜快一个数量级（internal：只给同程序集/离线测试用）。</summary>
+        internal string GeneratedSource = "";
     }
 
     /// <summary>parse → compile → emit 到内存。不负责加载（调用方决定 Assembly.Load 或 CreateFromImage）。</summary>

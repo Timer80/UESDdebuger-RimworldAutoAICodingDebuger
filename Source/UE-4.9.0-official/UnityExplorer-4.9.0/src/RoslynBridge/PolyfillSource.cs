@@ -26,6 +26,12 @@ namespace System.Runtime.CompilerServices
         public const string RefStructs = nameof(RefStructs);
         public const string RequiredMembers = nameof(RequiredMembers);
     }
+
+    // §17 追加：C# 13 `params` 集合（params 修饰非数组集合类型，如 params IEnumerable&lt;int&gt;）
+    // 需要编译器合成的 ParamCollectionAttribute（.NET 8+ 才有）。Unity Mono/net472 没有 ⇒ 缺它时
+    // `params` 集合方法报 CS0656/CS0246。补上即可用（与 IsExternalInit/RequiredMember 同款 polyfill）。
+    [System.AttributeUsage(System.AttributeTargets.Parameter, AllowMultiple = false, Inherited = false)]
+    internal sealed class ParamCollectionAttribute : System.Attribute { }
 }
 
 namespace System.Diagnostics.CodeAnalysis

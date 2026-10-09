@@ -91,35 +91,76 @@ namespace UnityExplorer.RoslynBridge
             string className = "Submission_" + n;
             string baseName = n == 1 ? null : "Submission_" + (n - 1);
 
-            SyntaxTree tree = CSharpSyntaxTree.ParseText(code, new CSharpParseOptions(LanguageVersion.Latest));
+            // 输入归一化（§17 根因清扫，替换原"逐语句补分号"补丁）：
+            // REPL 输入常缺末尾分号；**缺分号时解析器的错误恢复会把后面的语句并进前一条声明**——
+            // 实测 `var v = new Vec(2, 5); v.X * v.Y`（末条缺分号）被解析成**一条**局部声明 + 两个声明符，
+            // 第二个声明符是 `v.X *`（指针类型）+ `v` ⇒ 生成 `public static v.X * v;` 这种垃圾字段
+            // （诊断表现为 CS0246 'v' / CS0214 指针 / CS0102 重复定义，用户完全看不懂）。
+            // 旧补丁只对"解析出来的最后一条语句"重新 ParseStatement ⇒ 单语句重解析**只返回第一条语句**，
+            // 拿不回被并进去的第二条。修法：解析**之前**给整段输入补一个分号（末字符非 ; 或 } 时），
+            // 让解析器一次拿到正确结构；不需要逐语句重解析。
+            string toParse = code;
+            string trimmedInput = code == null ? "" : code.TrimEnd();
+            if (trimmedInput.Length > 0)
+            {
+                char last = trimmedInput[trimmedInput.Length - 1];
+                // `}` 结尾（块/类型声明）与 `;` 结尾都是完整输入；其余补分号
+                //（末行有行注释时补的分号会落进注释——与旧逐语句补法同等行为，无回归）。
+                if (last != ';' && last != '}') toParse = code + ";";
+            }
+
+            SyntaxTree tree = CSharpSyntaxTree.ParseText(toParse, new CSharpParseOptions(LanguageVersion.Latest));
             CompilationUnitSyntax root = tree.GetCompilationUnitRoot();
 
-            // 1) using 指令：吞进会话表，不进类体
+            // 1) using 指令：吞进会话表，不进类体。
+            // B3/B1 根因修复（本轮）：① 存**完整指令文本**，别名/static using（`using Foo = …;`、
+            // `using static X;`）不再被 `u.Name` 剥成半截命名空间（旧码会把 `using Foo = System.Text.StringBuilder;`
+            // 存成 "System.Text.StringBuilder"，下次提交 emit `using System.Text.StringBuilder;` → CS0138）；
+            // ② **成功后才提交**（见本方法尾部）：旧码在编译前就把 using 写进表 —— 一条失败的
+            // `using Bad;` 会让**此后每一次提交**都带上它而全部失败（B1 实测症状的放大器）。
+            var pendingUsings = new List<string>();
             foreach (UsingDirectiveSyntax u in root.Usings)
             {
-                string ns = u.Name.ToString();
-                if (!s_usings.Contains(ns)) s_usings.Add(ns);
+                string directive = u.ToString().Trim();
+                if (directive.Length == 0) continue;
+                if (!directive.EndsWith(";", StringComparison.Ordinal)) directive += ";";
+                if (!s_usings.Contains(directive) && !pendingUsings.Contains(directive))
+                    pendingUsings.Add(directive);
             }
 
             // 2) 顶层变量声明 → 提升为静态字段；顶层类定义 → 直接放进本提交
             var fields = new StringBuilder();
             var classes = new StringBuilder();
+            var notes = new StringBuilder();   // B3：可读提示（不污染 Diagnostics；成功时作为结果回显）
+            var unrecognized = new StringBuilder();   // 追加 F.2：未识别成员形态（响亮拒绝，不静默丢弃）
             var statements = new List<StatementSyntax>();
             foreach (MemberDeclarationSyntax m in root.Members)
             {
                 if (m is GlobalStatementSyntax g)
                 {
                     StatementSyntax stmt = g.Statement;
-                    // 分号规范化：REPL 输入常缺末尾分号；缺分号时解析器会错误恢复——
-                    // 裸标识符（如 `y`）被解析成"缺标识符的局部声明"（type=[y]、ident isMissing），
-                    // 按声明提升会生成 `public static y ;` → CS1519。补分号重新解析得真实结构
-                    //（`y;` → 表达式语句；`var x = 5` → 合法声明仍走提升）。
-                    bool semiMissing =
-                        (stmt is ExpressionStatementSyntax se && se.SemicolonToken.IsMissing)
-                        || (stmt is LocalDeclarationStatementSyntax sl && sl.SemicolonToken.IsMissing);
-                    if (semiMissing) stmt = SyntaxFactory.ParseStatement(stmt.ToString().Trim() + ";");
+                    // （原"缺分号 → SyntaxFactory.ParseStatement(…+';')"补丁已删：整段输入已在解析前补过
+                    //   末尾分号，逐语句重解析只会拿回第一条语句、治不了被并进去的后续语句。）
 
-                    if (stmt is LocalDeclarationStatementSyntax local && local.UsingKeyword == default)
+                    if (stmt is LocalFunctionStatementSyntax lfs)
+                    {
+                        // 追加 F 清扫（同类漏分支）：顶层 `int Twice(int a) => a * 2;` 在 Roslyn 眼里是
+                        // **局部函数**（GlobalStatement 里的 LocalFunctionStatement）——原实现把它丢进
+                        // Run()，于是只在本次提交内可见，**下次提交 CS0103 'Twice'**（"定义了却用不了"）。
+                        // REPL 语义要求"定义了就能用" ⇒ 提升为生成类的成员；缺 static 时补上
+                        //（否则后续提交的 static Run() 调不到它）。若函数体捕获了局部变量，提升后
+                        // 会自然报 CS0103/CS8421——响亮且可解释，好过静默失效。
+                        // 另需补 `public`：这些成员最终是**生成类的嵌套成员**，"无修饰符 = private"
+                        // ⇒ 后续提交（派生类 Submission_N+1）按简单名找不到它（实测 CS0103 'Twice'）。
+                        var fn = lfs;
+                        if (!fn.Modifiers.Any(SyntaxKind.StaticKeyword))
+                            fn = fn.AddModifiers(StaticToken());
+                        if (!HasAccessibility(fn.Modifiers))
+                            fn = fn.AddModifiers(PublicToken());
+                        classes.AppendLine(fn.ToFullString());
+                        if (!s_classes.Contains(lfs.Identifier.Text)) s_classes.Add(lfs.Identifier.Text);
+                    }
+                    else if (stmt is LocalDeclarationStatementSyntax local && local.UsingKeyword == default)
                     {
                         string typeText = local.Declaration.Type.ToString();
                         bool isVar = typeText == "var";
@@ -138,6 +179,19 @@ namespace UnityExplorer.RoslynBridge
                                 if (inferred == null || inferred.TypeKind == TypeKind.Error
                                     || string.IsNullOrEmpty(fieldType))
                                     fieldType = "object";
+                                // B3 根因修复：**匿名类型**的推断结果 ToDisplayString 出来是
+                                // `<anonymous type: int Age, string Name>` 这种**不是合法类型名**的文本
+                                // （Roslyn 的显示格式），写进 `public static <anonymous type: …> p;` 只会得到
+                                // 解析错误 → 用户看到"半截无意义"的诊断。匿名类型本质上无法作为字段类型跨提交
+                                // 保留（其身份只存在于本次编译），故按 object 提升 + 明确提示（Notes 会作为
+                                // 本次结果回显），而不是让它污染下一次提交。
+                                else if (inferred.IsAnonymousType)
+                                {
+                                    fieldType = "object";
+                                    notes.AppendLine("提示：" + v.Identifier.Text
+                                        + " 的推断类型是匿名类型，REPL 无法把匿名类型写成字段类型（跨提交不可保留）"
+                                        + "→ 已按 object 提升；成员访问请改用具体类型，或在同一行内联使用。");
+                                }
                             }
                             fields.AppendLine($"    public static {fieldType} {v.Identifier.Text};");
                             if (v.Initializer != null)
@@ -159,13 +213,51 @@ namespace UnityExplorer.RoslynBridge
                         statements.Add(stmt);
                     }
                 }
-                else if (m is ClassDeclarationSyntax || m is StructDeclarationSyntax
-                         || m is InterfaceDeclarationSyntax || m is EnumDeclarationSyntax)
+                else if (m is BaseNamespaceDeclarationSyntax || m is IncompleteMemberSyntax)
                 {
-                    classes.AppendLine(m.ToFullString());
-                    string name = m is BaseTypeDeclarationSyntax b ? b.Identifier.Text : null;
-                    if (name != null && !s_classes.Contains(name)) s_classes.Add(name);
+                    // 追加 F.2：**兜底必须响亮**。这两类无法嵌进生成类的类体（namespace 只能顶层；
+                    // IncompleteMember = 解析残渣），静默丢弃的表现是"类型莫名找不到"（实测两个 agent
+                    // 都被带偏过），比报错难查一个数量级 ⇒ 记为本次提交失败（不改会话状态）。
+                    unrecognized.AppendLine("不支持的顶层成员形态（已拒绝本次提交，未静默忽略）："
+                        + m.Kind() + " → " + Shorten(m.ToString(), 160));
                 }
+                else if (m is MemberDeclarationSyntax)
+                {
+                    // B2/追加 F 根因清扫（**基类型判定，不再穷举**）：凡"成员声明"形态一律嵌入生成类的
+                    // 类体，因此 class/struct/interface/enum/**record/record struct**/delegate/**方法**/
+                    // 属性/事件/嵌套类型 等全部可用，将来 C# 新增成员形态也自动覆盖。
+                    // （原实现只列 Class/Struct/Interface/Enum 四种具体语法 ⇒ record/record struct/
+                    //   delegate/方法声明统统落进"无分支"被**静默丢弃**：实测 `public record Point(int X, int Y);`
+                    //   提交"成功"但之后 `new Point(3, 4)` 报 CS0246 'Point'，用户完全看不到原因。）
+                    classes.AppendLine(EnsureAccessible(m).ToFullString());
+                    var bt = m as BaseTypeDeclarationSyntax;
+                    if (bt != null && !s_classes.Contains(bt.Identifier.Text)) s_classes.Add(bt.Identifier.Text);
+                    var del2 = m as DelegateDeclarationSyntax;
+                    if (del2 != null && !s_classes.Contains(del2.Identifier.Text))
+                        s_classes.Add(del2.Identifier.Text);
+                }
+                else
+                {
+                    unrecognized.AppendLine("不支持的顶层成员形态（已拒绝本次提交，未静默忽略）："
+                        + m.Kind() + " → " + Shorten(m.ToString(), 160));
+                }
+            }
+
+            // 追加 F.2：未识别形态 → 本次提交失败（Success=false ⇒ 不推进计数、不改会话状态），
+            // 诊断明确指向形态本身，避免用户拿到后续 CS0246 的间接后果。
+            if (unrecognized.Length > 0)
+            {
+                var rejected = new CompileResult
+                {
+                    Success = false,
+                    ErrorCount = 1,
+                    Diagnostics = unrecognized.ToString().TrimEnd()
+                        + Environment.NewLine
+                        + "（提示：受支持的顶层成员 = 语句/变量声明/class|struct|interface|enum|record|record struct/delegate；"
+                        + "namespace 等请拆开或改写。）",
+                };
+                LastResult = rejected;
+                return rejected;
             }
 
             // 3) 末条语句若是表达式 → 捕获为 __result
@@ -182,7 +274,13 @@ namespace UnityExplorer.RoslynBridge
 
             var src = new StringBuilder();
             src.AppendLine("using System;");
-            foreach (string ns in s_usings) src.AppendLine("using " + ns + ";");
+            // B1/D ①：**本次新增**的 using 也要进本次编译 —— 否则它无法在自己的提交里被校验，
+            // 只会"静默入表、从此每次提交都失败"（实测症状：连 `new[]{1,2,3}.Sum()` 都报
+            // CS0246 'UniverseLib'，而那条 using 属于更早的提交）。失败即不提交（见方法尾部）。
+            var emittedUsings = new List<string>(s_usings);
+            foreach (string d in pendingUsings)
+                if (!emittedUsings.Contains(d)) emittedUsings.Add(d);
+            src.AppendLine(string.Join(Environment.NewLine, emittedUsings.ToArray()));
             src.AppendLine($"public class {className}" + (baseName != null ? " : " + baseName : ""));
             src.AppendLine("{");
             if (baseName == null) src.AppendLine("    public static object __result;");
@@ -212,6 +310,8 @@ namespace UnityExplorer.RoslynBridge
                 new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
             var result = new CompileResult();
+            result.Notes = notes.ToString().TrimEnd();
+            result.GeneratedSource = src.ToString();
             byte[] pe;
             using (var ms = new MemoryStream())
             {
@@ -233,6 +333,10 @@ namespace UnityExplorer.RoslynBridge
 
             LastResult = result;
             if (!result.Success) return result;   // 失败：会话状态不变（不推进 submission 计数）
+
+            // B3/B1 根因修复：using 只在**提交成功**后进表（失败提交的 using 不得污染后续所有提交）。
+            foreach (string directive in pendingUsings)
+                if (!s_usings.Contains(directive)) s_usings.Add(directive);
 
             imageRefs.Add(MetadataReference.CreateFromImage(pe));
             s_submission = n;
@@ -332,5 +436,179 @@ namespace UnityExplorer.RoslynBridge
 
         public string GetUsing() => string.Join(Environment.NewLine, s_usings.ToArray());
         public string GetClasses() => string.Join(Environment.NewLine, s_classes.ToArray());
+
+        /// <summary>
+        /// 批量预置 using（B1/D 护栏 + B4 性能，本轮新增）：把一批**根命名空间**一次进表，
+        /// 用**一次**校验编译判定可用性；不可用的当场剔除、绝不留在表里。
+        /// 语义与动机：
+        ///  · 旧路径（ConsoleController.AddUsing → Submit("using X;")）每项一次完整提交编译 +
+        ///    Assembly.Load + 一个新 Submission 程序集；`ResetConsole` 的 12 项默认 using 就是
+        ///    12 次编译（B4 的 `reset_csharp_console` 5000ms 超时的可疑主因）。
+        ///  · 更要紧的是**正确性**：只要表里留了一条编译不过的 using，此后**每一次提交**都会带上它
+        ///    而全部失败（B1 实测：连 `new[]{1,2,3}.Sum()` 都报 CS0246 'UniverseLib'）。
+        /// 算法（有界，最多 3 次编译）：全量入表 → 校验编译 → 有错则按"错误信息含该命名空间首段"归因、
+        ///    剔除归因到的项 → 再校验一次 → 仍有错则**撤销本次全部新增**并原样返回诊断（宁可少 using，
+        ///    也不让会话被毒化）。
+        /// </summary>
+        /// <returns>被接受的根命名空间列表（调用方据此打印/记录）。诊断经 <paramref name="diagnostics"/> 返回。</returns>
+        public List<string> AddUsings(IEnumerable<string> rootNamespaces, out string diagnostics)
+        {
+            var accepted = new List<string>();
+            diagnostics = null;
+            var candidates = new List<string>();
+            if (rootNamespaces != null)
+            {
+                foreach (string ns in rootNamespaces)
+                {
+                    if (string.IsNullOrEmpty(ns)) continue;
+                    string directive = "using " + ns + ";";
+                    if (!s_usings.Contains(directive) && !candidates.Contains(directive)) candidates.Add(directive);
+                }
+            }
+            if (candidates.Count == 0) return accepted;
+
+            // 第一次：全量入表（临时），校验
+            foreach (string d in candidates) s_usings.Add(d);
+            string firstDiag = ValidateUsings();
+            if (firstDiag == null)
+            {
+                foreach (string d in candidates) accepted.Add(StripUsing(d));   // 全部可用：表已就位
+                return accepted;
+            }
+
+            // 第二次：按错误归因剔除（CS0246/CS0103 的消息里带命名空间首段）
+            var blamed = new List<string>();
+            foreach (string d in candidates)
+            {
+                string firstSegment = StripUsing(d).Split('.')[0];
+                if (firstDiag.IndexOf("'" + firstSegment + "'", StringComparison.Ordinal) >= 0)
+                    blamed.Add(d);
+            }
+            if (blamed.Count > 0)
+            {
+                foreach (string d in blamed) s_usings.Remove(d);
+                string secondDiag = ValidateUsings();
+                if (secondDiag == null)
+                {
+                    foreach (string d in candidates)
+                        if (!blamed.Contains(d)) accepted.Add(StripUsing(d));
+                    diagnostics = "以下 using 因不可用被剔除：" + string.Join(", ", Names(blamed));
+                    return accepted;
+                }
+                firstDiag = secondDiag;
+            }
+
+            // 兜底：撤销本次全部新增，绝不留下"每次提交都失败"的会话
+            foreach (string d in candidates) s_usings.Remove(d);
+            diagnostics = "批量 using 校验失败，已全部撤销本次新增（会话保持可用）：" + Environment.NewLine + firstDiag;
+            return accepted;
+        }
+
+        /// <summary>对当前会话 using 表做一次**只编译不发射**的校验；全部可用返回 null，否则返回诊断文本。</summary>
+        string ValidateUsings()
+        {
+            try
+            {
+                var src = new StringBuilder();
+                src.AppendLine("using System;");
+                src.AppendLine(string.Join(Environment.NewLine, s_usings.ToArray()));
+                src.AppendLine("public class __UsingProbe { public static void Run() { } }");
+
+                var trees = new List<SyntaxTree>
+                {
+                    CSharpSyntaxTree.ParseText(src.ToString(), new CSharpParseOptions(LanguageVersion.Latest)),
+                };
+                var refs = new List<MetadataReference>(imageRefs.Count + s_referencePaths.Count);
+                foreach (object r in imageRefs) refs.Add((MetadataReference)r);
+                foreach (string p in s_referencePaths)
+                {
+                    try { refs.Add(MetadataReference.CreateFromFile(p)); } catch { }
+                }
+
+                CSharpCompilation comp = CSharpCompilation.Create("UsingProbe",
+                    trees, refs, new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+                // GetDiagnostics 覆盖语法+语义（含 using 解析）而不发射 PE（B4：这是"廉价探针"的关键）
+                var diags = comp.GetDiagnostics();
+                bool hasError = false;
+                foreach (Diagnostic d in diags)
+                    if (d.Severity == DiagnosticSeverity.Error) { hasError = true; break; }
+                return hasError ? DiagnosticFormatter.FormatAll(diags) : null;
+            }
+            catch (Exception ex)
+            {
+                return "using 校验异常：" + ex.GetType().Name + ": " + ex.Message;
+            }
+        }
+
+        /// <summary>
+        /// 嵌入类体的成员一律补足可访问性：生成类里的嵌套成员"无修饰符 = private"，
+        /// 而后续提交是**派生类**（Submission_N+1 : Submission_N）——private 成员按简单名找不到
+        /// （实测 `static int Twice(int a) => a*2;` 提交成功却在下一次提交报 CS0103 'Twice'）。
+        /// 只补足、不覆盖：用户写了 public/internal/protected/private 就原样保留。
+        /// </summary>
+        static MemberDeclarationSyntax EnsureAccessible(MemberDeclarationSyntax m)
+        {
+            var type = m as BaseTypeDeclarationSyntax;
+            if (type != null)
+                return HasAccessibility(type.Modifiers) || type.Modifiers.Any(SyntaxKind.FileKeyword)
+                    ? m : type.AddModifiers(PublicToken());   // file 类型禁止可访问性修饰符，别加
+
+            var del = m as DelegateDeclarationSyntax;
+            if (del != null)
+                return HasAccessibility(del.Modifiers) ? m : del.AddModifiers(PublicToken());
+
+            var method = m as MethodDeclarationSyntax;
+            if (method != null)
+                return HasAccessibility(method.Modifiers) ? m : method.AddModifiers(PublicToken());
+
+            var prop = m as PropertyDeclarationSyntax;
+            if (prop != null)
+                return HasAccessibility(prop.Modifiers) ? m : prop.AddModifiers(PublicToken());
+
+            var field = m as FieldDeclarationSyntax;
+            if (field != null)
+                return HasAccessibility(field.Modifiers) ? m : field.AddModifiers(PublicToken());
+
+            var ev = m as EventDeclarationSyntax;
+            if (ev != null)
+                return HasAccessibility(ev.Modifiers) ? m : ev.AddModifiers(PublicToken());
+
+            return m;   // 其余形态（如 EventField/Constructor）原样嵌入：不猜、不破坏
+        }
+
+        static bool HasAccessibility(SyntaxTokenList modifiers)
+            => modifiers.Any(SyntaxKind.PublicKeyword) || modifiers.Any(SyntaxKind.PrivateKeyword)
+            || modifiers.Any(SyntaxKind.ProtectedKeyword) || modifiers.Any(SyntaxKind.InternalKeyword);
+
+        // ⚠️ 补 token 必须带尾随空格 trivia：否则 `public` 与后面的 `int` 会粘成 `publicint`
+        //（实测 CS0246 'publicint' —— 加修饰符时最容易踩的一个坑）。
+        static SyntaxToken PublicToken() => SyntaxFactory.Token(SyntaxKind.PublicKeyword)
+            .WithTrailingTrivia(SyntaxFactory.Space);
+
+        static SyntaxToken StaticToken() => SyntaxFactory.Token(SyntaxKind.StaticKeyword)
+            .WithTrailingTrivia(SyntaxFactory.Space);
+
+        /// <summary>诊断用短文本（追加 F.2：拒绝未识别成员时回显原文，但别把整个文件塞进诊断）。</summary>
+        static string Shorten(string text, int max)
+        {
+            if (text == null) return "";
+            string oneLine = text.Replace("\r", " ").Replace("\n", " ").Trim();
+            return oneLine.Length <= max ? oneLine : oneLine.Substring(0, max) + "…";
+        }
+
+        static string StripUsing(string directive)
+        {
+            string s = directive.Trim();
+            if (s.StartsWith("using ", StringComparison.Ordinal)) s = s.Substring(6).Trim();
+            if (s.EndsWith(";", StringComparison.Ordinal)) s = s.Substring(0, s.Length - 1);
+            return s.Trim();
+        }
+
+        static string Names(List<string> directives)
+        {
+            var list = new List<string>();
+            foreach (string d in directives) list.Add(StripUsing(d));
+            return string.Join(", ", list.ToArray());
+        }
     }
 }

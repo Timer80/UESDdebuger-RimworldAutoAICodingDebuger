@@ -36,15 +36,31 @@ namespace UnityExplorer.RoslynBridge
         {
             CompileResult r = s_session.Submit(input);
             LastValue = s_session.LastValue;
+            LastNotes = r.Notes;
             // A2（合并修复轮）：REPL 返回值对齐 mcs 侧语义（HELP_REPL 承诺"末表达式返回值会打印"）：
             // 成功且无诊断且有值 → output 带回值文本。LastValue 由 ReplSession 逐提交重置（Submit :217），
             // 类/using 提交恒为 null → output 仍走 Diagnostics（="Code compiled without errors."，与 mcs 一致）。
-            if (r.Success && string.IsNullOrEmpty(r.Diagnostics) && LastValue != null)
+            // B3（根因清扫轮）：成功但有**提示**（如匿名类型按 object 提升）且本次无值 → 把提示作为结果回显，
+            // 否则用户只会看到后续的 CS0103/CS1061，看不到"为什么 p 变成了 object"。
+            if (r.Success && string.IsNullOrEmpty(r.Diagnostics) && LastValue == null
+                && !string.IsNullOrEmpty(LastNotes))
+                output = LastNotes;
+            else if (r.Success && string.IsNullOrEmpty(r.Diagnostics) && LastValue != null)
                 output = LastValueText;
             else
                 output = r.Diagnostics;
             return r.Success;
         }
+
+        /// <summary>最近一次成功提交的可读提示（B3；无提示为 null）。</summary>
+        public string LastNotes { get; private set; }
+
+        /// <summary>
+        /// 批量预置默认 using（B1/D 护栏 + B4：一次校验编译取代 N 次提交），返回被接受的命名空间；
+        /// 不可用的项被剔除并写进 <paramref name="diagnostics"/>（调用方负责 LogWarning）。
+        /// </summary>
+        public List<string> PrimeUsings(IEnumerable<string> rootNamespaces, out string diagnostics)
+            => s_session.AddUsings(rootNamespaces, out diagnostics);
 
         public string[] GetCompletions(string input, out string prefix)
         {

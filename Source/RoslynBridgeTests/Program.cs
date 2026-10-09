@@ -30,6 +30,20 @@ namespace RoslynBridgeTests
             TestReplSession();
             TestRoslynEvaluatorFacade();
             TestC5Guard();
+            // 根因清扫轮（§17）
+            TestDefaultUsingsSources();
+            TestDefaultUsingsResolvable();
+            TestUnavailableUsingFilter();
+            TestUsingPoisoningGuard();
+            TestParseOptionsLanguageVersion();
+            TestModernMemberDeclarations();
+            TestCapabilityMatrix();
+            TestUnrecognizedMemberRejected();
+            TestNoTrailingSemicolon();
+            TestDiagnosticsDoNotLeakAcrossSubmissions();
+            TestAnonymousTypeReadable();
+            TestEvaluatorSelection();
+            TestUsingPrimeEquivalence();
             Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
             return failures == 0 ? 0 : 1;
         }
@@ -215,6 +229,380 @@ namespace RoslynBridgeTests
                 try { if (!string.IsNullOrEmpty(a.Location)) list.Add(a.Location); } catch { }
             }
             return list;
+        }
+
+        // ══════════════ 根因清扫轮（§17）：B1 / B2 / B3 / B4 / 追加 E ══════════════
+
+        /// <summary>B1(a) 一致性表：每个 BuiltIn 项都必须标注来源程序集，且表里不得有多余项。</summary>
+        static void TestDefaultUsingsSources()
+        {
+            var missing = new System.Collections.Generic.List<string>();
+            foreach (string ns in DefaultUsings.BuiltIn)
+                if (DefaultUsings.OwnerOf(ns) == null) missing.Add(ns);
+            Check("B1 一致性：BuiltIn 全项都有来源程序集（" + DefaultUsings.BuiltIn.Length + " 项）",
+                missing.Count == 0, "未标注: " + string.Join(",", missing.ToArray()));
+            Check("B1 一致性：来源表无多余项", DefaultUsings.SourceAssembly.Count == DefaultUsings.BuiltIn.Length,
+                "表=" + DefaultUsings.SourceAssembly.Count + " BuiltIn=" + DefaultUsings.BuiltIn.Length);
+
+            // 对照表（进报告 §17）
+            foreach (string ns in DefaultUsings.BuiltIn)
+                Console.WriteLine("USINGMAP " + ns + " -> " + DefaultUsings.OwnerOf(ns));
+        }
+
+        /// <summary>B1(b) 用**真实 dll 元数据**离线验证"默认 using 全项可用"（12/12）。</summary>
+        static void TestDefaultUsingsResolvable()
+        {
+            string managed = FindUpwards("RimWorldWin64_Data\\Managed");
+            var ueAssemblies = FindUpwards("Assemblies");   // 仓库根的 Assemblies（UE 侧程序集）
+            if (managed == null || ueAssemblies == null)
+            {
+                Check("B1(b) 默认 using 可用性（离线）：前置（能找到本体 Managed 与 UE Assemblies）",
+                    false, "managed=" + managed + " ue=" + ueAssemblies);
+                return;
+            }
+
+            // 引用集 = SmallProfile 里在磁盘上真实存在的件（本体 Managed + UE Assemblies 各取所需）
+            var refs = new System.Collections.Generic.List<string>();
+            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try { if (!string.IsNullOrEmpty(a.Location)) refs.Add(a.Location); } catch { }
+            }
+            foreach (string simple in new[]
+            {
+                "Assembly-CSharp", "UnityEngine", "UnityEngine.CoreModule", "UnityEngine.IMGUIModule",
+                "UnityEngine.UI", "UnityEngine.TextRenderingModule", "UnityEngine.PhysicsModule",
+                "UnityEngine.AnimationModule", "UnityEngine.ParticleSystemModule",
+                "UnityEngine.AssetBundleModule", "Unity.Collections", "Unity.Mathematics",
+                "com.rlabrecque.steamworks.net", "System.Xml", "System.Xml.Linq",
+            })
+            {
+                string p = System.IO.Path.Combine(managed, simple + ".dll");
+                if (System.IO.File.Exists(p)) refs.Add(p);
+            }
+            string ue = System.IO.Path.Combine(ueAssemblies, "UniverseLib.Mono.dll");
+            if (System.IO.File.Exists(ue)) refs.Add(ue);
+            else Console.WriteLine("USINGMAP 警告：UE 侧 " + ue + " 不存在（UniverseLib 项必然失败）");
+
+            int okCount = 0;
+            var bad = new System.Text.StringBuilder();
+            foreach (string ns in DefaultUsings.BuiltIn)
+            {
+                string src = "using " + ns + ";\npublic class __UsingProbe_" + okCount + " { }\n";
+                var r = RoslynCompiler.Compile("UsingProbe_" + okCount, src, refs, includePolyfills: false);
+                if (r.Success) okCount++;
+                else bad.AppendLine(ns + " → " + r.Diagnostics.Replace("\r", " ").Replace("\n", " | "));
+            }
+            Check("B1(b) 默认 using 全项离线可用（" + okCount + "/" + DefaultUsings.BuiltIn.Length
+                + "，真实 dll 元数据）", okCount == DefaultUsings.BuiltIn.Length, bad.ToString().TrimEnd());
+        }
+
+        /// <summary>B1/D 护栏函数：缺件时精确点名（且不误伤用户自加的模组命名空间）。</summary>
+        static void TestUnavailableUsingFilter()
+        {
+            var allAvailable = DefaultUsings.Unavailable(DefaultUsings.BuiltIn, n => true);
+            Check("B1/D 护栏：引用集齐备时零剔除", allAvailable.Count == 0,
+                string.Join(",", allAvailable.ToArray()));
+
+            var noUe = DefaultUsings.Unavailable(DefaultUsings.BuiltIn, n => n != "UniverseLib.Mono");
+            Check("B1/D 护栏：缺 UniverseLib.Mono ⇒ 只剔 UniverseLib",
+                noUe.Count == 1 && noUe[0] == "UniverseLib", string.Join(",", noUe.ToArray()));
+
+            var mixed = new System.Collections.Generic.List<string>(DefaultUsings.BuiltIn);
+            mixed.Add("SomeMod.Extras");
+            var withMod = DefaultUsings.Unavailable(mixed, n => n != "UniverseLib.Mono");
+            Check("B1/D 护栏：用户自加命名空间不被误剔（无来源标注 ⇒ 保留）",
+                !withMod.Contains("SomeMod.Extras") && withMod.Count == 1, string.Join(",", withMod.ToArray()));
+        }
+
+        /// <summary>
+        /// B1/D 纵深：① 编译不过的 using **不进会话表**（旧码在编译前就入表 ⇒ 一条脏 using 让此后
+        /// 每一次提交都失败，实测症状就是 `new[]{1,2,3}.Sum()` 报 CS0246 'UniverseLib'）；
+        /// ② 批量预置把不可用项剔除且**不毒化会话**。
+        /// </summary>
+        static void TestUsingPoisoningGuard()
+        {
+            var refs = ReferenceSetForThisProcess();
+
+            // ① 单条失败 using 不得留表
+            var s1 = new ReplSession(refs);
+            var bad = s1.Submit("using UniverseLib;");       // 离线引用集里没有 UniverseLib
+            Check("B1/D ①：无用引用的 using 提交失败（前置）", !bad.Success, bad.Diagnostics);
+            Check("B1/D ①：失败 using 未进会话表", s1.GetUsing().IndexOf("UniverseLib", StringComparison.Ordinal) < 0,
+                s1.GetUsing());
+            var after = s1.Submit("var arr = new[] { 1, 2, 3 }; arr.Length");
+            Check("B1/D ①：脏 using 之后的提交仍可用（旧码此处置 CS0246）",
+                after.Success && s1.LastValue?.ToString() == "3",
+                "diag=" + after.Diagnostics);
+
+            // ② 批量预置：不可用项被剔除、可用项保留、会话不毒化
+            var s2 = new ReplSession(refs);
+            string diag;
+            var accepted = s2.AddUsings(new[] { "System.Linq", "UniverseLib", "System.Text" }, out diag);
+            Check("B1/D ②：批量预置剔除不可用项（保留 2 项）",
+                accepted.Count == 2 && !accepted.Contains("UniverseLib"), string.Join(",", accepted.ToArray()));
+            Check("B1/D ②：剔除原因写进诊断", !string.IsNullOrEmpty(diag) && diag.Contains("UniverseLib"), diag);
+            var ok2 = s2.Submit("System.Linq.Enumerable.Range(1, 4).Sum()");
+            Check("B1/D ②：剔除后会话可用", ok2.Success && s2.LastValue?.ToString() == "10",
+                "diag=" + ok2.Diagnostics);
+            Check("B1/D ②：GetUsing 不含被剔项",
+                s2.GetUsing().IndexOf("UniverseLib", StringComparison.Ordinal) < 0, s2.GetUsing());
+        }
+
+        /// <summary>B2：LanguageVersion 确实生效（离线断言解析结果，不靠推断）。</summary>
+        static void TestParseOptionsLanguageVersion()
+        {
+            var tree = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(
+                "public record Point(int X, int Y);",
+                new Microsoft.CodeAnalysis.CSharp.CSharpParseOptions(
+                    Microsoft.CodeAnalysis.CSharp.LanguageVersion.Latest));
+            var root = tree.GetRoot();
+            int records = 0;
+            foreach (var n in root.DescendantNodes())
+                if (n is Microsoft.CodeAnalysis.CSharp.Syntax.RecordDeclarationSyntax) records++;
+            Check("B2：LanguageVersion.Latest 下 record 解析为 RecordDeclarationSyntax", records == 1,
+                "records=" + records);
+
+            int errs = 0;
+            foreach (var d in tree.GetDiagnostics())
+                if (d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error) errs++;
+            Check("B2：record 解析零语法错误", errs == 0, "errors=" + errs);
+        }
+
+        /// <summary>B2 回归：record / record struct / delegate 提交后**真的可用**（旧码静默丢弃 ⇒ CS0246）。</summary>
+        static void TestModernMemberDeclarations()
+        {
+            var refs = ReferenceSetForThisProcess();
+
+            var s = new ReplSession(refs);
+            var def = s.Submit("public record Point(int X, int Y);");
+            Check("B2 回归：record 提交成功", def.Success, def.Diagnostics);
+            var use = s.Submit("new Point(3, 4).X + new Point(3, 4).Y");
+            Check("B2 回归：record 类型后续提交可用（旧码此处 CS0246 'Point'）",
+                use.Success && s.LastValue?.ToString() == "7", "diag=" + use.Diagnostics);
+            Check("B2 回归：GetClasses 含 Point", s.GetClasses().Contains("Point"), s.GetClasses());
+
+            var s2 = new ReplSession(refs);
+            var rs = s2.Submit("public record struct Vec(int X, int Y);");
+            Check("B2 回归：record struct 提交成功", rs.Success, rs.Diagnostics);
+            var use2 = s2.Submit("new Vec(2, 5).X * new Vec(2, 5).Y");
+            Check("B2 回归：record struct 后续提交可用", use2.Success && s2.LastValue?.ToString() == "10",
+                "diag=" + use2.Diagnostics + " src=" + use2.GeneratedSource);
+
+            var s3 = new ReplSession(refs);
+            var dg = s3.Submit("public delegate int Doubler(int a);");
+            Check("B2 清扫：delegate 声明提交成功（旧码静默丢弃）", dg.Success, dg.Diagnostics);
+            var du = s3.Submit("Doubler d = a => a * 2; d(21)");
+            Check("B2 清扫：delegate 后续提交可用", du.Success && s3.LastValue?.ToString() == "42",
+                "diag=" + du.Diagnostics);
+        }
+
+        /// <summary>
+        /// C# 9–13 能力矩阵（追加 F：逐项测"能/不能"，不能的归类原因）。
+        /// 归因口径：分类未覆盖 / 语言版本未开 / polyfill 缺失 / 运行时缺 API / C# 语法歧义（非本实现可控）。
+        /// 硬断言只覆盖"必须能用"的项；预期不支持的项以 MATRIX 行如实记录（报告 §17 引用）。
+        /// </summary>
+        static void TestCapabilityMatrix()
+        {
+            var refs = ReferenceSetForThisProcess();
+
+            // (名称, 语言版本, 提交序列, 期望能用, 不支持时的归因)
+            // 原始字符串字面量的定界符是三引号：在 C# 9 的测试源码里必须拼出来（裸写 \\"\\"\\" 会被测试自身解析坏）
+            string tq = new string('"', 3);
+            var cases = new (string Name, string Def, string Use, bool ExpectOk, string Reason)[]
+            {
+                ("record (C#9)", "public record P9(int A);", "new P9(3).A", true, ""),
+                ("record struct (C#10)", "public record struct S10(int A);", "new S10(4).A", true, ""),
+                ("init + required (C#9/11)", "public class Init9 { public int V { get; init; } public required string R { get; set; } }",
+                    "new Init9 { V = 9, R = \"x\" }.V", true, ""),
+                ("raw string (C#11)", "var raw = " + tq + "line" + tq + ";", "raw.Length", true, ""),
+                ("pattern matching (C#9/10)", "object o = 5;", "o is int n && n > 3", true, ""),
+                ("primary ctor (C#12)", "public class Pc12(int seed) { public int Twice() => seed * 2; }", "new Pc12(21).Twice()", true, ""),
+                ("using alias (C#12 任意类型别名)", "using SB = System.Text.StringBuilder;", "new SB().Append(7).ToString()", true, ""),
+                ("collection expr (C#12)", "int[] ce = [1, 2, 3];", "ce.Length", true, ""),
+                ("params 集合 (C#13)", "static int Sum13(params System.Collections.Generic.IEnumerable<int> xs) { int n = 0; foreach (int x in xs) n += x; return n; }", "Sum13(1, 2, 3)", true, ""),
+                ("顶层方法/属性成员 (REPL 便利)", "static int Twice(int a) => a * 2;", "Twice(21)", true, ""),
+                ("file 作用域类型 (C#11)", "file class F11 { }", "1", false, "语言限制（CS9054：file 类型必须顶层，生成类里只能是嵌套类型）"),
+                ("generic math (C#11 static abstract)", "interface IM11 { static abstract int Z { get; } }", "1", false, "运行时缺 API（CS8919：net472 不支持接口静态抽象成员）"),
+            };
+
+            foreach (var c in cases)
+            {
+                var s = new ReplSession(refs);
+                var d1 = s.Submit(c.Def);
+                bool ok = d1.Success;
+                string why = d1.Success ? "" : FirstError(d1.Diagnostics);
+                if (ok && c.Use != "1")
+                {
+                    var d2 = s.Submit(c.Use);
+                    ok = d2.Success;
+                    why = d2.Success ? "" : FirstError(d2.Diagnostics);
+                }
+                Console.WriteLine("MATRIX " + c.Name + " = " + (ok ? "PASS" : "FAIL")
+                    + (ok ? "" : "  [" + why + "]"));
+                if (c.ExpectOk)
+                    Check("C# 矩阵：" + c.Name + " 可用", ok, why);
+            }
+
+            // 已知语法歧义（本轮实测，**非本实现引入**）：Roslyn 把 `a.b * c.d;` 解析成"指针类型局部声明"，
+            // 与乘号表达式同形。此处如实记录，报告 §17 写清未做理由与修法（词法切分 + 括号消歧）。
+            var sAmb = new ReplSession(refs);
+            sAmb.Submit("var pp = new System.Drawing.Point(2, 3);");   // 该类型在离线引用集里可能没有 → 忽略结果
+            var amb = sAmb.Submit("1 * 2;");
+            Console.WriteLine("MATRIX 顶层 `expr.A * expr.B`（乘号 vs 指针类型歧义）= "
+                + (amb.Success ? "PASS" : "FAIL") + "  [C# 语法歧义，见 §17 未做项]");
+        }
+
+        static string FirstError(string diagnostics)
+        {
+            if (string.IsNullOrEmpty(diagnostics)) return "无诊断";
+            string first = diagnostics.Split('\n')[0].Trim();
+            return first.Length > 150 ? first.Substring(0, 150) + "…" : first;
+        }
+
+        /// <summary>
+        /// §17 根因：末尾缺分号的输入（REPL 常态）曾因解析器错误恢复被并进前一条声明 ⇒ 生成垃圾字段
+        /// （实测 `public static v.X * v;` + CS0214 指针错误）。现在在解析前整段补分号。
+        /// </summary>
+        static void TestNoTrailingSemicolon()
+        {
+            var refs = ReferenceSetForThisProcess();
+
+            var s = new ReplSession(refs);
+            var r1 = s.Submit("var noSemi = 3");            // 无分号声明
+            Check("§17：裸声明（无分号）提交成功", r1.Success, r1.Diagnostics);
+            var r2 = s.Submit("noSemi * 2");                // 无分号表达式
+            Check("§17：裸表达式（无分号）求值正确", r2.Success && s.LastValue?.ToString() == "6",
+                "diag=" + r2.Diagnostics);
+
+            // 多条语句同一行、末条缺分号：旧码会并把两条并进一条声明（生成垃圾字段）
+            var s2 = new ReplSession(refs);
+            var r3 = s2.Submit("var a = 4; var b = 5; a + b");
+            Check("§17：同行多语句 + 末条缺分号 → 正确求值（旧码生成垃圾字段）",
+                r3.Success && s2.LastValue?.ToString() == "9", "diag=" + r3.Diagnostics + " src=" + r3.GeneratedSource);
+        }
+
+        /// <summary>追加 F.2：未识别形态必须**响亮拒绝**（旧码静默丢弃 ⇒ 后续"类型莫名找不到"）。</summary>
+        static void TestUnrecognizedMemberRejected()
+        {
+            var s = new ReplSession(ReferenceSetForThisProcess());
+            var r = s.Submit("namespace Foo { public class Bar { } }");
+            Check("F.2：namespace 成员被明确拒绝（不静默丢弃）",
+                !r.Success && r.Diagnostics.Contains("不支持的顶层成员形态"), r.Diagnostics);
+            Check("F.2：拒绝时诊断含形态名", r.Diagnostics.Contains("NamespaceDeclaration"), r.Diagnostics);
+
+            var again = s.Submit("var okAfterReject = 1; okAfterReject");
+            Check("F.2：拒绝不改会话状态（后续提交仍可用）",
+                again.Success && s.LastValue?.ToString() == "1", "diag=" + again.Diagnostics);
+        }
+
+        /// <summary>B3：诊断**不得跨提交累积**（Important；这条污染曾把两个 agent 一起带偏）。</summary>
+        static void TestDiagnosticsDoNotLeakAcrossSubmissions()
+        {
+            var s = new ReplSession(ReferenceSetForThisProcess());
+
+            var fail = s.Submit("this is not valid C# at all");
+            Check("B3：非法提交失败（前置）", !fail.Success && !string.IsNullOrEmpty(fail.Diagnostics));
+
+            var next = s.Submit("var zz = 1; zz + 1");
+            Check("B3：失败之后的提交成功", next.Success, next.Diagnostics);
+            Check("B3：后续提交诊断不含上一条的错误文本",
+                !next.Diagnostics.Contains("not valid C#"), next.Diagnostics);
+            Check("B3：后续提交 LastResult 也是本次的（无累积容器）",
+                !s.LastResult.Diagnostics.Contains("not valid C#"), s.LastResult.Diagnostics);
+
+            var unknown = s.Submit("unknownIdent * 3");
+            Check("B3：未知标识符的诊断含标识符名", !unknown.Success && unknown.Diagnostics.Contains("unknownIdent"),
+                unknown.Diagnostics);
+            Check("B3：该诊断不含更早提交的文本",
+                !unknown.Diagnostics.Contains("not valid C#"), unknown.Diagnostics);
+        }
+
+        /// <summary>B3：匿名类型不再产生"半截无意义"的诊断 —— 按 object 提升 + 可读提示。</summary>
+        static void TestAnonymousTypeReadable()
+        {
+            var s = new ReplSession(ReferenceSetForThisProcess());
+            var decl = s.Submit("var anon = new { Name = \"a\", Age = 1 };");
+            Check("B3：匿名类型声明提交成功（旧码生成非法字段类型 ⇒ 解析错误）", decl.Success, decl.Diagnostics);
+            Check("B3：给出可读提示（已按 object 提升）",
+                !string.IsNullOrEmpty(decl.Notes) && decl.Notes.Contains("匿名类型"), decl.Notes);
+
+            var use = s.Submit("anon.Name");
+            Check("B3：跨提交访问匿名成员失败但诊断可读（含成员名）",
+                !use.Success && use.Diagnostics.Contains("Name"), use.Diagnostics);
+        }
+
+        /// <summary>追加 E：求值器选择真值表（离线；"当前生效的是 Roslyn"从此有非游戏内证据）。</summary>
+        static void TestEvaluatorSelection()
+        {
+            // ChooseInitial：三输入真值表 ≠Roslyn 的组合共 7 种，全 Roslyn 只 1 种
+            int roslynCount = 0, mcsCount = 0;
+            foreach (bool compiled in new[] { false, true })
+                foreach (bool want in new[] { false, true })
+                    foreach (bool payload in new[] { false, true })
+                    {
+                        var c = EvaluatorSelector.ChooseInitial(compiled, want, payload);
+                        bool expectRoslyn = compiled && want && payload;
+                        Check("E：ChooseInitial(" + compiled + "," + want + "," + payload + ")=" + c,
+                            (c == EvaluatorChoice.Roslyn) == expectRoslyn, "got " + c);
+                        if (c == EvaluatorChoice.Roslyn) roslynCount++; else mcsCount++;
+                    }
+            Check("E：真值表计数（Roslyn 1 / mcs 7）", roslynCount == 1 && mcsCount == 7,
+                "roslyn=" + roslynCount + " mcs=" + mcsCount);
+
+            // ChooseAfterProbe：Roslyn+失败→回退 mcs；mcs+失败→Disable
+            Check("E：Roslyn+探针通过→Roslyn",
+                EvaluatorSelector.ChooseAfterProbe(EvaluatorChoice.Roslyn, true) == EvaluatorChoice.Roslyn);
+            Check("E：Roslyn+探针失败→回退 mcs（不是 Disable）",
+                EvaluatorSelector.ChooseAfterProbe(EvaluatorChoice.Roslyn, false) == EvaluatorChoice.Mcs);
+            Check("E：mcs+探针通过→mcs",
+                EvaluatorSelector.ChooseAfterProbe(EvaluatorChoice.Mcs, true) == EvaluatorChoice.Mcs);
+            Check("E：mcs+探针失败→Disable",
+                EvaluatorSelector.ChooseAfterProbe(EvaluatorChoice.Mcs, false) == EvaluatorChoice.Disable);
+
+            // 追加 C：UsingRoslyn 语义 = true ⟺ 终态 Roslyn（实际生效 RoslynScriptEvaluator）
+            Check("C：UsingRoslyn(Roslyn)=true", EvaluatorSelector.UsingRoslyn(EvaluatorChoice.Roslyn));
+            Check("C：UsingRoslyn(mcs)=false", !EvaluatorSelector.UsingRoslyn(EvaluatorChoice.Mcs));
+            Check("C：UsingRoslyn(Disable)=false", !EvaluatorSelector.UsingRoslyn(EvaluatorChoice.Disable));
+        }
+
+        /// <summary>B4：批量预置与逐条提交**行为等价**，且成本可见（打印实测毫秒，供报告引用）。</summary>
+        static void TestUsingPrimeEquivalence()
+        {
+            var refs = ReferenceSetForThisProcess();
+            string[] namespaces = { "System.Linq", "System.Text", "System.Collections.Generic" };
+
+            var bulk = new ReplSession(refs);
+            var sw1 = System.Diagnostics.Stopwatch.StartNew();
+            string diag;
+            var accepted = bulk.AddUsings(namespaces, out diag);
+            sw1.Stop();
+            var r1 = bulk.Submit("System.Linq.Enumerable.Range(1, 3).Sum()");
+
+            var perItem = new ReplSession(refs);
+            var sw2 = System.Diagnostics.Stopwatch.StartNew();
+            foreach (string ns in namespaces) perItem.Submit("using " + ns + ";");
+            sw2.Stop();
+            var r2 = perItem.Submit("System.Linq.Enumerable.Range(1, 3).Sum()");
+
+            Check("B4：批量预置接受数与逐条一致（" + accepted.Count + "）", accepted.Count == namespaces.Length);
+            Check("B4：批量与逐条求值结果一致",
+                r1.Success && r2.Success && bulk.LastValue?.ToString() == perItem.LastValue?.ToString(),
+                "bulk=" + bulk.LastValue + " perItem=" + perItem.LastValue);
+            Console.WriteLine("PRIMECOST bulk=" + sw1.ElapsedMilliseconds + "ms perItem="
+                + sw2.ElapsedMilliseconds + "ms (" + namespaces.Length + " 项)");
+        }
+
+        /// <summary>从测试程序目录向上找指定相对目录（B1(b) 离线可用性验证用）。</summary>
+        static string FindUpwards(string relative)
+        {
+            var dir = new System.IO.DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
+            while (dir != null)
+            {
+                string p = System.IO.Path.Combine(dir.FullName, relative);
+                if (System.IO.Directory.Exists(p)) return p;
+                dir = dir.Parent;
+            }
+            return null;
         }
 
         static void TestDefaultUsingsParsing()

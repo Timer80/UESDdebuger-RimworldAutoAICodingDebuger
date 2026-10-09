@@ -125,8 +125,24 @@ Remove-Item $Path/../UnityExplorer.BepInEx6.Mono.zip -ErrorAction SilentlyContin
 # ----------- Standalone Mono -----------
 dotnet build src/UnityExplorer.sln -c Release_STANDALONE_Mono
 $Path = "Release/UnityExplorer.Standalone.Mono"
+# 游戏本体 Managed 目录：本交付面（RimWorld mod）的 UE 程序集自 Roslyn 壳类起**首次**带
+# Assembly-CSharp 引用（RoslynPreScanLoader 的 [StaticConstructorOnStartup] 来自 Verse）——
+# ILRepack 只带 /lib:lib/net35 时解析不了该引用并 exit 1：
+#   Mono.Cecil.AssemblyResolutionException: Failed to resolve 'Assembly-CSharp, Version=1.6.…'
+# 故把本体 Managed 目录一并作为解析目录（沿用 Directory.Build.props 的路径口径：
+# 环境变量 RIMWORLD_GAME_DIR > 脚本位置向上 5 级的同级默认位置）。
+$RimWorldManaged = if ($env:RIMWORLD_GAME_DIR) {
+    Join-Path $env:RIMWORLD_GAME_DIR 'RimWorldWin64_Data\Managed'
+} else {
+    Join-Path (Resolve-Path "$PSScriptRoot\..\..\..\..\..").Path 'RimWorldWin64_Data\Managed'
+}
+if (-not (Test-Path (Join-Path $RimWorldManaged 'Assembly-CSharp.dll'))) {
+    throw "找不到本体程序集目录：$RimWorldManaged（Assembly-CSharp.dll 缺失）。请设 `$env:RIMWORLD_GAME_DIR。"
+}
 # ILRepack
-lib/ILRepack.exe /target:library /lib:lib/net35 /lib:$Path /internalize /out:$Path/UnityExplorer.Standalone.Mono.dll $Path/UnityExplorer.Standalone.Mono.dll $Path/mcs.dll $Path/Tomlet.dll
+# ⚠️ 产物名用本仓库 csproj 的 AssemblyName（UnityExplorer.STANDALONE.Mono.dll）：官方脚本原写
+# UnityExplorer.Standalone.Mono.dll，在本仓库不存在（$Path 里只有前者）⇒ ILRepack 会因输入缺失失败。
+lib/ILRepack.exe /target:library /lib:lib/net35 /lib:$RimWorldManaged /lib:$Path /internalize /out:$Path/UnityExplorer.STANDALONE.Mono.dll $Path/UnityExplorer.STANDALONE.Mono.dll $Path/mcs.dll $Path/Tomlet.dll
 # (cleanup and move files)
 Remove-Item $Path/Tomlet.dll
 Remove-Item $Path/mcs.dll

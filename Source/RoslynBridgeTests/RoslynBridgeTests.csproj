@@ -7,9 +7,8 @@
     <AssemblyName>RoslynBridgeTests</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
-    <!-- 任务 1 只 link 加载器（实现步骤中随 RoslynAssemblyLoader.cs 一起创建）；
-         ReferenceSet/PolyfillSource/DiagnosticFormatter/RoslynCompiler 由后续任务创建后再加 link -->
-    <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\RoslynAssemblyLoader.cs" Link="RoslynAssemblyLoader.cs" Condition="Exists('..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\RoslynAssemblyLoader.cs')" />
+    <!-- 任务 1 只 link 加载器；ReferenceSet/PolyfillSource/DiagnosticFormatter/RoslynCompiler 由后续任务创建后再加 link -->
+    <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\RoslynAssemblyLoader.cs" Link="RoslynAssemblyLoader.cs" />
     <Reference Include="Microsoft.CodeAnalysis"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\Microsoft.CodeAnalysis.dll</HintPath></Reference>
     <Reference Include="Microsoft.CodeAnalysis.CSharp"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn\Microsoft.CodeAnalysis.CSharp.dll</HintPath></Reference>
   </ItemGroup>

@@ -13,13 +13,59 @@ namespace RoslynBridgeTests
             if (!cond) failures++;
         }
 
-        static int Main()
+        static int Main(string[] args)
         {
+            if (args.Length > 0 && args[0] == "--success-path")
+                return RunSuccessPathInChild();
             TestLoadOrder();
             TestLoadFailureDoesNotThrow();
             TestEnsureLoadedIsIdempotent();
+            TestSuccessPathViaChildProcess();
             Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
             return failures == 0 ? 0 : 1;
+        }
+
+        /// <summary>
+        /// 成功路径（s_available=true 分支）在独立进程里断言：静态一次性锁与失败用例同进程互斥，
+        /// 谁先跑都会污染对方，故父进程自举本 exe 带 --success-path 参数执行。
+        /// </summary>
+        static int RunSuccessPathInChild()
+        {
+            string real = FindRealPayloadDir();
+            bool ok = false;
+            string detail = null;
+            if (real == null)
+                detail = "找不到真实载荷目录";
+            else
+            {
+                try { ok = RoslynAssemblyLoader.EnsureLoaded(real); }
+                catch (Exception e) { detail = e.GetType().Name + ": " + e.Message; }
+            }
+            Check("子进程：EnsureLoaded(真实载荷目录)==true", ok, detail);
+            Check("子进程：IsAvailable==true", RoslynAssemblyLoader.IsAvailable);
+            Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
+            return failures == 0 ? 0 : 1;
+        }
+
+        static void TestSuccessPathViaChildProcess()
+        {
+            string exe = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo(exe, "--success-path")
+                {
+                    UseShellExecute = false,
+                };
+                using (var p = System.Diagnostics.Process.Start(psi))
+                {
+                    p.WaitForExit();
+                    Check("成功路径（子进程）退出码=0", p.ExitCode == 0, "exit=" + p.ExitCode);
+                }
+            }
+            catch (Exception e)
+            {
+                Check("成功路径（子进程）能启动", false, e.GetType().Name + ": " + e.Message);
+            }
         }
 
         static void TestLoadOrder()
@@ -51,9 +97,26 @@ namespace RoslynBridgeTests
 
         static void TestEnsureLoadedIsIdempotent()
         {
-            // 第二次调用必须直接返回缓存结果（Mono 会缓存失败的类型解析 → 禁止重试）
-            bool second = RoslynAssemblyLoader.EnsureLoaded(@"Z:\definitely\missing");
-            Check("幂等：二次调用仍为 false", !second);
+            // 判别"一次性锁"的存在：锁定后即使换成**真实载荷目录**也必须直接返回缓存结果、禁止重试
+            //（Mono 会缓存失败的类型解析）。无锁实现对真实目录会返回 true → 本用例即失败。
+            string real = FindRealPayloadDir();
+            bool second = RoslynAssemblyLoader.EnsureLoaded(real);
+            Check("幂等：锁定后对真实载荷目录仍返回 false", second == false);
+            Check("幂等：锁定后 IsAvailable 仍为 false", RoslynAssemblyLoader.IsAvailable == false);
+        }
+
+        /// <summary>从测试程序目录向上找到仓库里的真实载荷目录；找不到返回 null（用例据此报错）。</summary>
+        static string FindRealPayloadDir()
+        {
+            var dir = new System.IO.DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
+            while (dir != null)
+            {
+                string p = System.IO.Path.Combine(dir.FullName,
+                    @"UE-4.9.0-official\UnityExplorer-4.9.0\lib\roslyn");
+                if (System.IO.Directory.Exists(p)) return p;
+                dir = dir.Parent;
+            }
+            return null;
         }
     }
 }

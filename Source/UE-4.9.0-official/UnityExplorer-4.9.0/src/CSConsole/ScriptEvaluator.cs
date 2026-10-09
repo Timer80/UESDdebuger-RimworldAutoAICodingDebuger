@@ -16,6 +16,8 @@ namespace UnityExplorer.CSConsole
         // 会覆盖本字段（mcs 报告打印器本质是进程级单例）。任务 8 重构已消除跨实例串包路径
         // （ConsoleController.Evaluate 不再直读 _reportPrinter，现仅本类 Evaluate 与 HookInstance 读）；
         // 新增直读点前须复核此约束。
+        // 任务 10 起：交付配置 STANDALONE_Mono 的动态补丁改由 Roslyn 编译，HookInstance **不再**造第二个
+        // ScriptEvaluator（也不再读本字段）；下面这条约束在本类自身 Evaluate 与其余 8 个配置上照旧成立。
         internal static StreamReportPrinter _reportPrinter;
 
         /// <summary>

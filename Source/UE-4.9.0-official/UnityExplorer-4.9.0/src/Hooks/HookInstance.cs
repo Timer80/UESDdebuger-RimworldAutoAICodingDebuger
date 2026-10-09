@@ -1,7 +1,12 @@
 ﻿using HarmonyLib;
+#if !STANDALONE_MONO
 using Mono.CSharp;
+#endif
 using System.Text;
 using UnityExplorer.CSConsole;
+#if STANDALONE_MONO
+using UnityExplorer.RoslynBridge;
+#endif
 
 namespace UnityExplorer.Hooks
 {
@@ -9,6 +14,12 @@ namespace UnityExplorer.Hooks
     {
         // Static 
 
+#if STANDALONE_MONO
+        // 任务 10（Roslyn 链路）：旧的"自有静态 mcs 求值器 + 反射 `Evaluator.source_file` /
+        // `TypeDefinition.Definition`"整块删除 —— Roslyn 没有这些内部结构，且第二套编译器状态本身是
+        // 两套语义漂移的来源。补丁现在走**控制台当前生效的求值器**（`ConsoleController.Evaluator`）：
+        // 于是补丁源码与用户会话同引用集 / 同 usings / 同已定义类型，`var`、模组类型、会话变量都能用。
+#else
         static readonly StringBuilder evaluatorOutput;
         static readonly ScriptEvaluator scriptEvaluator = new(new StringWriter(evaluatorOutput = new StringBuilder()));
 
@@ -20,6 +31,7 @@ namespace UnityExplorer.Hooks
             scriptEvaluator.Run("using System.Collections;");
             scriptEvaluator.Run("using System.Collections.Generic;");
         }
+#endif
 
         // Instance
 
@@ -46,6 +58,81 @@ namespace UnityExplorer.Hooks
             if (CompileAndGenerateProcessor(PatchSourceCode))
                 Patch();
         }
+
+#if STANDALONE_MONO
+
+        // ~~~~~~ Roslyn 路径（交付配置 STANDALONE_Mono；任务 10） ~~~~~~
+        // 流程：包装源码 → 交**当前生效求值器**编译并加载产物 → 从产物里定位补丁类型 → 取四个补丁方法
+        // → 交给 Harmony 的 PatchProcessor。包装/定位/取方法三段是 RoslynBridge.DynamicPatch 里的**生产代码**，
+        // 同一段代码有离线断言（RoslynBridgeTests.TestHookCompile，见报告 §24）。
+        public bool CompileAndGenerateProcessor(string patchSource)
+        {
+            Unpatch();
+
+            try
+            {
+                patchProcessor = ExplorerCore.Harmony.CreateProcessor(TargetMethod);
+
+                string typeName = DynamicPatch.NewTypeName();
+                string code = DynamicPatch.Wrap(typeName, patchSource);
+
+                IScriptEvaluator evaluator = ConsoleController.Evaluator;
+                if (evaluator == null)
+                    throw new FormatException("C# 控制台求值器尚未就绪（ConsoleController.Evaluator 为 null）。");
+
+                if (!evaluator.Evaluate(code, out string diag))
+                    throw new FormatException("Unable to compile the generated patch!\n" + diag);
+
+                // 只有 Roslyn 路径有"编译产物程序集"这一概念；控制台回退 mcs 时动态补丁不可用
+                // ——**响亮报错**（进 HookCreator 的日志），不静默"创建成功却不生效"。
+                RoslynScriptEvaluator roslyn = evaluator as RoslynScriptEvaluator;
+                if (roslyn == null)
+                    throw new FormatException("当前求值器是 " + evaluator.GetType().Name
+                        + "（Roslyn 未生效，已回退 mcs）⇒ 动态补丁需要 Roslyn 求值器。");
+
+                Assembly asm = roslyn.LastCompiledAssembly;
+                if (asm == null)
+                    throw new FormatException("补丁已编译但没有拿到编译产物程序集。");
+
+                // ⚠️ 不能 `asm.GetType(typeName)`：REPL 把本次提交的顶层类型嵌进生成类 `Submission_N`
+                //（见 DynamicPatch.Locate 的说明）⇒ 按简单名扫描嵌套类型。
+                Type patchClass = DynamicPatch.Locate(asm, typeName);
+                if (patchClass == null)
+                    throw new FormatException("编译产物里找不到补丁类型 " + typeName + "。");
+
+                DynamicPatch.FindPatchMethods(patchClass, out prefix, out postfix, out finalizer, out transpiler);
+
+                if (prefix == null && postfix == null && finalizer == null && transpiler == null)
+                    ExplorerCore.LogWarning("补丁源码里没有任何可识别的方法"
+                        + "（Prefix/Postfix/Finalizer/Transpiler，且必须是 static）——补丁已编译但不会生效。");
+
+                // Create the harmony patches as defined（顺序与旧实现一致：postfix 先注册）
+
+                if (postfix != null)
+                    patchProcessor.AddPostfix(new HarmonyMethod(postfix));
+                if (prefix != null)
+                    patchProcessor.AddPrefix(new HarmonyMethod(prefix));
+                if (finalizer != null)
+                    patchProcessor.AddFinalizer(new HarmonyMethod(finalizer));
+                if (transpiler != null)
+                    patchProcessor.AddTranspiler(new HarmonyMethod(transpiler));
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                // 诊断文本已在抛出的 FormatException 里（编译诊断由求值器带回）；此处只做统一上报。
+                ExplorerCore.LogWarning($"Exception generating patch source code: {ex}");
+                return false;
+            }
+        }
+
+#else
+
+        // ~~~~~~ 旧 mcs 路径（非交付配置：ML/BIE/CPP，本配置未编入 Roslyn 四件） ~~~~~~
+        // 任务 10 只把**交付配置**（STANDALONE_Mono）迁到 Roslyn；其余 8 个配置的运行时求值器恒为 mcs
+        // （RoslynScriptEvaluator 不在本配置的编译集里），若一并删除则 Hooks 功能在这些配置上**整块失效**
+        // ⇒ 原实现按配置保留（零行为变更）。偏离简报之处与理由见报告 §24。
 
         // Evaluator.source_file 
         private static readonly FieldInfo fi_sourceFile = AccessTools.Field(typeof(Evaluator), "source_file");
@@ -125,6 +212,8 @@ namespace UnityExplorer.Hooks
                 return false;
             }
         }
+
+#endif
 
         static string FullDescriptionClean(Type type)
         {

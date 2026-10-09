@@ -62,6 +62,8 @@ namespace RoslynBridgeTests
             TestVoidFallbackProductionShape();
             // §22 任务 9：自动补全（语义模型成员 + 命名空间元数据 + 关键字表）
             TestCompletion();
+            // 任务 10：HookInstance 的 Roslyn 补丁链路（包装 → 提交编译 → 产物取回 → Harmony 挂载生效）
+            TestHookCompile();
             // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
             // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
             Console.WriteLine("COUNTS parent_pass=" + passLines + " parent_fail=" + failures
@@ -2274,6 +2276,110 @@ namespace RoslynBridgeTests
             }
             return n;
         }
+
+        // ══════════════ 任务 10：HookInstance 的 Roslyn 补丁链路 ══════════════
+
+        /// <summary>
+        /// 任务 10：动态 Harmony 补丁（生产路径 `HookInstance.CompileAndGenerateProcessor`）的**离线**
+        /// 端到端断言。走的就是生产代码本体（不是副本）：`DynamicPatch.Wrap` → 求值器提交编译 →
+        /// `DynamicPatch.Locate` → `DynamicPatch.FindPatchMethods` → `HarmonyMethod` +
+        /// `PatchProcessor.Patch()`（真把补丁挂到一个本进程方法上）。
+        ///
+        /// 判别力（三条都是明确必 FAIL 面）：
+        ///  ① 简报步骤 1/3 的 `asm.GetType(typeName)`：REPL 把提交的顶层类型**嵌进**生成类
+        ///     `Submission_&lt;tag&gt;_N`（见 `ReplSession.BuildSubmissionSource`）⇒ 产物里根本没有该简单名的
+        ///     **顶层**类型 ⇒ 取不到。本用例把这条机制**正面钉死**（断言 GetType 返回 null）：REPL 若改成
+        ///     "顶层类型原样进产物"，本行立刻变红，提示 Locate 的扫描策略需要复核。
+        ///  ② 简报步骤 3 的 `BindingFlags.Static | BindingFlags.Public` 查找补丁方法：默认补丁源码是
+        ///     `static void Postfix(...)`（**隐式 private**）⇒ 取不到 ⇒ 不挂补丁 ⇒ "补丁创建成功却永不生效"。
+        ///  ③ 交付前 HEAD 码（HookInstance 仍是 mcs 反射版）：本用例依赖的
+        ///     `RoslynScriptEvaluator.LastCompiledAssembly` / `DynamicPatch.*` 全都不存在 ⇒ 编译期 RED。
+        /// </summary>
+        static void TestHookCompile()
+        {
+            var refs = ReferenceSetForThisProcess();
+
+            // 与生产 `GenerateDefaultPatchSourceCode` 同形：**无访问修饰符的 static 方法**（②的来源），
+            // 参数用 Harmony 约定名 `__result`（ref 形参才能改返回值）。
+            const string patchSource = "static void Postfix(ref int __result) { __result += 100; }";
+
+            string typeName = DynamicPatch.NewTypeName();
+            string code = DynamicPatch.Wrap(typeName, patchSource);
+
+            using (var ev = NewEvaluator(refs))
+            {
+                string diag;
+                Check("任务10 补丁源码编译成功", ev.Evaluate(code, out diag), diag);
+
+                var asm = ev.LastCompiledAssembly;
+                Check("任务10 拿到编译产物程序集", asm != null);
+
+                // ① 钉死"产物里没有顶层类型"这条机制（简报写法失败的根因）
+                Check("任务10 机制：产物里没有以补丁名命名的顶层类型（`asm.GetType(名字)` 必失败）",
+                    asm != null && asm.GetType(typeName) == null,
+                    "GetType(" + typeName + ") 意外命中 ⇒ REPL 产物形态已变，Locate 策略需复核");
+
+                Type patchType = DynamicPatch.Locate(asm, typeName);
+                Check("任务10 Locate 从产物里取回补丁类型（扫嵌套）", patchType != null);
+                Check("任务10 补丁类型是生成提交类（Submission_*）的嵌套类",
+                    patchType != null && patchType.IsNested && patchType.DeclaringType != null
+                        && patchType.DeclaringType.Name.StartsWith("Submission_"),
+                    patchType == null ? "<null>"
+                        : (patchType.DeclaringType == null ? "<无声明类型>" : patchType.DeclaringType.Name));
+                Console.WriteLine("HOOKCOMPILE type=" + typeName + " decl="
+                    + (patchType == null || patchType.DeclaringType == null ? "<null>" : patchType.DeclaringType.FullName));
+
+                System.Reflection.MethodInfo prefix, postfix, finalizer, transpiler;
+                DynamicPatch.FindPatchMethods(patchType, out prefix, out postfix, out finalizer, out transpiler);
+                // ② 判别力核心：隐式 private 的 static 方法必须被取到
+                Check("任务10 取到 Postfix（隐式 private 也必须取到）", postfix != null);
+                Check("任务10 判别力：该 Postfix 非 public（Public-only 查找必取不到）",
+                    postfix != null && !postfix.IsPublic);
+                // ②的正面实测：简报步骤 3 的 flags（Static|Public）在本形态下**一个都取不到**。
+                // 若哪天 `GenerateDefaultPatchSourceCode` 改成发 `public static void Postfix`，本行变红
+                // ⇒ 提醒"Public-only 变体此刻也会成立"，别把它当成永久安全。
+                Check("任务10 判别力：简报 flags（Static|Public）确实取不到 Postfix",
+                    patchType != null && patchType.GetMethod("Postfix",
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public) == null);
+                Check("任务10 未定义的方法返回 null（Prefix/Finalizer/Transpiler）",
+                    prefix == null && finalizer == null && transpiler == null);
+
+                // ③ Harmony 链路端到端：真的挂上去、真的改变行为
+                int before = HarmonyProbeTarget(1);
+                Check("任务10 基线：探针方法未加补丁时返回 2", before == 2, "before=" + before);
+
+                if (postfix == null)
+                {
+                    Check("任务10 判别力：补丁真的生效（Harmony 链路端到端）", false,
+                        "Postfix 未取到 ⇒ 挂不上补丁（这正是 Public-only 查找的后果）");
+                }
+                else
+                {
+                    var harmony = new HarmonyLib.Harmony("UESDdebuger.RoslynBridgeTests.task10");
+                    var processor = harmony.CreateProcessor(HarmonyProbeTargetMethod());
+                    processor.AddPostfix(new HarmonyLib.HarmonyMethod(postfix));
+                    processor.Patch();
+                    try
+                    {
+                        int after = HarmonyProbeTarget(1);
+                        Check("任务10 判别力：补丁真的生效（Harmony 链路端到端）", after == 102, "after=" + after);
+                    }
+                    finally
+                    {
+                        processor.Unpatch(postfix);
+                    }
+                    Check("任务10 补丁可卸下（恢复原行为）", HarmonyProbeTarget(1) == 2);
+                }
+            }
+        }
+
+        /// <summary>被补丁的探针目标（`NoInlining`：否则 JIT 内联会让 detour 观察不到）。</summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static int HarmonyProbeTarget(int a) => a + 1;
+
+        static System.Reflection.MethodInfo HarmonyProbeTargetMethod()
+            => typeof(Program).GetMethod("HarmonyProbeTarget",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
     }
 
     /// <summary>

@@ -41,6 +41,12 @@ namespace UnityExplorer.RoslynBridge
         // A1 观测点：引用集大小透传（测试断言"开关不放大引用集"用）。
         public int ReferenceCount => s_session.ReferenceCount;
 
+        /// <summary>
+        /// 最近一次成功提交的编译产物程序集（任务 10 消费点：`HookInstance` 从产物里取回动态补丁类型）。
+        /// 仅 Roslyn 路径有"编译产物程序集"这一概念（mcs 路径反射内部结构取类型，无此属性）。
+        /// </summary>
+        public System.Reflection.Assembly LastCompiledAssembly => s_session.LastAssembly;
+
         public bool Evaluate(string input, out string output)
         {
             CompileResult r = s_session.Submit(input);

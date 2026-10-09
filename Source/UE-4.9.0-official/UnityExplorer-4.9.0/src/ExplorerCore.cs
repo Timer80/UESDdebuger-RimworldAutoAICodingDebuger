@@ -61,6 +61,12 @@ namespace UnityExplorer
             // 跨配置安全：RoslynAssemblyLoader 不在 csproj 非 STANDALONE 排除组（排除组仅
             // ReferenceScanner + RoslynCompiler/DiagnosticFormatter/ReplSession/RoslynScriptEvaluator
             // 五件，本类仅依赖 System.*），9 配置全编译，无需 #if。
+            // ⚠️ 位置约束与已知盲区（对端会话审查提出）：本调用是【UE 初始化链的一部分】，
+            // 不是"比 UE 更早"——它依赖本链被完整执行到此处；若将来链序调整或前序步骤抛异常
+            // 致此处被跳过，早加载会静默失效（字段依赖并未消除——本修复属止血，非治本）。
+            // 升级路径（已登记任务 12 矩阵/最终审查）：若未来任何早期反射器（UniverseLib/Harmony/
+            // 第三方 mod 检查器）再报同类 TypeLoadException，直接上 C 方案（Roslyn 四件移出主程序集
+            // 为卫星程序集），勿再加时序类补丁。
             try { RoslynAssemblyLoader.EnsureLoaded(Path.Combine(ExplorerFolder, "Roslyn")); }
             catch (Exception ex)
             {

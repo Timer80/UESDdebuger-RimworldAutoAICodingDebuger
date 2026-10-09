@@ -175,7 +175,9 @@ namespace UnityExplorer.CSConsole
                 UsingRoslyn = false;
                 if (wantRoslyn)
                     ExplorerCore.LogWarning($"[CSConsole] 回退 mcs：{RoslynAssemblyLoader.FailureReason}");
-                else if (!UsingRoslyn) // C2：配置显式关闭 Roslyn（UsingRoslyn 读取点）
+                else if (!forceMcs) // C2：仅配置显式关闭 Roslyn 时打此行；forceMcs 回退路径由 Init 的
+                                    // "Roslyn 探针失败回退"行覆盖，此处静默以免误标（复审 Minor 修复：
+                                    // 原 `else if (!UsingRoslyn)` 恒真死条件且会污染回退路径文案）。
                     ExplorerCore.Log("[CSConsole] 使用 mcs 求值器（配置关闭 Roslyn）");
             }
 #else

@@ -72,5 +72,56 @@ namespace UnityExplorer.RoslynBridge
             }
             return result;
         }
+
+        /// <summary>
+        /// 任务 13：诊断驱动的引用自愈重试入口（<b>离线测试 + 契约入口</b>；生产主循环在
+        /// <see cref="ReplSession.Submit"/> 的 emit 失败路径——`Evaluate` 首行即 Submit，不走本方法）。
+        /// ≤5 轮：失败 → <see cref="ReferenceHealer.Resolve"/> → 加引用 →
+        /// <paramref name="session"/> 非 null 时走同一钩子 <c>OnReferenceAdded()</c>
+        /// （内部调 <c>InvalidateNamespaceCache()</c> —— 契约在 ReplSession s_referencePaths 声明处双登记）。
+        /// §4.5：到顶**不得静默截断** —— 打"已补 N 个引用仍未通过 + 剩余诊断"。
+        /// </summary>
+        public static CompileResult CompileWithHealing(string assemblyName, string source,
+            List<string> referencePaths, bool includePolyfills, ReferenceHealer healer, out string healLog,
+            ReplSession session = null)
+        {
+            healLog = "";
+            // 引用集只有 21+ 个，首次编译常需连补 1~3 个（Unity 模块/其它 System 件/模组），故给 5 轮。
+            int healed = 0;
+            CompileResult r = Compile(assemblyName, source, referencePaths, includePolyfills);
+            for (int round = 0; round < 5 && !r.Success; round++)
+            {
+                string add = healer == null ? null : healer.Resolve(r.Diagnostics, referencePaths);
+                if (add == null) break;                  // 解析不出来：原样返回诊断（原因已响亮）
+                if (ContainsPath(referencePaths, add)) break;   // 防御：已在引用集里（补了也没用）
+                referencePaths.Add(add);
+                healed++;
+                healLog += "自愈补引用：" + Path.GetFileName(add) + Environment.NewLine;
+                if (session != null) session.OnReferenceAdded();
+                r = Compile(assemblyName, source, referencePaths, includePolyfills);
+            }
+            if (!r.Success && healed >= 5)
+            {
+                string cap = "引用自愈到顶：已补 " + healed + " 个引用仍未通过（上限 5 轮），剩余诊断："
+                    + Environment.NewLine + r.Diagnostics;
+                healLog += cap + Environment.NewLine;
+                r.Diagnostics = r.Diagnostics + Environment.NewLine + cap;
+                if (healer != null)
+                {
+                    Action<string> sink = healer.ReportSink;
+                    if (sink != null) sink(cap);
+                }
+            }
+            if (session != null) session.AppendHealLog(healLog);   // 与 Submit 共用 LastHealLog 观测点
+            return r;
+        }
+
+        static bool ContainsPath(List<string> refs, string path)
+        {
+            if (refs == null || string.IsNullOrEmpty(path)) return false;
+            foreach (string p in refs)
+                if (string.Equals(p, path, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
     }
 }

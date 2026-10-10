@@ -232,10 +232,17 @@ namespace UnityExplorer.CSConsole
                     foreach (string ns in unavailable) defaultUsings.Remove(ns);
                 }
 
-                // A1（合并修复轮）：Allow_Mod_Type_Resolution 落位为第三参。铁律：任务 13 自愈器落地前
-                // 该开关不改变引用集行为（实现侧 RoslynScriptEvaluator 仅存储，不预加 ModAssemblyPaths）。
-                Evaluator = new RoslynScriptEvaluator(refs.Paths, blacklist,
+                // A1（合并修复轮）→ 任务 13：Allow_Mod_Type_Resolution 落位为第三参，**开关已做实**
+                //（文案即功能规格）：ON ⇒ 模组仅经诊断触发自愈进入引用集（永不预加）；
+                // OFF ⇒ 模组路径作排除集（含已加载程序集通道），失败日志注明开关。
+                var roslynEval = new RoslynScriptEvaluator(refs.Paths, blacklist,
                     ConfigManager.CSharp_Console_Allow_Mod_Type_Resolution.Value);
+                // 任务 13：自愈器接线 —— **方法组注入**（先例=CompletionDiagnostics；无 lambda，C.5 闭包纪律）。
+                roslynEval.Healer.ModPathsProvider = ModPathsForHealing;
+                roslynEval.Healer.ReportSink = HealDiagnostics;
+                // §4.10-3：构造期因缺引用被剔除的默认 using 交给会话，引用增长后验证式重算。
+                roslynEval.SetDeferredUsings(unavailable);
+                Evaluator = roslynEval;
                 // 任务 9 收尾轮 R2：补全降级上报钩子。RoslynBridge 侧**刻意零 ExplorerCore 依赖**
                 // （离线测试工程只 link RoslynBridge 源码，直接调 ExplorerCore 会链接失败）⇒ 委托注入。
                 // 补全跑在**每次按键**路径上：异常必须降级成一条日志，而不是打断输入或静默消失。
@@ -686,6 +693,22 @@ namespace UnityExplorer.CSConsole
 #if STANDALONE_MONO
         static void CompletionDiagnostics(string message)
             => ExplorerCore.LogWarning("[CSConsole] 自动补全降级：" + message);
+
+        // 任务 13：引用自愈的宿主侧注入（**方法组、无 lambda**，C.5 理由同上）。
+        // ModAssemblyPaths：既有零调用点实现（走 LoadedModManager，含创意工坊目录——勿改成扫 <Game>/Mods）；
+        // 每次 Resolve 现算（§4.1，中途加载的模组必须能被看见）。
+        static List<string> ModPathsForHealing()
+        {
+            try { return ReferenceScanner.ModAssemblyPaths(ConfigManager.CSConsole_Assembly_Blacklist.Value); }
+            catch (Exception e)
+            {
+                ExplorerCore.LogWarning("[CSConsole] 引用自愈：模组候选路径获取失败（本轮无模组候选）：" + e.Message);
+                return new List<string>();
+            }
+        }
+
+        static void HealDiagnostics(string message)
+            => ExplorerCore.LogWarning("[CSConsole] " + message);
 #endif
 
         public static void InsertSuggestionAtCaret(string suggestion)

@@ -66,6 +66,12 @@ namespace RoslynBridgeTests
             TestHookCompile();
             // 任务 10 修复轮（报告 §25 R-f）：Reset/Dispose 前"活 hook"判据（纯函数，离线断言）
             TestActiveHookResetWarning();
+            // 任务 13：引用自愈（从编译诊断读出缺哪个程序集/命名空间 → 自动补引用重试）
+            TestMissingReferenceParser();
+            TestHealerByNamespace();
+            TestHealerRefusalsAndSwitch();
+            TestHealCapMessage();
+            TestHealReplIntegration();
             // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
             // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
             Console.WriteLine("COUNTS parent_pass=" + passLines + " parent_fail=" + failures
@@ -2475,6 +2481,246 @@ namespace RoslynBridgeTests
         {
             FakeHookForResetTest h = hook as FakeHookForResetTest;
             return h == null ? "<null>" : h.Describe();
+        }
+
+        // ══════════════ 任务 13（引用自愈）离线断言 ══════════════
+        // ReportSink / ModPathsProvider 捕获：**方法组注入，不用 lambda**（C.5 闭包纪律）。
+        static readonly System.Collections.Generic.List<string> s_healSink
+            = new System.Collections.Generic.List<string>();
+        static readonly System.Collections.Generic.List<string> s_modPathProbe
+            = new System.Collections.Generic.List<string>();
+
+        static void HealSinkCapture(string message) => s_healSink.Add(message ?? "");
+        static System.Collections.Generic.List<string> ModPathProbeForHealing() => s_modPathProbe;
+        static bool SinkSaw(string fragment)
+        {
+            foreach (string m in s_healSink)
+                if (m != null && m.Contains(fragment)) return true;
+            return false;
+        }
+        static string SinkText() => string.Join(" | ", s_healSink.ToArray());
+        static string Head(string text, int max)
+            => string.IsNullOrEmpty(text) ? "" : (text.Length <= max ? text : text.Substring(0, max));
+
+        /// <summary>简报步骤 1（含 CS1069 断言 = 边界探针实证；CS0234 = TDD 首跑实测码；dotted 取全名 = 定稿设计）。</summary>
+        static void TestMissingReferenceParser()
+        {
+            string cs0012 = "(1,106): error CS0012: The type 'Vector3' is defined in an assembly that is not referenced." +
+                            " You must add a reference to assembly 'UnityEngine.CoreModule, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null'.";
+            Check("CS0012 → 取出程序集名", MissingReferenceParser.AssemblyFromCs0012(cs0012) == "UnityEngine.CoreModule",
+                MissingReferenceParser.AssemblyFromCs0012(cs0012));
+            Check("非 CS0012 返回 null", MissingReferenceParser.AssemblyFromCs0012("(1,1): error CS1002: ; expected") == null);
+
+            string cs1069 = "(17,45): error CS1069: The type name 'VideoPlayer' could not be found in the namespace 'UnityEngine.Video'."
+                + " This type has been forwarded to assembly 'UnityEngine.VideoModule, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null'."
+                + " Consider adding a reference to that assembly.";
+            Check("CS1069 → 取出程序集名（边界探针实测形态）",
+                MissingReferenceParser.AssemblyFromCs1069(cs1069) == "UnityEngine.VideoModule",
+                MissingReferenceParser.AssemblyFromCs1069(cs1069));
+            Check("非 CS1069 → null（不误认 CS0012/CS1002）",
+                MissingReferenceParser.AssemblyFromCs1069(cs0012) == null
+                && MissingReferenceParser.AssemblyFromCs1069("(1,1): error CS1002: ; expected") == null);
+
+            string cs0103 = "(1,58): error CS0103: The name 'UnityEngine' does not exist in the current context";
+            Check("CS0103 → 取出名字", MissingReferenceParser.SymbolFromCs0103(cs0103) == "UnityEngine",
+                MissingReferenceParser.SymbolFromCs0103(cs0103));
+
+            string cs0246 = "(1,43): error CS0246: The type or namespace name 'UnityEngine' could not be found";
+            Check("CS0246 → 取出名字", MissingReferenceParser.SymbolFromCs0246(cs0246) == "UnityEngine",
+                MissingReferenceParser.SymbolFromCs0246(cs0246));
+            Check("CS0246 dotted 名取全名（不截首段：简报首段截断会误配 System.Data）",
+                MissingReferenceParser.SymbolFromCs0246(
+                    "(1,1): error CS0246: The type or namespace name 'System.Data.DataTable' could not be found")
+                == "System.Data.DataTable");
+
+            string cs0234 = "(1,30): error CS0234: The type or namespace name 'Immutable' does not exist in the namespace 'System.Collections' (are you missing an assembly reference?)";
+            Check("CS0234 → 组合完整命名空间（TDD 首跑实测码）",
+                MissingReferenceParser.SymbolFromCs0234(cs0234) == "System.Collections.Immutable",
+                MissingReferenceParser.SymbolFromCs0234(cs0234));
+            Check("非 CS0234 → null", MissingReferenceParser.SymbolFromCs0234(cs0246) == null);
+
+            Check("不误报其它诊断", MissingReferenceParser.SymbolFromCs0103("(2,1): error CS0106: bad modifier") == null);
+
+            string n1, v1, c1, k1;
+            bool got1 = MissingReferenceParser.TryAssemblyIdentity(cs0012, out n1, out v1, out c1, out k1);
+            Check("CS0012 → 完整身份四元组（§4.10）", got1 && n1 == "UnityEngine.CoreModule"
+                && v1 == "0.0.0.0" && c1 == "neutral" && k1 == "null",
+                got1 + "/" + n1 + "/" + v1 + "/" + c1 + "/" + k1);
+            string n2, v2, c2, k2;
+            bool got2 = MissingReferenceParser.TryAssemblyIdentity(cs1069, out n2, out v2, out c2, out k2);
+            Check("CS1069 → 完整身份四元组", got2 && n2 == "UnityEngine.VideoModule" && v2 == "0.0.0.0",
+                got2 + "/" + n2 + "/" + v2);
+            Check("无身份诊断 → TryAssemblyIdentity=false",
+                !MissingReferenceParser.TryAssemblyIdentity(cs0103, out n2, out v2, out c2, out k2));
+        }
+
+        /// <summary>简报步骤 1（诊断码以 TDD 首跑实测为准：HEALPROBE 行打印原文）。</summary>
+        static void TestHealerByNamespace()
+        {
+            // net472 上的等价复现：只引 mscorlib，代码里写 System.Xml 的名字 → CS0234/CS0246，
+            // 自愈器应在搜索目录里找到 System.Xml.dll 并补上，重试后编译成功。
+            string mscorlib = typeof(object).Assembly.Location;
+            string searchDir = System.IO.Path.GetDirectoryName(mscorlib);
+
+            // TDD 首跑捕获：真实诊断原文（CS0234 vs CS0246 分支以此为准，证据留档报告 §26）。
+            var probe = RoslynCompiler.Compile("HealProbe",
+                "public class P { public static System.Xml.XmlDocument D; }", new[] { mscorlib }, true);
+            Console.WriteLine("HEALPROBE " + probe.Diagnostics.Replace("\r", "").Replace("\n", " | "));
+
+            var healer = new ReferenceHealer(new[] { searchDir });
+            var refs = new System.Collections.Generic.List<string> { mscorlib };
+
+            var r = RoslynCompiler.CompileWithHealing("HealTest",
+                "public class P { public static System.Xml.XmlDocument D; }", refs, true, healer, out string healLog);
+
+            Check("自愈后编译成功", r.Success, r.Diagnostics);
+            Check("refs 里多了 System.Xml", refs.Exists(p => p.EndsWith("System.Xml.dll", StringComparison.OrdinalIgnoreCase)),
+                string.Join(";", refs.ToArray()));
+            Check("自愈日志记录了一行", healLog.Contains("System.Xml"), healLog);
+            Check("第二段无需自愈即可编译", RoslynCompiler.CompileWithHealing("HealTest2",
+                "public class P2 { public static System.Xml.XmlDocument D; }", refs, true, healer, out string log2).Success && log2 == "", log2);
+        }
+
+        /// <summary>定稿测试③④⑥：CS0433/CS1704 响亮拒绝 / 开关 OFF 排除集 / §4.10 身份降级结构化日志。</summary>
+        static void TestHealerRefusalsAndSwitch()
+        {
+            string searchDir = System.IO.Path.GetDirectoryName(typeof(object).Assembly.Location);
+
+            // ③ CS0433/CS1704：重复定义不是缺引用 —— 再加引用只会更糟，必须拒绝且响亮
+            var healer = new ReferenceHealer(new[] { searchDir });
+            healer.ReportSink = HealSinkCapture;
+            s_healSink.Clear();
+            var r433 = healer.Resolve("(1,1): error CS0433: The type 'X' exists in both 'A.dll' and 'B.dll'",
+                new System.Collections.Generic.List<string>());
+            Check("③ CS0433 拒绝自愈", r433 == null, r433 ?? "<null>");
+            Check("③ CS0433 拒绝有响亮日志", SinkSaw("CS0433"), SinkText());
+            s_healSink.Clear();
+            var r1704 = healer.Resolve("(1,1): error CS1704: Assembly 'A' already references 'B'",
+                new System.Collections.Generic.List<string>());
+            Check("③ CS1704 拒绝自愈 + 响亮日志", r1704 == null && SinkSaw("CS1704"), SinkText());
+
+            // ⑥ §4.10：完整身份未命中 → 退简单名，降级日志五字段（名字/旧版本/新版本/采用/原因）
+            s_healSink.Clear();
+            var healer6 = new ReferenceHealer(new[] { searchDir });
+            healer6.ReportSink = HealSinkCapture;
+            string mscorlibPath = typeof(object).Assembly.Location;
+            var r6 = healer6.Resolve(
+                "(1,1): error CS0012: You must add a reference to assembly 'mscorlib, Version=1.2.3.4, Culture=neutral, PublicKeyToken=b77a5c561934e089'.",
+                new System.Collections.Generic.List<string>());
+            string downgraded = null;
+            foreach (string m in s_healSink)
+                if (m.Contains("降级")) downgraded = m;
+            Check("⑥ 身份不匹配 → 退简单名命中已加载 mscorlib",
+                r6 != null && r6.Equals(mscorlibPath, StringComparison.OrdinalIgnoreCase), r6 ?? "<null>");
+            Check("⑥ 降级结构化日志五字段齐全",
+                downgraded != null && downgraded.Contains("名字=mscorlib") && downgraded.Contains("旧版本=1.2.3.4")
+                    && downgraded.Contains("新版本=4.0.0.0") && downgraded.Contains("采用=") && downgraded.Contains("原因="),
+                downgraded ?? ("<无降级日志> " + SinkText()));
+
+            // ④ 开关做实：OFF ⇒ 模组路径作排除集（失败日志注明开关）；ON ⇒ 仅诊断触发可解析
+            s_modPathProbe.Clear();
+            s_modPathProbe.Add(System.IO.Path.Combine(searchDir, "Microsoft.CSharp.dll"));
+            // 该 dll 在测试进程里可能已从 GAC 加载（Location ≠ framework 文件路径）——两个路径都算
+            // 模组路径，才与生产"provider 返回的就是已加载程序集 Location"同形（否则排除集匹配不上）。
+            foreach (System.Reflection.Assembly ma in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    if (ma.GetName().Name == "Microsoft.CSharp" && !string.IsNullOrEmpty(ma.Location))
+                        s_modPathProbe.Add(ma.Location);
+                }
+                catch { }
+            }
+            var healer4 = new ReferenceHealer(new[] { searchDir });
+            healer4.ReportSink = HealSinkCapture;
+            healer4.ModPathsProvider = ModPathProbeForHealing;
+            healer4.AllowModTypeResolution = false;
+            s_healSink.Clear();
+            const string cs0234csharp = "(1,30): error CS0234: The type or namespace name 'CSharp' does not exist in the namespace 'Microsoft' (are you missing an assembly reference?)";
+            var rOff = healer4.Resolve(cs0234csharp, new System.Collections.Generic.List<string>());
+            Check("④ OFF：模组路径作排除集（解析 null）", rOff == null, rOff ?? "<null>");
+            Check("④ OFF：失败日志注明开关", SinkSaw("Allow_Mod_Type_Resolution"), SinkText());
+            healer4.AllowModTypeResolution = true;
+            var rOn = healer4.Resolve(cs0234csharp, new System.Collections.Generic.List<string>());
+            Check("④ ON：同一诊断可解析到 Microsoft.CSharp.dll",
+                rOn != null && rOn.EndsWith("Microsoft.CSharp.dll", StringComparison.OrdinalIgnoreCase), rOn ?? "<null>");
+        }
+
+        /// <summary>定稿测试②：≥6 个缺引用（框架目录取材，不造临时文件）⇒ 5 轮到顶必须打文案、不静默截断。</summary>
+        static void TestHealCapMessage()
+        {
+            string searchDir = System.IO.Path.GetDirectoryName(typeof(object).Assembly.Location);
+            var healer = new ReferenceHealer(new[] { searchDir });
+            healer.ReportSink = HealSinkCapture;
+            s_healSink.Clear();
+            var refs = new System.Collections.Generic.List<string> { typeof(object).Assembly.Location };
+            string src = "public class Cap {"
+                + " public static System.Data.DataTable A;"
+                + " public static System.Drawing.Bitmap B;"
+                + " public static System.Web.HttpUtility C;"
+                + " public static System.Management.ManagementObject D;"
+                + " public static System.Configuration.ConfigurationManager E;"
+                + " public static Microsoft.CSharp.CSharpCodeProvider F;"
+                + "}";
+            var r = RoslynCompiler.CompileWithHealing("HealCap", src, refs, true, healer, out string healLog);
+            Check("② ≥6 缺引用：5 轮用尽仍失败", !r.Success, r.Diagnostics);
+            Check("② 到顶文案（已补 5 个引用仍未通过 + 剩余诊断）",
+                (r.Diagnostics.Contains("已补 5 个引用仍未通过") || healLog.Contains("已补 5 个引用仍未通过"))
+                    && r.Diagnostics.Contains("CS0"),
+                "diag=" + Head(r.Diagnostics, 300));
+            Check("② 自愈计数=5（到顶而非提前放弃）", healer.Healed.Count == 5, "Healed=" + healer.Healed.Count);
+        }
+
+        /// <summary>定稿测试①⑤ + Submit 主循环（生产自愈路径的离线证明）。</summary>
+        static void TestHealReplIntegration()
+        {
+            string mscorlib = typeof(object).Assembly.Location;
+            string searchDir = System.IO.Path.GetDirectoryName(mscorlib);
+
+            // ① System.Xml → System.Drawing 两轮成功，自愈计数 > 0（"分支真被执行"判据）
+            var healer = new ReferenceHealer(new[] { searchDir });
+            healer.ReportSink = HealSinkCapture;
+            s_healSink.Clear();
+            var refs = new System.Collections.Generic.List<string> { mscorlib };
+            var r1 = RoslynCompiler.CompileWithHealing("HealRound1",
+                "public class R1 { public static System.Xml.XmlDocument D; }", refs, true, healer, out string log1);
+            Check("① 第一轮自愈成功（System.Xml）", r1.Success
+                && refs.Exists(p => p.EndsWith("System.Xml.dll", StringComparison.OrdinalIgnoreCase)), r1.Diagnostics);
+            var r2 = RoslynCompiler.CompileWithHealing("HealRound2",
+                "public class R2 { public static System.Drawing.Bitmap B; }", refs, true, healer, out string log2);
+            Check("① 第二轮自愈成功（System.Drawing）", r2.Success
+                && refs.Exists(p => p.EndsWith("System.Drawing.dll", StringComparison.OrdinalIgnoreCase)), r2.Diagnostics);
+            Check("① 两轮日志各记一行", log1.Contains("System.Xml") && log2.Contains("System.Drawing"), log1 + " || " + log2);
+            Check("① 自愈计数 > 0（两轮合计）", healer.Healed.Count >= 2, "Healed=" + healer.Healed.Count);
+
+            // ⑤ 加引用后 AllNamespaces：返回新对象（Invalidate 钩子真被调用）且含新引用的命名空间
+            var healer5 = new ReferenceHealer(new[] { searchDir });
+            var session = new ReplSession(new[] { mscorlib }, null);
+            var before = session.AllNamespaces();
+            bool beforeXml = false;
+            foreach (string ns in before)
+                if (ns == "System.Xml") beforeXml = true;
+            Check("⑤ 修复前缓存不含 System.Xml", !beforeXml);
+            var r3 = RoslynCompiler.CompileWithHealing("HealRound3",
+                "public class R3 { public static System.Xml.XmlDocument D; }",
+                session.ReferencePaths, true, healer5, out string log3, session);
+            var after = session.AllNamespaces();
+            bool afterXml = false;
+            foreach (string ns in after)
+                if (ns == "System.Xml") afterXml = true;
+            Check("⑤ 自愈成功（经 ReferencePaths 同一 List）", r3.Success, r3.Diagnostics);
+            Check("⑤ 钩子真被调用（AllNamespaces 返回新对象）", !ReferenceEquals(before, after));
+            Check("⑤ 新引用命名空间可见", afterXml, "System.Xml 缺席");
+            Check("⑤ ReferenceRevision 增长", session.ReferenceRevision > 0, "rev=" + session.ReferenceRevision);
+            Check("⑤ LastHealLog 记录补引用", session.LastHealLog.Contains("System.Xml"), session.LastHealLog);
+
+            // 生产主路径：ReplSession.Submit 的 emit 失败 → Resolve → 加引用 → 重试（≤5 轮）
+            var healerS = new ReferenceHealer(new[] { searchDir });
+            var sessionS = new ReplSession(new[] { mscorlib }, null, healerS);
+            CompileResult sr = sessionS.Submit("var healVar = new System.Xml.XmlDocument();");
+            Check("Submit 自愈后编译成功", sr.Success, sr.Diagnostics);
+            Check("Submit LastHealLog 记录补引用", sessionS.LastHealLog.Contains("System.Xml"), sessionS.LastHealLog);
+            Check("Submit ReferenceRevision>0", sessionS.ReferenceRevision > 0, "rev=" + sessionS.ReferenceRevision);
         }
 
         /// <summary>HookInstance 的离线替身（只承载描述所需的两个值；字段 string/bool，非载荷类型）。</summary>

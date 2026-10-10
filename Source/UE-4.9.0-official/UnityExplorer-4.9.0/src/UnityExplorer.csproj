@@ -204,6 +204,9 @@
         <Compile Remove="RoslynBridge\RoslynScriptEvaluator.cs" />
         <!-- 任务 9：补全（RoslynCompletion）同样依赖 Microsoft.CodeAnalysis ⇒ 与上面四件同进退 -->
         <Compile Remove="RoslynBridge\RoslynCompletion.cs" />
+        <!-- 任务 13：引用自愈两件（ReferenceHealer 依赖 Microsoft.CodeAnalysis；Parser 与其同进退） -->
+        <Compile Remove="RoslynBridge\MissingReferenceParser.cs" />
+        <Compile Remove="RoslynBridge\ReferenceHealer.cs" />
     </ItemGroup>
     <!-- 架构 A 正式接线：net472 可直接消费 netstandard2.0，按计划原样常规 <Reference>
          引 lib/roslyn 载荷（Private=false：不进输出，由部署脚本单独搬运）。 -->

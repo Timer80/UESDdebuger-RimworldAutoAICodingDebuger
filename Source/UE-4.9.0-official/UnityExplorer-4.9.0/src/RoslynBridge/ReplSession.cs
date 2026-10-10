@@ -18,11 +18,15 @@ namespace UnityExplorer.RoslynBridge
     {
         // ⚠️ **引用集契约**（任务 9 收尾轮 R3：调用点已**指名**，勿只当注释看）
         // 本表在构造后**只增不改**；任何"就地增删引用"的调用点 —— **任务 13 的引用自愈**
-        // （`RoslynCompiler.CompileWithHealing` 里 `ReferenceSet.TryAdd(...)` 成功之后）—— **必须**紧接着调用
-        // `InvalidateNamespaceCache()`；否则命名空间补全表会**静默停留在旧快照**（不崩、只是永远缺候选 =
-        // 最难发现的那类缺陷）。**双向登记**：任务 13 简报里也有一条指向本方法
+        // （`ReplSession.Submit` 的自愈循环 与 `RoslynCompiler.CompileWithHealing`，两条入口共用钩子）——
+        // 加引用成功后**必须**紧接着调用 `OnReferenceAdded()`（内部第一步就是 `InvalidateNamespaceCache()`）；
+        // 否则命名空间补全表会**静默停留在旧快照**（不崩、只是永远缺候选 = 最难发现的那类缺陷）。
+        // **双向登记**：任务 13 简报里也有一条指向本方法
         // （`task-13-brief.md` 的"⚠️ 与补全缓存的耦合（任务 9 复审登记）"），两处互指防漏。
         readonly List<string> s_referencePaths;
+        // 任务 13：自愈器（null = 不自愈）。ReferenceHealer 是本程序集类型（非载荷类型）⇒ 字段签名
+        // 可过启动期字段扫描（C.5：其内部载荷类型只在方法体里）。
+        readonly ReferenceHealer s_healer;
         // C.5-lite（任务 8）：原 `List<MetadataReference> s_imageRefs`（s_ 前缀名不副实——实为实例字段）。
         // RimWorld 启动期 GetFields 字段扫描解析字段签名时**不按 BindingFlags 过滤，实例字段一样炸**
         // （Player.log 实证：TypeLoadException: Could not load type of field
@@ -85,8 +89,13 @@ namespace UnityExplorer.RoslynBridge
         /// （宿主基类的形态另有 §19 的生成源码/纯函数断言覆盖）。
         /// </summary>
         public ReplSession(IEnumerable<string> referencePaths, string hostBaseTypeName)
+            : this(referencePaths, hostBaseTypeName, null) { }
+
+        /// <summary>任务 13：注入自愈器（Submit 的 emit 失败自愈循环用；null = 不自愈）。参数语义同上。</summary>
+        public ReplSession(IEnumerable<string> referencePaths, string hostBaseTypeName, ReferenceHealer healer)
         {
             s_referencePaths = new List<string>(referencePaths);
+            s_healer = healer;
             s_hostBaseTypeName = string.IsNullOrEmpty(hostBaseTypeName) ? null : hostBaseTypeName;
             // 跨提交继承链的运行期绑定：Assembly.Load(byte[]) 产物不进默认加载上下文，
             // Submission_N 按名解析基类 Submission_{N-1} 时默认探测必失败（实测
@@ -391,6 +400,44 @@ namespace UnityExplorer.RoslynBridge
                 out generatedTree);
             Diagnostic[] firstDiag;
             CompileResult result = EmitOnce(compilation, srcText, notes, out firstDiag);
+
+            // ── 任务 13：引用自愈主循环（生产路径 = 这里；`Evaluate` 首行即 Submit，不走 CompileWithHealing）──
+            // 失败诊断 → healer.Resolve → s_referencePaths.Add → OnReferenceAdded（内部 InvalidateNamespaceCache
+            // + ReferenceRevision++ + §4.10-3 延迟 using 重算）→ 重建生成源码（可能刚恢复了 using）与引用集 →
+            // 重试，≤5 轮；到顶打"已补 N 个引用仍未通过 + 剩余诊断"（§4.5 禁静默截断）。
+            // C.5：循环体只用方法体局部（StatementSyntax 等载荷类型绝不进字段/闭包）——无 lambda/迭代器。
+            LastHealLog = "";
+            int healed = 0;
+            if (!result.Success && s_healer != null)
+            {
+                Action<string> sink = s_healer.ReportSink;
+                for (int round = 0; round < 5 && !result.Success; round++)
+                {
+                    string add = s_healer.Resolve(result.Diagnostics, s_referencePaths);
+                    if (add == null) break;                       // 解析不出来：原样返回诊断（原因已响亮）
+                    if (ContainsReferencePath(add)) break;        // 防御：已在引用集里（补了也没用）
+                    s_referencePaths.Add(add);
+                    healed++;
+                    string line = "自愈补引用：" + Path.GetFileName(add);
+                    LastHealLog += line + Environment.NewLine;
+                    if (sink != null) sink(line);
+                    OnReferenceAdded();
+                    srcText = BuildSubmissionSource(className, baseName, fields, statements, lastExpr,
+                        assignValue: lastExpr != null, pendingUsings: pendingUsings, classesSource: classes,
+                        out assignmentLine);
+                    metadataRefs = BuildReferences();
+                    compilation = CreateSubmissionCompilation(srcText, asmName, metadataRefs, out generatedTree);
+                    result = EmitOnce(compilation, srcText, notes, out firstDiag);
+                }
+                if (!result.Success && healed >= 5)
+                {
+                    string cap = "引用自愈到顶：已补 " + healed + " 个引用仍未通过（上限 5 轮），剩余诊断："
+                        + Environment.NewLine + result.Diagnostics;
+                    result.Diagnostics = result.Diagnostics + Environment.NewLine + cap;
+                    LastHealLog += cap + Environment.NewLine;
+                    if (sink != null) sink(cap);
+                }
+            }
 
             if (lastExpr != null && result.ErrorCount > 0
                 && IsVoidAssignmentError(compilation, generatedTree, firstDiag, assignmentLine))
@@ -710,9 +757,115 @@ namespace UnityExplorer.RoslynBridge
 
         /// <summary>
         /// **引用集变更后必须调用**（任务 9 收尾轮 R3）：清空命名空间表缓存，下次 <see cref="AllNamespaces"/> 重建。
-        /// 契约与调用点见 `s_referencePaths` 声明处：**任务 13 的引用自愈在 `ReferenceSet.TryAdd` 成功后必须调用本方法**。
+        /// 契约与调用点见 `s_referencePaths` 声明处：任务 13 引用自愈经 <see cref="OnReferenceAdded"/> 调用本方法
+        /// （`Submit` 循环 与 `CompileWithHealing` 两条入口共用同一钩子）。
         /// </summary>
         public void InvalidateNamespaceCache() => s_namespaces = null;
+
+        // ── 任务 13（引用自愈）新增 API ──
+
+        /// <summary>会话引用集的**活列表**（构造拷贝的原件、就地增长；测试把本对象作为同一 List 传给
+        /// CompileWithHealing，才能观察到自愈真的落进会话引用集）。</summary>
+        public List<string> ReferencePaths => s_referencePaths;
+
+        /// <summary>引用集变更次数（每自愈加一次引用 +1）—— §4.10 的观测点，测试断言用。</summary>
+        public int ReferenceRevision { get; private set; }
+
+        /// <summary>最近一次 Submit 的自愈日志（"自愈补引用：X.dll" 行；无自愈 = 空串）。</summary>
+        public string LastHealLog { get; private set; } = "";
+
+        /// <summary>任务 13：<c>CompileWithHealing</c>（带 session 参数的契约入口）把本轮 healLog 并进
+        /// <see cref="LastHealLog"/> —— 两条自愈入口共用同一观测点。</summary>
+        public void AppendHealLog(string text)
+        {
+            if (!string.IsNullOrEmpty(text)) LastHealLog += text;
+        }
+
+        /// <summary>§4.10-3：构造期因"引用集缺其来源程序集"被剔除的默认 using —— 引用集增长后须重算
+        /// （不重算 ⇒ using 被错误剔除 ⇒ 裸类型名 CS0103 回归）。null/空 = 无延迟项。</summary>
+        List<string> s_deferredUsings;
+
+        /// <summary>任务 13：登记"因引用集缺件被剔除的默认 using"（控制台初始化时传入排除集）。</summary>
+        public void SetDeferredUsings(IEnumerable<string> unavailable)
+        {
+            if (unavailable == null) { s_deferredUsings = null; return; }
+            var list = new List<string>();
+            foreach (string ns in unavailable)
+                if (!string.IsNullOrEmpty(ns) && !list.Contains(ns)) list.Add(ns);
+            s_deferredUsings = list.Count == 0 ? null : list;
+        }
+
+        /// <summary>
+        /// **引用自愈每加一个引用后必须调用**（任务 13 定稿钩子，两条自愈入口共用）：
+        /// ① <see cref="InvalidateNamespaceCache"/>（契约双登记点名的那一步）；
+        /// ② <see cref="ReferenceRevision"/> +1（观测点）；
+        /// ③ §4.10-3 重算延迟 using：验证式重跑 <c>DefaultUsings.Unavailable</c>，新可用的走
+        /// <see cref="AddUsings"/>（校验拒绝的退回延迟表下次再试；等价"重跑排除计算"，偏离见报告 §26）。
+        /// </summary>
+        public void OnReferenceAdded()
+        {
+            InvalidateNamespaceCache();
+            ReferenceRevision++;
+            RecomputeDeferredUsings();
+        }
+
+        void RecomputeDeferredUsings()
+        {
+            if (s_deferredUsings == null || s_deferredUsings.Count == 0) return;
+            List<string> still = DefaultUsings.Unavailable(s_deferredUsings, DeferredOwnerAvailable);
+            if (still.Count == s_deferredUsings.Count) return;   // 无新可用项：不付编译费
+            var newly = new List<string>();
+            foreach (string ns in s_deferredUsings)
+                if (!still.Contains(ns)) newly.Add(ns);
+            s_deferredUsings = still.Count == 0 ? null : still;
+            string diag;
+            List<string> accepted = AddUsings(newly, out diag);
+            if (accepted.Count < newly.Count)
+            {
+                if (s_deferredUsings == null) s_deferredUsings = new List<string>();
+                foreach (string ns in newly)
+                    if (!accepted.Contains(ns) && !s_deferredUsings.Contains(ns)) s_deferredUsings.Add(ns);
+            }
+            Action<string> sink = s_healer == null ? null : s_healer.ReportSink;
+            if (sink == null) return;
+            if (diag != null) sink("引用自愈：默认 using 重算被校验拒绝（已退回延迟表）：" + diag);
+            else if (accepted.Count > 0) sink("引用自愈：恢复默认 using " + string.Join("、", accepted.ToArray()));
+        }
+
+        bool DeferredOwnerAvailable(string owner)
+        {
+            if (owner == DefaultUsings.SelfAssemblyToken)
+            {
+                try
+                {
+                    Assembly self = Assembly.GetExecutingAssembly();
+                    string name = self == null ? null : self.GetName().Name;
+                    return name != null && ContainsReferenceStem(name);
+                }
+                catch { return false; }
+            }
+            return ContainsReferenceStem(owner);
+        }
+
+        bool ContainsReferenceStem(string simple)
+        {
+            string want = simple + ".dll";
+            foreach (string p in s_referencePaths)
+            {
+                if (string.IsNullOrEmpty(p)) continue;
+                string stem = null;
+                try { stem = Path.GetFileName(p); } catch { stem = null; }
+                if (stem != null && string.Equals(stem, want, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+
+        bool ContainsReferencePath(string path)
+        {
+            foreach (string p in s_referencePaths)
+                if (string.Equals(p, path, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
 
         /// <summary>
         /// 会话引用里的**命名空间全集**（惰性构建 + 缓存）。**只读 Roslyn 元数据**——`MetadataReference`

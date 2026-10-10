@@ -16,10 +16,15 @@ namespace UnityExplorer.RoslynBridge
         public string FailureReason { get; private set; }
 
         // A1（合并修复轮）：配置项 CSharp_Console_Allow_Mod_Type_Resolution 的落位载体。
-        // ⚠️ 铁律（对端审查裁定）：任务 13 自愈器落地前，本开关【不改变任何引用集行为】——
-        // 严禁把 ReferenceScanner.ModAssemblyPaths() 的产物预加进引用集（那是旧三参设计，已裁定废弃）；
-        // 模组程序集只允许经"编译诊断触发"的自愈路径进入（任务 13 实现）。
+        // 任务 13（引用自愈）**把开关做实**（ConfigManager 文案 = 功能规格，不再是死开关）：
+        //  · ON ⇒ 模组程序集**永不预加**，仅编译诊断触发的自愈把它带进引用集（healer 只从诊断进）；
+        //  · OFF ⇒ 模组路径作 healer 的**排除集**（"已加载程序集 Location"候选通道也受排除，否则会绕过开关），
+        //    失败日志注明是开关导致（承载 = ReferenceHealer.AllowModTypeResolution，ConsoleController 方法组接线）。
         public bool AllowModTypeResolution { get; }
+
+        readonly ReferenceHealer s_healer;
+        /// <summary>任务 13：自愈器实例（宿主注入 ModPathsProvider / ReportSink 方法组用）。</summary>
+        public ReferenceHealer Healer => s_healer;
 
         public RoslynScriptEvaluator(IEnumerable<string> referencePaths, string blacklist = "",
             bool allowModTypeResolution = false)
@@ -33,9 +38,42 @@ namespace UnityExplorer.RoslynBridge
         internal RoslynScriptEvaluator(IEnumerable<string> referencePaths, string blacklist,
             bool allowModTypeResolution, string hostBaseTypeName)
         {
-            s_session = new ReplSession(referencePaths, hostBaseTypeName);
+            // 任务 13：自愈器先建、注入会话（Submit 的 emit 失败循环即生产主循环）。
+            // 固定搜索目录 = 引用集各文件所在目录 + 运行时目录；模组候选每次 Resolve 经
+            // ModPathsProvider 现算（§4.1，禁止构造期快照）。
+            s_healer = new ReferenceHealer(HealSearchDirs(referencePaths));
+            s_healer.AllowModTypeResolution = allowModTypeResolution;
+            s_session = new ReplSession(referencePaths, hostBaseTypeName, s_healer);
             AllowModTypeResolution = allowModTypeResolution;
             IsAvailable = true;
+        }
+
+        /// <summary>§4.10-3：把控制台初始化时因缺引用被剔除的默认 using 登记进会话
+        /// （引用自愈增长引用集后由 <c>OnReferenceAdded</c> 验证式重算）。</summary>
+        public void SetDeferredUsings(IEnumerable<string> unavailable) => s_session.SetDeferredUsings(unavailable);
+
+        /// <summary>自愈固定搜索目录：引用集各文件所在目录 + 运行时目录（mscorlib 所在）。
+        /// 方法实现、无 lambda（C.5 闭包纪律）。</summary>
+        static List<string> HealSearchDirs(IEnumerable<string> referencePaths)
+        {
+            var dirs = new List<string>();
+            if (referencePaths != null)
+            {
+                foreach (string p in referencePaths)
+                {
+                    if (string.IsNullOrEmpty(p)) continue;
+                    string d = null;
+                    try { d = System.IO.Path.GetDirectoryName(p); } catch { d = null; }
+                    if (!string.IsNullOrEmpty(d) && !dirs.Contains(d)) dirs.Add(d);
+                }
+            }
+            try
+            {
+                string rt = System.IO.Path.GetDirectoryName(typeof(object).Assembly.Location);
+                if (!string.IsNullOrEmpty(rt) && !dirs.Contains(rt)) dirs.Add(rt);
+            }
+            catch { /* 动态程序集无 Location：跳过运行时目录 */ }
+            return dirs;
         }
 
         // A1 观测点：引用集大小透传（测试断言"开关不放大引用集"用）。

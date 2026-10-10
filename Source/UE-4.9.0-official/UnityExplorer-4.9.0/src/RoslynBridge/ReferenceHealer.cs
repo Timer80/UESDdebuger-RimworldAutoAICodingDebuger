@@ -102,6 +102,7 @@ namespace UnityExplorer.RoslynBridge
                        ?? MissingReferenceParser.SymbolFromCs0246(diagnostics)
                        ?? MissingReferenceParser.SymbolFromCs0103(diagnostics);
             bool symBlocked = false;
+            bool symTried = sym != null;
             if (sym != null)
             {
                 string p = ResolveByNamespace(sym, currentRefs, modPaths, allowMod, out symBlocked);
@@ -118,6 +119,16 @@ namespace UnityExplorer.RoslynBridge
                     + ", Culture=" + (idCulture ?? "?") + ", PublicKeyToken=" + (idPkt ?? "?")
                     + "' 的程序集文件（含内存加载 Location 为空的情形）。可执行建议：把该 dll 放进模组目录随模组加载，"
                     + "或改用 Assembly.LoadFrom(完整路径) 加载后重试。");
+            // 符号通道也试过、也没被开关挡住 ⇒ 必须**响亮**说清"为什么救不了"（此前这里是静默 return null：
+            // 用户只看到裸 CS0234/CS0246，不知道是"没候选"还是"内存加载不可引用"）。点名内存加载边界：
+            // 候选池只含**文件**（已加载件的 Location、固定目录、模组目录）⇒ `Assembly.Load(byte[])` 且盘上无
+            // 同身份文件时，Roslyn 无法为它建引用（运行时取不回原始字节：Location 为空、内存映像不可用）。
+            if (symTried && !symBlocked && !blockedSwitch)
+                Report("无法自愈：符号 '" + sym + "' 在候选池里找不到任何**文件**候选"
+                    + "（候选池只含文件：已加载件的 Location、固定目录、模组目录）"
+                    + "。若该类型来自 `Assembly.Load(byte[])` 内存加载的程序集且盘上无同身份文件，"
+                    + "则 Roslyn 无法为它建立引用（运行时不能取回原始 PE 字节）⇒ 本条不可自愈。"
+                    + "可执行建议：把该 dll 放进模组目录随模组加载，或改用 Assembly.LoadFrom(完整路径)。");
             return null;
         }
 

@@ -75,6 +75,7 @@ namespace RoslynBridgeTests
             TestReferenceSetDedupeLog();
             TestRollbackLeavesNoSideEffects();
             TestSameStemAdoptionDisclosure();
+            TestHealSymbolChannelLoudFailure();
             TestHealReplIntegration();
             // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
             // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
@@ -2771,6 +2772,29 @@ namespace RoslynBridgeTests
             Check("⑪ 披露文本含两份路径与各自版本（采用哪版可观测）",
                 msg != null && msg.Contains("0Harmony.dll") && msg.Contains("2.3.3") && msg.Contains("2.5.2"),
                 msg ?? "<null>");
+        }
+
+        /// <summary>任务 13（内存加载支持面）：**符号通道失败必须响亮**——旧码在"符号通道也没找到文件候选"
+        /// 时**静默** `return null`，用户只看到裸 CS0234/CS0246，分不清"没候选"还是"内存加载不可引用"。
+        /// 现要求点名边界：候选池只含**文件**；`Assembly.Load(byte[])` 且盘上无同身份文件 ⇒ Roslyn 建不了引用
+        ///（运行时取不回原始 PE 字节）⇒ 给可执行建议。用"无人声明的命名空间"驱动。</summary>
+        static void TestHealSymbolChannelLoudFailure()
+        {
+            string searchDir = System.IO.Path.GetDirectoryName(typeof(object).Assembly.Location);
+            var healer = new ReferenceHealer(new[] { searchDir });
+            healer.ReportSink = HealSinkCapture;
+            healer.AllowModTypeResolution = false;
+            s_healSink.Clear();
+            var r = healer.Resolve(
+                "(1,1): error CS0234: The type or namespace name 'Foo' does not exist in the namespace 'Zzzz9'"
+                + " (are you missing an assembly reference?)",
+                new System.Collections.Generic.List<string>());
+            string text = SinkText();
+            Check("⑫ 符号通道找不到文件候选 ⇒ 解析 null（不自愈）", r == null, r ?? "<null>（不该有解）");
+            Check("⑫ **不静默**：有响亮说明（不得只回 null 而无日志）", text.Length > 0, text.Length == 0 ? "<无日志>" : text);
+            Check("⑫ 说明点名内存加载边界与可执行建议",
+                text.Contains("Assembly.Load(byte[])") && text.Contains("LoadFrom") && text.Contains("找不到任何"),
+                text);
         }
 
         static void TestHealCapMessage()

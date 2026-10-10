@@ -86,6 +86,8 @@ namespace RoslynBridgeTests
             TestHealReplIntegration();
             // 任务 15a：mcs 侧诊断解析兼容（反引号）+ 纯逻辑自愈策略（按名优先/给 null 不瞎给/到顶文案同款）
             TestMcsHealingPolicy();
+            // 任务 15b：把 15a 的策略接进求值器（已加载件注册表 + 一轮解析 + 到顶判定）的离线断言
+            TestMcsReferenceHealer();
             // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
             // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
             Console.WriteLine("COUNTS parent_pass=" + passLines + " parent_fail=" + failures
@@ -2873,6 +2875,160 @@ namespace RoslynBridgeTests
                 MissingReferenceParser.AssemblyFromCs1069(mcs1069) == "UnityEngine.VideoModule"
                 && McsHealingPolicy.DemandedName(mcs1069) == "UnityEngine.VideoModule",
                 McsHealingPolicy.DemandedName(mcs1069) ?? "<null>");
+        }
+
+        /// <summary>任务 15b：把 15a 的策略接进 mcs 求值器后，**接线所依赖的分支事实**离线断言。
+        /// 生产调用点：`ScriptEvaluator`（最小集构造 + `Evaluate` 失败路径的 ≤5 轮驱动 + `AppendCapIfNeeded`）
+        /// 与 `ConsoleController`（`minimalReferences: true` + 开关→排除集）；那些在 UE 工程里不可 link，
+        /// 故这里断言的是它们调用到的纯逻辑：①已加载优先 ⇒ `PathLoader` 调用 0 次；②同名不同身份 ⇒ 不加入且响亮；
+        /// ③到顶文案由 `CapMessage` 产生且含剩余诊断（禁静默截断）。</summary>
+        static void TestMcsReferenceHealer()
+        {
+            // ═══ ① 已加载优先 ⇒ **不调用 LoadFrom**（注册表 = AssemblyLoad 只登记不引用的落点）═══
+            var reg = new LoadedAssemblyRegistry();
+            System.Reflection.Assembly core = typeof(object).Assembly;      // 真实"已在进程里"的件
+            string coreName = core.GetName().Name;
+            Check("⑮b-① 注册表只登记不引用（首次登记 true、同名重复 false 不覆盖身份）",
+                reg.Register(core) && !reg.Register(core) && reg.Count == 1, "Count=" + reg.Count);
+            Check("⑮b-① 登记同时记下所在目录（自愈候选的『实际加载位置』来源）",
+                reg.KnownDirectories.Count >= 1 && reg.FindBySimpleName(coreName) == core);
+
+            int loads1 = 0;
+            var added1 = new System.Collections.Generic.List<System.Reflection.Assembly>();
+            var reports1 = new System.Collections.Generic.List<string>();
+            var h1 = new McsReferenceHealer(reg)
+            {
+                PathLoader = p => { loads1++; return null; },              // 任何 LoadFrom 都会被计到
+                AddReference = a => { added1.Add(a); return true; },
+                CandidatePathProvider = () => new System.Collections.Generic.List<string>(),
+                ReportSink = reports1.Add,
+            };
+            string diagMcs0246 = "(1,1): error CS0246: The type or namespace name `" + coreName
+                + "' could not be found (are you missing a using directive or an assembly reference?)";
+            string got1 = h1.TryHealOne(diagMcs0246);
+            Check("⑮b-① 命中注册表 ⇒ 直接 ReferenceAssembly（LastFromLoadedRegistry、命中计数 1、加的就是那一件）",
+                got1 != null && h1.LastFromLoadedRegistry && h1.LoadedRegistryHitCount == 1
+                && added1.Count == 1 && added1[0] == core, "got=" + (got1 ?? "<null>"));
+            Check("⑮b-① **加载次数 = 0**（PathLoader 调用 " + h1.LoadCallCount + " 次、假加载器被调 " + loads1 + " 次）",
+                loads1 == 0 && h1.LoadCallCount == 0);
+
+            // 读不出被要求的名字 ⇒ 不折腾（且不猜）
+            var hNone = new McsReferenceHealer(new LoadedAssemblyRegistry())
+            {
+                PathLoader = p => { loads1++; return null; },
+                AddReference = a => { added1.Add(a); return true; },
+                CandidatePathProvider = () => new System.Collections.Generic.List<string>(),
+                ReportSink = reports1.Add,
+            };
+            Check("⑮b-① 非缺引用诊断（CS1002 等）⇒ 不自愈、返回 null 且响亮说明",
+                hNone.TryHealOne("(1,1): error CS1002: ; expected") == null
+                && hNone.LastReport.Contains("读不出"), hNone.LastReport);
+            Check("⑮b-① 按名无匹配 ⇒ 返回 null（**绝不瞎给一个**，mcs 引用不可撤回）",
+                hNone.TryHealOne("(1,1): error CS0246: The type or namespace name `Zzz.NoSuchThing' could not be found")
+                    == null
+                && hNone.LastReport.Contains("按名无匹配") && hNone.LastReport.Contains("不可撤回"),
+                hNone.LastReport);
+
+            // ═══ ② 同名不同身份 ⇒ **不加入**且日志响亮 ═══
+            string realDll = typeof(string).Assembly.Location;             // 真实文件 + 真实身份（mscorlib.dll）
+            var cand = new System.Collections.Generic.List<string> { realDll };
+            int loads2 = 0;
+            var added2 = new System.Collections.Generic.List<System.Reflection.Assembly>();
+            var reports2 = new System.Collections.Generic.List<string>();
+            // 注意：用**空注册表**（否则会先命中①的已加载件通道，测不到文件通道的身份校验）
+            var h2 = new McsReferenceHealer(new LoadedAssemblyRegistry())
+            {
+                PathLoader = p => { loads2++; return typeof(string).Assembly; },
+                AddReference = a => { added2.Add(a); return true; },
+                CandidatePathProvider = () => cand,
+                ReportSink = reports2.Add,
+            };
+            string badIdentity = "(1,1): error CS0012: The type 'X' is defined in an assembly that is not referenced."
+                + " You must add a reference to assembly `mscorlib, Version=9.9.9.9, Culture=neutral,"
+                + " PublicKeyToken=b77a5c561934e089'.";
+            Check("⑮b-② 同名不同身份（Version 不符）⇒ **不加入**、0 次 LoadFrom、0 次加引用",
+                h2.TryHealOne(badIdentity) == null && loads2 == 0 && h2.LoadCallCount == 0 && added2.Count == 0);
+            Check("⑮b-② 拒绝**响亮**（点名身份不符 + 未加入 + 不可撤回，且报出要求的版本）",
+                h2.LastReport.Contains("身份不符") && h2.LastReport.Contains("未加入")
+                && h2.LastReport.Contains("9.9.9.9") && h2.LastReport.Contains("不可撤回"), h2.LastReport);
+
+            // 身份相符 ⇒ 放行（文件通道：1 次 LoadFrom + 加入成功）
+            System.Reflection.AssemblyName realName = typeof(string).Assembly.GetName();
+            var sb = new System.Text.StringBuilder();
+            byte[] tok = realName.GetPublicKeyToken();
+            for (int i = 0; tok != null && i < tok.Length; i++) sb.Append(tok[i].ToString("x2"));
+            string goodIdentity = "(1,1): error CS0012: The type 'X' is defined in an assembly that is not referenced."
+                + " You must add a reference to assembly `mscorlib, Version=" + realName.Version
+                + ", Culture=neutral, PublicKeyToken=" + sb.ToString() + "'.";
+            string got2 = h2.TryHealOne(goodIdentity);
+            Check("⑮b-② 身份相符 ⇒ 放行（文件通道：1 次 LoadFrom + 加入的是该文件）",
+                got2 == realDll && loads2 == 1 && added2.Count == 1 && !h2.LastFromLoadedRegistry,
+                "got=" + (got2 ?? "<null>") + " loads=" + loads2);
+
+            // 排除集（开关 OFF 的模组路径）在**两条通道**都生效
+            int loads3 = 0;
+            var added3 = new System.Collections.Generic.List<System.Reflection.Assembly>();
+            var h3 = new McsReferenceHealer(reg)      // reg 里有 core（已加载件通道）
+            {
+                PathLoader = p => { loads3++; return typeof(string).Assembly; },
+                AddReference = a => { added3.Add(a); return true; },
+                CandidatePathProvider = () => cand,
+                IsExcludedPath = p => true,           // 模拟开关 OFF：全部路径（含已加载件的 Location）命中排除集
+                ReportSink = reports2.Add,
+            };
+            Check("⑮b-② 排除集（开关 OFF）挡下**已加载件通道**：不加入、0 次 LoadFrom、响亮说明",
+                h3.TryHealOne(diagMcs0246) == null && loads3 == 0 && added3.Count == 0
+                && h3.LastReport.Contains("排除集"), h3.LastReport);
+
+            // 黑名单：命中即拒绝（不 LoadFrom）
+            var h4 = new McsReferenceHealer(new LoadedAssemblyRegistry())
+            {
+                PathLoader = p => { loads3++; return typeof(string).Assembly; },
+                AddReference = a => { added3.Add(a); return true; },
+                CandidatePathProvider = () => cand,
+                IsRefused = n => true,
+                ReportSink = reports2.Add,
+            };
+            Check("⑮b-② 黑名单命中 ⇒ 拒绝且响亮（不加载、不加入）",
+                h4.TryHealOne(goodIdentity) == null && loads3 == 0 && added3.Count == 0
+                && h4.LastReport.Contains("黑名单"), h4.LastReport);
+
+            // ═══ ③ 到顶文案由 CapMessage 产生且含剩余诊断 ═══
+            Check("⑮b-③ 到顶判据 = 已补满 5 轮（与 Roslyn 侧 healed>=5 同源）",
+                McsReferenceHealer.MaxHealRounds == 5 && McsReferenceHealer.ReachedCap(5)
+                && !McsReferenceHealer.ReachedCap(4));
+            Check("⑮b-③ 未到顶不改写诊断（逐字返回）",
+                McsReferenceHealer.AppendCapIfNeeded(4, "DIAG") == "DIAG");
+            string capped = McsReferenceHealer.AppendCapIfNeeded(5, "REMAINING-DIAG");
+            Check("⑮b-③ 到顶文案 **由 CapMessage 产生** 且含剩余诊断（禁静默截断）",
+                capped.Contains(McsHealingPolicy.CapMessage(5, "REMAINING-DIAG"))
+                && capped.Contains("已补 5 个引用仍未通过（上限 5 轮），剩余诊断：")
+                && capped.Contains("REMAINING-DIAG"), capped);
+
+            // 5 轮真实驱动（与 ScriptEvaluator.Evaluate 的循环同构）：每轮都"有候选 ⇒ 加引用 ⇒ 再编译仍失败"
+            int rounds = 0, loads5 = 0;
+            var added5 = new System.Collections.Generic.List<System.Reflection.Assembly>();
+            var h5 = new McsReferenceHealer(new LoadedAssemblyRegistry())
+            {
+                PathLoader = p => { loads5++; return typeof(string).Assembly; },
+                AddReference = a => { added5.Add(a); return true; },
+                CandidatePathProvider = () => new System.Collections.Generic.List<string> { @"C:\fake\Foo.dll" },
+                ReportSink = reports2.Add,
+            };
+            string diag5 = "(1,1): error CS0246: The type or namespace name `Foo' could not be found";
+            string healLog5 = "";
+            for (int round = 0; round < McsReferenceHealer.MaxHealRounds; round++)
+            {
+                if (h5.TryHealOne(diag5) == null) break;
+                rounds++;
+                healLog5 += McsHealingPolicy.HealLogLine(@"C:\fake\Foo.dll") + Environment.NewLine;
+            }
+            string capped5 = McsReferenceHealer.AppendCapIfNeeded(rounds, diag5);
+            Check("⑮b-③ 5 轮驱动：补满 " + rounds + " 个引用（= 上限）且加载 " + loads5 + " 次、加入 " + added5.Count + " 件",
+                rounds == McsReferenceHealer.MaxHealRounds && loads5 == rounds && added5.Count == rounds);
+            Check("⑮b-③ 5 轮驱动到顶：诊断仍在（末尾追加到顶文案，未截断），日志用 HealLogLine（点名不可撤回）",
+                capped5.Contains("已补 5 个引用仍未通过") && capped5.EndsWith(diag5)
+                && healLog5.Contains("（mcs 路径，加入后不可撤回）"), Head(capped5, 200));
         }
 
         static void TestHealCapMessage()

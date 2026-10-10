@@ -1,4 +1,4 @@
-﻿using System.Collections;
+using System.Collections;
 using System.Text;
 using UnityExplorer.Config;
 using UnityExplorer.RoslynBridge;
@@ -252,10 +252,21 @@ namespace UnityExplorer.CSConsole
             }
             else
             {
-                Evaluator = new ScriptEvaluator(evaluatorStringWriter)
+                // 任务 15b：控制台路径显式开启"**最小集 + 已加载件注册表 + 诊断驱动自愈**"。
+                // 为什么是 opt-in 而不是把 ScriptEvaluator 全局改掉：旧调用方（HookInstance 自建实例等）
+                // 依赖"启动全扫 + 新加载程序集自动引用"的旧行为，全局改会让它们的可见类型集合突然收窄
+                //（原本能写的类型变 CS0246），而它们的失败面（动态补丁/钩子）比控制台更贵。详见 ScriptEvaluator 构造注释。
+                var mcsEval = new ScriptEvaluator(evaluatorStringWriter, minimalReferences: true)
                 {
                     InteractiveBaseClass = typeof(ScriptInteraction)
                 };
+                // 开关 ON ⇒ 模组程序集只经**诊断触发**进引用集（永不预加）；OFF ⇒ 模组路径作**排除集**
+                //（含已加载件通道），与 Roslyn 侧 ReferenceHealer 同语义——两侧都不许只为一边实现。
+                mcsEval.AllowModTypeResolution = ConfigManager.CSharp_Console_Allow_Mod_Type_Resolution.Value;
+#if MONO
+                mcsEval.ModPathProvider = ModPathsForMcsHealing;   // 方法组注入（C.5：无闭包）
+#endif
+                Evaluator = mcsEval;
                 // 三态回退原因（任务 14 / F1，禁静默且必须可分辨）：
                 //   ① 前置包缺失/加载失败 ⇒ 自动降级 mcs（本节）；② 配置显式关闭；③ 探针失败（下文）。
                 // 文本一律来自 EvaluatorSelector.DescribeMcsFallback（纯函数，离线可断言三态互不相同）。
@@ -715,6 +726,22 @@ namespace UnityExplorer.CSConsole
 
         static void HealDiagnostics(string message)
             => ExplorerCore.LogWarning("[CSConsole] " + message);
+#endif
+
+#if MONO
+        // 任务 15b：mcs 侧自愈的模组候选提供者（**方法组、无 lambda**，C.5 理由同 ModPathsForHealing）。
+        // 口径与 Roslyn 侧逐字同源：走 LoadedModManager（含创意工坊目录），每次现算；开关 OFF 时
+        // 这同一批路径在 ScriptEvaluator 里被用作**排除集**（调用方只提供路径，用不用由开关决定）。
+        // 归 `#if MONO`：ReferenceScanner 依赖本体 Verse 类型，只在 5 个 Mono 配置进 glob。
+        static List<string> ModPathsForMcsHealing()
+        {
+            try { return ReferenceScanner.ModAssemblyPaths(ConfigManager.CSConsole_Assembly_Blacklist.Value); }
+            catch (Exception e)
+            {
+                ExplorerCore.LogWarning("[CSConsole] mcs 自愈：模组候选路径获取失败（本轮无模组候选）：" + e.Message);
+                return new List<string>();
+            }
+        }
 #endif
 
         public static void InsertSuggestionAtCaret(string suggestion)

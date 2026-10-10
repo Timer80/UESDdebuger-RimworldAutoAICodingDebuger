@@ -333,6 +333,9 @@ namespace UnityExplorer.RoslynBridge
                 }
 
                 // pass1：文件名 == 前缀（把 System.Xml.dll 排在 System.Xml.Linq.dll 前，避免垃圾引用）
+                // 任务 15d：把"池内**首个**命中"改成"池内命中**全收**，再按编译器策略取第一"
+                //（Roslyn 路 ⇒ 同简单名多份时选**较新**的那份）；单份/同身份副本时结论与 15c 逐字一致。
+                var stemPool = new List<string>();
                 foreach (string p in pool)
                 {
                     if (ContainsPath(currentRefs, p)) continue;
@@ -340,21 +343,32 @@ namespace UnityExplorer.RoslynBridge
                     if (!DefinesNamespace(p, prefix)) continue;
                     stemDeclares = true;
                     if (!allowMod && IsModPath(p, modPaths)) { blockedAtPrefix = true; continue; }
-                    ReportSameStemChoices(p, pool);
-                    s_nsCache[genKey + prefix] = p;
-                    return p;
+                    stemPool.Add(p);
+                }
+                string stemPick = PickByCompilerPolicy(stemPool, SameStemPreference.Newest);
+                if (stemPick != null)
+                {
+                    ReportSameStemChoices(stemPick, pool);
+                    s_nsCache[genKey + prefix] = stemPick;
+                    return stemPick;
                 }
                 // pass2：Roslyn 只读元数据判命名空间（**仅当无同名程序集时**才允许，见 stemDeclares 说明）
                 if (!stemDeclares)
                 {
+                    var nsPool = new List<string>();
                     foreach (string p in pool)
                     {
                         if (ContainsPath(currentRefs, p)) continue;
                         if (!DefinesNamespace(p, prefix)) continue;
                         if (!allowMod && IsModPath(p, modPaths)) { blockedAtPrefix = true; continue; }
-                        ReportSameStemChoices(p, pool);
-                        s_nsCache[genKey + prefix] = p;
-                        return p;
+                        nsPool.Add(p);
+                    }
+                    string nsPick = PickByCompilerPolicy(nsPool, SameStemPreference.Newest);
+                    if (nsPick != null)
+                    {
+                        ReportSameStemChoices(nsPick, pool);
+                        s_nsCache[genKey + prefix] = nsPick;
+                        return nsPick;
                     }
                 }
                 s_nsCache[genKey + prefix] = "";
@@ -428,61 +442,59 @@ namespace UnityExplorer.RoslynBridge
             if (msg != null) Report(msg);
         }
 
-        /// <summary>**命名空间通道的采用披露**（上机 13-10 抓到的缺口）：命名空间通道只按池内**首个**命中
-        /// 取件，若池内还有**同简单名但身份不同**的候选（典型=同一个 dll 的两个版本），必须说清
+        /// <summary>**命名空间通道的采用披露**（任务 13 §4.10-2 的缺口；任务 15d 并入编译器策略）：
+        /// 命名空间通道从"同简单名多份"（典型=同一个 dll 的两个版本）里取件时，必须说清
         /// "采用谁 / 另有哪些 / 为什么" —— 否则日志里的"补上了"根本没告诉你补的是哪一版，
         /// 这正是 dll 热重载场景"新版静默不生效"的病根（§4.10）。
-        /// 返回 null = 无同简单名多身份（**常态，零噪声**：同身份副本不报）。公开静态 ⇒ 可离线断言。</summary>
+        /// 任务 15d 起"原因"改为**按编译器策略**（Roslyn 路 = 选较新，见
+        /// <see cref="PickByCompilerPolicy"/>）。返回 null = 无同简单名多身份
+        /// （**常态，零噪声**：单份与同身份副本都不报）。公开静态 ⇒ 可离线断言。</summary>
         public static string DescribeSameStemChoices(string chosen, IList<string> pool)
         {
-            if (string.IsNullOrEmpty(chosen) || pool == null) return null;
-            string stem = FileNameStem(chosen);
-            if (string.IsNullOrEmpty(stem)) return null;
-            string chosenId = IdentityOf(chosen);
-            List<string> others = null;
-            foreach (string q in pool)
-            {
-                if (string.IsNullOrEmpty(q) || SamePath(q, chosen)) continue;
-                if (!string.Equals(FileNameStem(q), stem, StringComparison.OrdinalIgnoreCase)) continue;
-                string id = IdentityOf(q);
-                if (string.Equals(id, chosenId, StringComparison.OrdinalIgnoreCase)) continue;   // 同身份副本：无歧义
-                if (others == null) others = new List<string>();
-                others.Add(q + "（身份=" + id + "）");
-            }
-            if (others == null) return null;
-            return "命名空间通道采用披露：候选池里同简单名 '" + stem + "' 有 **身份不同** 的多份 ⇒ 采用="
-                + chosen + "（身份=" + chosenId + "）；未采用 " + others.Count + " 份："
-                + string.Join("；", others.ToArray())
-                + "。原因=命名空间通道按池内首个命中取件（同一编译内同简单名只能引用一份，故不把多版本当等价）";
+            return DescribeSameStemChoices(chosen, pool, SameStemPreference.Newest);
         }
 
-        /// <summary>只读元数据取身份（版本+公钥标记）；取不到 → "&lt;未知&gt;"。**只读，不加载程序集**。</summary>
+        /// <summary>同 <see cref="DescribeSameStemChoices(string, IList{string})"/>，但由调用方给出取舍偏好
+        /// （Roslyn 路 = <see cref="SameStemPreference.Newest"/>，mcs 路 = <see cref="SameStemPreference.Oldest"/>）。</summary>
+        public static string DescribeSameStemChoices(string chosen, IList<string> pool, SameStemPreference pref)
+        {
+            if (string.IsNullOrEmpty(chosen) || pool == null) return null;
+            return SameStemChoice.Describe(chosen, SameStemChoice.FromPaths(pool), pref, "命名空间通道");
+        }
+
+        /// <summary>
+        /// 任务 15d（人类裁定）：**同简单名多份按编译器策略取第一**。
+        /// "有 Roslyn 用全版较新；只有 mcs 用旧版较旧" ⇒ 本类（Roslyn 路）恒传
+        /// <see cref="SameStemPreference.Newest"/>，mcs 路在 <c>McsReferenceHealer</c> 侧传
+        /// <see cref="SameStemPreference.Oldest"/>（两路共用 <see cref="SameStemChoice"/> 同一份逻辑）。
+        /// 口径：候选已过本前缀的全部判据（stem/命名空间/开关），先按**文件名简单名**分组，以**首个命中**
+        /// 所在组为准；组内多份且身份不同 ⇒ 按策略取第一；单份、同身份副本 ⇒ 逐字返回首个（同 15c 行为）。
+        /// **不做自动换版重试**：策略只决定"这一轮采用哪一份"，编不过也不换另一份（逃生门 = 关掉
+        /// <c>Use Roslyn</c> 即切到另一份）。
+        /// </summary>
+        static string PickByCompilerPolicy(List<string> eligible, SameStemPreference pref)
+        {
+            if (eligible == null || eligible.Count == 0) return null;
+            if (eligible.Count == 1) return eligible[0];
+            string key = FileNameStem(eligible[0]);
+            var group = new List<string>();
+            foreach (string p in eligible)
+                if (string.Equals(FileNameStem(p), key, StringComparison.OrdinalIgnoreCase)) group.Add(p);
+            if (group.Count == 1) return group[0];
+            SameStemCandidate best = SameStemChoice.Pick(SameStemChoice.FromPaths(group), pref);
+            return best == null || string.IsNullOrEmpty(best.Path) ? group[0] : best.Path;
+        }
+
+        /// <summary>只读元数据取身份（版本+公钥标记）；取不到 → "&lt;未知&gt;"。**只读，不加载程序集**。
+        /// 任务 15d：实现收敛到 <see cref="SameStemChoice.IdentityOfFile"/>（两路同一份身份口径）。</summary>
         static string IdentityOf(string path)
         {
-            if (string.IsNullOrEmpty(path)) return "<未知>";
-            try
-            {
-                AssemblyName an = AssemblyName.GetAssemblyName(path);
-                if (an == null) return "<未知>";
-                string v = an.Version == null ? "<无版本>" : an.Version.ToString();
-                byte[] pkt = an.GetPublicKeyToken();
-                string token = "<无标记>";
-                if (pkt != null && pkt.Length > 0)
-                {
-                    var sb = new StringBuilder(pkt.Length * 2);
-                    for (int i = 0; i < pkt.Length; i++) sb.Append(pkt[i].ToString("x2"));
-                    token = sb.ToString();
-                }
-                return "Version=" + v + ", PKT=" + token;
-            }
-            catch { return "<未知>"; }
+            return SameStemChoice.IdentityOfFile(path);
         }
 
         static bool SamePath(string a, string b)
         {
-            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
-            try { return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase); }
-            catch { return string.Equals(a, b, StringComparison.OrdinalIgnoreCase); }
+            return SameStemChoice.SamePath(a, b);
         }
 
         // ───────────────────────── 身份/路径小工具 ─────────────────────────

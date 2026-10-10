@@ -16,13 +16,24 @@ namespace UnityExplorer.RoslynBridge
     /// </summary>
     public sealed class LoadedAssemblyRegistry
     {
-        readonly Dictionary<string, Assembly> bySimpleName
-            = new Dictionary<string, Assembly>(StringComparer.OrdinalIgnoreCase);
+        /// <summary>简单名 → 该简单名下的**全部**已登记件（任务 15d 起保留同简单名的多个身份；
+        /// 15b/15c 时是"同简单名先到者胜、只留一份"）。</summary>
+        readonly Dictionary<string, List<Assembly>> bySimpleName
+            = new Dictionary<string, List<Assembly>>(StringComparer.OrdinalIgnoreCase);
         readonly List<string> dirs = new List<string>();
         /// <summary>任务 15c：命名空间/类型探针的结论缓存（**命中与未命中都缓存**，register 变动即整体清空）。</summary>
         readonly Dictionary<string, Assembly> nsHits = new Dictionary<string, Assembly>(StringComparer.Ordinal);
 
-        /// <summary>已登记的**不同简单名**个数（同简单名先到者胜，重复不计）。</summary>
+        /// <summary>任务 15d：同简单名多份时的取舍偏好。mcs 侧 = <see cref="SameStemPreference.Oldest"/>
+        /// （人类裁定"没有 Roslyn 只有 mcs 用旧版"：旧编译器配旧库），在构造器中置定。</summary>
+        public SameStemPreference Preference { get; set; }
+
+        public LoadedAssemblyRegistry()
+        {
+            Preference = SameStemPreference.Oldest;
+        }
+
+        /// <summary>已登记的**不同简单名**个数（同简单名多个身份只算 1）。</summary>
         public int Count => bySimpleName.Count;
 
         /// <summary>登记过程中见到的程序集所在目录（去重，按发现顺序）——候选扫描的"实际加载位置"来源。</summary>
@@ -32,8 +43,8 @@ namespace UnityExplorer.RoslynBridge
         /// 登记一个已加载程序集（**不引用**）。返回 true = 本次新登记。
         /// `completions`（mcs 自动补全生成的动态件）与无简单名的件不予登记——与
         /// <c>ScriptEvaluator.Reference</c> 的既有判据同源。
-        /// 同名不同身份：**先到者胜**（不抛、不覆盖）；mcs 引用一旦加入不可撤回，
-        /// 覆盖等于换一份身份，静默换掉比拒绝更危险。
+        /// 同名不同身份：**都留**（任务 15d：取件时按 <see cref="Preference"/> 选，不再"先到者胜"）；
+        /// 同实例/同身份重复登记 ⇒ false（不重复占位）。mcs 引用一旦加入不可撤回，故取件口径必须确定。
         /// </summary>
         public bool Register(Assembly asm)
         {
@@ -43,9 +54,23 @@ namespace UnityExplorer.RoslynBridge
             catch { return false; }
             if (string.IsNullOrEmpty(name)) return false;
             if (name == "completions") return false;
-            if (bySimpleName.ContainsKey(name)) return false;
 
-            bySimpleName.Add(name, asm);
+            List<Assembly> list;
+            if (!bySimpleName.TryGetValue(name, out list))
+            {
+                list = new List<Assembly>(1);
+                bySimpleName.Add(name, list);
+            }
+            else
+            {
+                for (int i = 0; i < list.Count; i++)
+                    if (ReferenceEquals(list[i], asm)
+                        || string.Equals(SameStemChoice.IdentityOf(list[i]), SameStemChoice.IdentityOf(asm),
+                            StringComparison.OrdinalIgnoreCase))
+                        return false;      // 同实例/同身份：已经在册
+            }
+
+            list.Add(asm);
             nsHits.Clear();   // 注册表变动 ⇒ 命名空间探针的结论失效（与"候选目录缓存随新 Location 失效"同源）
             try
             {
@@ -60,12 +85,24 @@ namespace UnityExplorer.RoslynBridge
             return true;
         }
 
-        /// <summary>按**简单名**查找（忽略大小写）；未登记 ⇒ null。</summary>
+        /// <summary>按**简单名**查找（忽略大小写）；未登记 ⇒ null。
+        /// 任务 15d：同简单名多份 ⇒ 按 <see cref="Preference"/>（mcs 路 = 选**较旧**）取一份。</summary>
         public Assembly FindBySimpleName(string simpleName)
         {
             if (string.IsNullOrEmpty(simpleName)) return null;
-            Assembly a;
-            return bySimpleName.TryGetValue(simpleName, out a) ? a : null;
+            List<Assembly> list;
+            if (!bySimpleName.TryGetValue(simpleName, out list)) return null;
+            return PickByPreference(list);
+        }
+
+        /// <summary>任务 15d：同简单名的**全部**已登记件（按登记顺序）——披露里的"未采用清单"来源。</summary>
+        public IList<Assembly> FindAllBySimpleName(string simpleName)
+        {
+            var empty = new List<Assembly>();
+            if (string.IsNullOrEmpty(simpleName)) return empty;
+            List<Assembly> list;
+            if (!bySimpleName.TryGetValue(simpleName, out list)) return empty;
+            return new List<Assembly>(list);
         }
 
         /// <summary>
@@ -79,6 +116,8 @@ namespace UnityExplorer.RoslynBridge
         /// <c>type.Namespace == demanded</c> / <c>type.Namespace</c> 以 <c>demanded + "."</c> 开头 /
         /// <c>type.FullName == demanded</c> / <c>type.FullName</c> 以 <c>demanded + "."</c> 开头。
         /// 先整体找**精确**命中，再退**前缀**命中 ⇒ 同一 demanded 的结论确定（不依赖字典枚举顺序）。
+        /// 任务 15d：命中多份（同简单名的两个版本都声明它）⇒ 按 <see cref="Preference"/> 取一份
+        /// （mcs 路 = 选**较旧**）；单份/同身份副本 ⇒ 结论与 15c 逐字一致。
         /// 结论按 demanded 缓存（含未命中）；<see cref="Register"/> 见到新件即清空缓存。
         /// </summary>
         public Assembly FindDeclaringNamespace(string demanded)
@@ -87,19 +126,40 @@ namespace UnityExplorer.RoslynBridge
             Assembly cached;
             if (nsHits.TryGetValue(demanded, out cached)) return cached;
 
-            Assembly hit = ScanForNamespace(demanded, true);
-            if (hit == null) hit = ScanForNamespace(demanded, false);
+            Assembly hit = PickByPreference(FindAllDeclaringNamespace(demanded));
             nsHits[demanded] = hit;
             return hit;
         }
 
-        Assembly ScanForNamespace(string demanded, bool exact)
+        /// <summary>任务 15d：声明该命名空间/类型的**全部**已加载件（先精确、再前缀；无命中 ⇒ 空表）——
+        /// 披露里的"未采用清单"来源。</summary>
+        public IList<Assembly> FindAllDeclaringNamespace(string demanded)
         {
-            foreach (KeyValuePair<string, Assembly> kv in bySimpleName)
+            if (string.IsNullOrEmpty(demanded)) return new List<Assembly>();
+            List<Assembly> exact = ScanForNamespace(demanded, true);
+            if (exact.Count > 0) return exact;
+            return ScanForNamespace(demanded, false);
+        }
+
+        List<Assembly> ScanForNamespace(string demanded, bool exact)
+        {
+            var hits = new List<Assembly>();
+            foreach (KeyValuePair<string, List<Assembly>> kv in bySimpleName)
             {
-                if (DeclaresNamespaceOrType(kv.Value, demanded, exact)) return kv.Value;
+                for (int i = 0; i < kv.Value.Count; i++)
+                    if (DeclaresNamespaceOrType(kv.Value[i], demanded, exact)) hits.Add(kv.Value[i]);
             }
-            return null;
+            return hits;
+        }
+
+        /// <summary>按 <see cref="Preference"/> 从同简单名的多份里取一份（空表 ⇒ null；单份 ⇒ 原样）。</summary>
+        Assembly PickByPreference(IList<Assembly> list)
+        {
+            if (list == null || list.Count == 0) return null;
+            if (list.Count == 1) return list[0];
+            SameStemCandidate best = SameStemChoice.Pick(SameStemChoice.FromAssemblies(list), Preference);
+            if (best != null && best.Tag is Assembly) return (Assembly)best.Tag;
+            return list[0];
         }
 
         static bool DeclaresNamespaceOrType(Assembly asm, string demanded, bool exact)
@@ -181,7 +241,12 @@ namespace UnityExplorer.RoslynBridge
         public McsReferenceHealer(LoadedAssemblyRegistry registry)
         {
             this.registry = registry;
+            Preference = SameStemPreference.Oldest;   // 任务 15d：mcs 路 = 旧编译器配旧库（选**较旧**）
         }
+
+        /// <summary>任务 15d：mcs 路的取舍偏好（人类裁定"没有 Roslyn 只有 mcs 用旧版"）——只影响披露里
+        /// "原因="的文案；真正的取件由 <see cref="LoadedAssemblyRegistry.Preference"/> 完成（两处同值）。</summary>
+        public SameStemPreference Preference { get; set; }
 
         /// <summary>文件 → 程序集（生产 = <c>Assembly.LoadFrom</c>；测试注入计数假件，用来断言"①分支 0 次加载"）。</summary>
         public Func<string, Assembly> PathLoader { get; set; }
@@ -194,6 +259,17 @@ namespace UnityExplorer.RoslynBridge
         /// 未注入 ⇒ 逐字退回 15b 的"已加载件按首段 + 按名文件"两条通道。
         /// </summary>
         public Func<string, Assembly> LoadedNamespaceProbe { get; set; }
+
+        /// <summary>
+        /// 任务 15d：**同简单名多份**的全量枚举（生产 = <c>LoadedAssemblyRegistry.FindAllDeclaringNamespace</c>）。
+        /// 只用于**披露未采用清单**：命中的那一份已由 <see cref="LoadedNamespaceProbe"/> 按编译器策略
+        /// （mcs = 选较旧）选出。未注入 ⇒ 无披露（退化成单份语义，与 15c 逐字一致）。
+        /// </summary>
+        public Func<string, IList<Assembly>> LoadedNamespaceProbeAll { get; set; }
+
+        /// <summary>任务 15d：已加载件**注册表通道**的全量枚举（生产 = <c>LoadedAssemblyRegistry.FindAllBySimpleName</c>）。
+        /// 同 <see cref="LoadedNamespaceProbeAll"/>：只喂披露，未注入 ⇒ 无披露。</summary>
+        public Func<string, IList<Assembly>> LoadedRegistryAll { get; set; }
 
         /// <summary>
         /// 任务 15c：**该件是否已在 mcs 引用集里**（生产 = 求值器维护的已引用简单名集合）。
@@ -280,11 +356,15 @@ namespace UnityExplorer.RoslynBridge
                 string pName = SimpleNameOf(probed);
                 string pLoc = SafeLocation(probed);
                 string pShow = pLoc ?? pName ?? "<无 Location 的动态件>";
+                string pIdent = SameStemChoice.IdentityOf(probed);
+                // 任务 15d：同简单名多份 ⇒ 先打**同款披露**（采用=谁/未采用哪些/原因=按编译器策略：mcs 选较旧），
+                // 再打命中日志（含身份 Version+PKT 与路径）——否则"补上了"仍说不清补的是哪一版。
+                ReportChoiceDisclosure(DescribeProbeDisclosure(probed, demanded));
                 if (AlreadyInReferenceSet(probed))
                 {
                     sawAlreadyReferenced = true;
-                    alreadyNote = "（命名空间探针命中 " + pShow
-                        + "，该件**已在引用集**：再 ReferenceAssembly 是空转，mcs 不去重也不报错）";
+                    alreadyNote = "（命名空间探针命中 " + pShow + "（身份=" + pIdent
+                        + "），该件**已在引用集**：再 ReferenceAssembly 是空转，mcs 不去重也不报错）";
                 }
                 else if (IsExcluded(pLoc))
                 {
@@ -301,7 +381,7 @@ namespace UnityExplorer.RoslynBridge
                     LoadedRegistryHitCount++;
                     LastFromLoadedRegistry = true;
                     LastAdded = pLoc ?? pName;
-                    Report("自愈命中已加载件：" + pShow + "（命名空间探针：它是『" + demanded
+                    Report("自愈命中已加载件：" + pShow + "（身份=" + pIdent + "；命名空间探针：它是『" + demanded
                         + "』的声明者；直接 ReferenceAssembly，未 LoadFrom、零副作用）。");
                     return LastAdded;
                 }
@@ -314,10 +394,13 @@ namespace UnityExplorer.RoslynBridge
             }
 
             // ── ② 已加载件注册表（按**首段**简单名；15b 既有通道）──
+            // 任务 15d：`FindBySimpleName` 在同简单名多份时已按编译器策略（mcs = **选较旧**）取一份。
             Assembly loaded = registry == null ? null : registry.FindBySimpleName(head);
             if (loaded != null)
             {
                 string loc = SafeLocation(loaded);
+                string ident = SameStemChoice.IdentityOf(loaded);
+                ReportChoiceDisclosure(DescribeRegistryDisclosure(loaded, head));
                 if (AlreadyInReferenceSet(loaded))
                 {
                     // 实测缺口①：首段命中的件本就在引用集 ⇒ 不能再当"补上了"（否则连加 5 次空转到顶）
@@ -340,7 +423,9 @@ namespace UnityExplorer.RoslynBridge
                     LoadedRegistryHitCount++;
                     LastFromLoadedRegistry = true;
                     LastAdded = loc ?? head;
-                    Report("自愈命中已加载件：" + head + "（直接 ReferenceAssembly，未 LoadFrom、零副作用）。");
+                    // 任务 15d：命中日志补上**路径与版本**（原来只有名字，看不出补的哪一版）
+                    Report("自愈命中已加载件：" + (loc ?? head) + "（简单名=" + head + "；身份=" + ident
+                        + "；直接 ReferenceAssembly，未 LoadFrom、零副作用）。");
                     return LastAdded;
                 }
                 else
@@ -469,6 +554,47 @@ namespace UnityExplorer.RoslynBridge
             return LoadedNamespaceProbe == null
                 ? "未注入"
                 : "未命中（树匹配：没有已加载件声明它）";
+        }
+
+        // ───────────────────── 任务 15d：同简单名多份的**采用披露**（mcs 路） ─────────────────────
+
+        /// <summary>
+        /// 任务 15d：**已加载件通道的采用披露**（与 Roslyn 侧 `ReferenceHealer.DescribeSameStemChoices`
+        /// 同款文案，只是"原因"=按编译器策略：**mcs 选较旧**）。
+        /// 公开静态 ⇒ 可离线断言；返回 null = 无"同简单名身份不同"的另一份（常态，零噪声）。
+        /// </summary>
+        public static string DescribeLoadedChoice(Assembly chosen, IList<Assembly> all,
+            SameStemPreference pref, string channelLabel)
+        {
+            return SameStemChoice.DescribeAssembly(chosen, all, pref, channelLabel);
+        }
+
+        /// <summary>①命名空间探针通道的披露（枚举注入缺失 ⇒ null，退化成单份语义）。</summary>
+        string DescribeProbeDisclosure(Assembly probed, string demanded)
+        {
+            Func<string, IList<Assembly>> all = LoadedNamespaceProbeAll;
+            if (all == null || probed == null) return null;
+            IList<Assembly> list;
+            try { list = all(demanded); }
+            catch { return null; }
+            return DescribeLoadedChoice(probed, list, Preference, "已加载件命名空间探针通道");
+        }
+
+        /// <summary>②已加载件注册表通道的披露（枚举注入缺失 ⇒ null）。</summary>
+        string DescribeRegistryDisclosure(Assembly loaded, string head)
+        {
+            Func<string, IList<Assembly>> all = LoadedRegistryAll;
+            if (all == null || loaded == null) return null;
+            IList<Assembly> list;
+            try { list = all(head); }
+            catch { return null; }
+            return DescribeLoadedChoice(loaded, list, Preference, "已加载件注册表通道");
+        }
+
+        /// <summary>披露只在该通道"有多份且身份不同"时才是非 null（单份 ⇒ null ⇒ 零噪声，不写日志）。</summary>
+        void ReportChoiceDisclosure(string disclosure)
+        {
+            if (!string.IsNullOrEmpty(disclosure)) Report(disclosure);
         }
 
         /// <summary>

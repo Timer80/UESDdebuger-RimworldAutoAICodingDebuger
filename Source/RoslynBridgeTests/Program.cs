@@ -82,6 +82,8 @@ namespace RoslynBridgeTests
             TestReferenceSetDedupeLog();
             TestRollbackLeavesNoSideEffects();
             TestSameStemAdoptionDisclosure();
+            // 任务 15d：同简单名多份的"按编译器策略选版本 + 两路统一披露"（Roslyn 选较新 / mcs 选较旧）
+            TestSameStemCompilerPolicy();
             TestHealSymbolChannelLoudFailure();
             TestHealReplIntegration();
             // 任务 15a：mcs 侧诊断解析兼容（反引号）+ 纯逻辑自愈策略（按名优先/给 null 不瞎给/到顶文案同款）
@@ -2783,6 +2785,261 @@ namespace RoslynBridgeTests
             Check("⑪ 披露文本含两份路径与各自版本（采用哪版可观测）",
                 msg != null && msg.Contains("0Harmony.dll") && msg.Contains("2.3.3") && msg.Contains("2.5.2"),
                 msg ?? "<null>");
+        }
+
+        /// <summary>任务 15d：同简单名多份的**按编译器策略选版本 + 两路统一披露**（人类裁定："有 Roslyn 的情况下用
+        /// 全版（较新），没有 Roslyn 只有 mcs 用旧版"）。四组断言：①纯逻辑同一候选集在 Newest/Oldest 下选出不同项、
+        /// 且披露三要素齐全；②单份／同身份副本 ⇒ 不产出披露（零噪声）；③Roslyn 侧真实两份 `Newtonsoft.Json`
+        /// （4.5.0.0 ／ 13.0.0.0）在 Roslyn 偏好下选 **13.0**（另有仓库内 0Harmony 2.3.3／2.5.2 对做端到端）；
+        /// ④mcs 侧同一候选集在 mcs 偏好下选 **4.5**（注册表取件 + 命名空间探针 + 一轮自愈端到端）。
+        /// **不做自动换版重试**：策略只决定这一轮采用哪一份，编不过也不换另一份（逃生门 = 关掉 Use Roslyn）。</summary>
+        static void TestSameStemCompilerPolicy()
+        {
+            // ═══ ① 纯逻辑：Newest / Oldest 选出不同项；披露含「采用=…／未采用…／原因=…」═══
+            var cLow = new SameStemCandidate
+            {
+                Path = @"C:\a\Foo.dll", SimpleName = "Foo",
+                Identity = "Version=1.0.0.0, PKT=aaaaaaaaaaaaaaaa", Version = new Version(1, 0, 0, 0),
+            };
+            var cHigh = new SameStemCandidate
+            {
+                Path = @"C:\b\Foo.dll", SimpleName = "Foo",
+                Identity = "Version=9.0.0.0, PKT=aaaaaaaaaaaaaaaa", Version = new Version(9, 0, 0, 0),
+            };
+            var pair = new System.Collections.Generic.List<SameStemCandidate> { cLow, cHigh };
+            var pairRev = new System.Collections.Generic.List<SameStemCandidate> { cHigh, cLow };
+            Check("⑮d-① 纯逻辑：同一候选集 Newest 选高版本、Oldest 选低版本（两者结果不同）",
+                SameStemChoice.Pick(pair, SameStemPreference.Newest) == cHigh
+                && SameStemChoice.Pick(pair, SameStemPreference.Oldest) == cLow);
+            Check("⑮d-① 纯逻辑：候选顺序颠倒结论不变（策略确定，不依赖池内顺序）",
+                SameStemChoice.Pick(pairRev, SameStemPreference.Newest) == cHigh
+                && SameStemChoice.Pick(pairRev, SameStemPreference.Oldest) == cLow);
+            string dRoslyn = SameStemChoice.Describe(cHigh, pair, SameStemPreference.Newest);
+            Check("⑮d-① 披露三要素（Roslyn 路）：采用=路径（身份 Version+PKT）／未采用 1 份（路径与身份）／原因="
+                + SameStemChoice.NewestReason,
+                dRoslyn != null && dRoslyn.Contains("采用=" + cHigh.Path)
+                && dRoslyn.Contains("身份=" + cHigh.Identity)
+                && dRoslyn.Contains("未采用 1 份") && dRoslyn.Contains(cLow.Path)
+                && dRoslyn.Contains("身份=" + cLow.Identity)
+                && dRoslyn.Contains("原因=" + SameStemChoice.NewestReason), dRoslyn ?? "<null>");
+            string dMcs = SameStemChoice.Describe(cLow, pair, SameStemPreference.Oldest, "已加载件注册表通道");
+            Check("⑮d-① 披露三要素（mcs 路，同款文案）：通道名 + 未采用清单点名 9.0 那份 + 原因="
+                + SameStemChoice.OldestReason,
+                dMcs != null && dMcs.StartsWith("已加载件注册表通道采用披露：", StringComparison.Ordinal)
+                && dMcs.Contains("采用=" + cLow.Path) && dMcs.Contains("未采用 1 份") && dMcs.Contains(cHigh.Path)
+                && dMcs.Contains("原因=" + SameStemChoice.OldestReason), dMcs ?? "<null>");
+            var cDup = new SameStemCandidate
+            {
+                Path = @"C:\c\Foo.dll", SimpleName = "Foo",
+                Identity = cLow.Identity, Version = cLow.Version,
+            };
+            var withDup = new System.Collections.Generic.List<SameStemCandidate> { cLow, cDup };
+            Check("⑮d-① 同身份副本（同 Version+PKT 的另一路径）不算歧义：仍取首个、且**不产出披露**",
+                SameStemChoice.Pick(withDup, SameStemPreference.Newest) == cLow
+                && SameStemChoice.Pick(withDup, SameStemPreference.Oldest) == cLow
+                && SameStemChoice.Describe(cLow, withDup, SameStemPreference.Newest) == null);
+
+            // ═══ ② 单份 ⇒ 不产出披露（零噪声；Pick 原样返回）═══
+            var one = new System.Collections.Generic.List<SameStemCandidate> { cLow };
+            Check("⑮d-② 单份 ⇒ Pick 原样返回、Describe 返回 null（两条路都不报警）",
+                SameStemChoice.Pick(one, SameStemPreference.Newest) == cLow
+                && SameStemChoice.Pick(one, SameStemPreference.Oldest) == cLow
+                && SameStemChoice.Describe(cLow, one, SameStemPreference.Newest) == null
+                && SameStemChoice.Describe(cLow, one, SameStemPreference.Oldest, "已加载件通道") == null);
+            Check("⑮d-② 空候选集 ⇒ Pick 返回 null（不瞎给）",
+                SameStemChoice.Pick(new System.Collections.Generic.List<SameStemCandidate>(),
+                    SameStemPreference.Newest) == null);
+
+            // ═══ ③ Roslyn 侧：真实两份 Newtonsoft.Json（4.5.0.0／13.0.0.0）⇒ Roslyn 偏好选 **13.0** ═══
+            string pOld = FindWorkshopFile(@"content\294100\3593423732\1.6\Assemblies\Newtonsoft.Json.dll");
+            string pNew = FindWorkshopFile(@"content\294100\3727949765\1.6\Assemblies\Newtonsoft.Json.dll");
+            bool fx = pOld != null && pNew != null;
+            Check("⑮d-③ 前置：工坊两份同简单名 Newtonsoft.Json 真在（4.5.0.0 与 13.0.0.0）", fx,
+                (pOld ?? "<null>") + " | " + (pNew ?? "<null>"));
+            if (fx)
+            {
+                var nsc = SameStemChoice.FromPaths(new System.Collections.Generic.List<string> { pOld, pNew });
+                Check("⑮d-③ 纯身份：两份 PKT 相同（30ad4fe6b2a6aeed）、版本 4.5 / 13.0 ⇒ 身份不同（歧义成立）",
+                    nsc.Count == 2
+                    && nsc[0].Identity == "Version=4.5.0.0, PKT=30ad4fe6b2a6aeed"
+                    && nsc[1].Identity == "Version=13.0.0.0, PKT=30ad4fe6b2a6aeed",
+                    nsc.Count == 2 ? nsc[0].Identity + " | " + nsc[1].Identity : "count=" + nsc.Count);
+                Check("⑮d-③ 同一候选集：Roslyn 偏好（Newest）⇒ 13.0；mcs 偏好（Oldest）⇒ 4.5",
+                    SameStemChoice.SamePath(SameStemChoice.Pick(nsc, SameStemPreference.Newest).Path, pNew)
+                    && SameStemChoice.SamePath(SameStemChoice.Pick(nsc, SameStemPreference.Oldest).Path, pOld));
+                string dnsc = ReferenceHealer.DescribeSameStemChoices(pNew,
+                    new System.Collections.Generic.List<string> { pOld, pNew });
+                Check("⑮d-③ Roslyn 通道披露：采用=13.0 那份、未采用 1 份点名 4.5、原因="
+                    + SameStemChoice.NewestReason,
+                    dnsc != null && dnsc.Contains("采用=" + pNew) && dnsc.Contains("Version=13.0.0.0")
+                    && dnsc.Contains("未采用 1 份") && dnsc.Contains(pOld) && dnsc.Contains("Version=4.5.0.0")
+                    && dnsc.Contains("原因=" + SameStemChoice.NewestReason), dnsc ?? "<null>");
+
+                // 端到端：真·命名空间通道从池里取件（Roslyn 只读元数据判命名空间）⇒ 必须取 **13.0**
+                var healerNs = new ReferenceHealer(new[]
+                {
+                    System.IO.Path.GetDirectoryName(pOld), System.IO.Path.GetDirectoryName(pNew),
+                });
+                healerNs.ReportSink = HealSinkCapture;
+                s_healSink.Clear();
+                string gotNs = healerNs.Resolve(
+                    "(1,1): error CS0246: The type or namespace name 'Newtonsoft.Json' could not be found"
+                    + " (are you missing a using directive or an assembly reference?)",
+                    new System.Collections.Generic.List<string>());
+                string logNs = SinkText();
+                Check("⑮d-③ Roslyn 端到端：命名空间通道在池内两份里**选较新** ⇒ 13.0（不是池内首个）",
+                    gotNs != null && SameStemChoice.SamePath(gotNs, pNew), gotNs ?? "<null>");
+                Check("⑮d-③ 端到端披露：日志写明采用=13.0 ／ 未采用 4.5 ／ 原因=按编译器策略：Roslyn 选较新",
+                    logNs.Contains("采用=") && logNs.Contains("Version=13.0.0.0") && logNs.Contains("未采用 1 份")
+                    && logNs.Contains("Version=4.5.0.0") && logNs.Contains("原因=" + SameStemChoice.NewestReason),
+                    Head(logNs, 300));
+            }
+
+            // ═══ ③′ Roslyn 端到端（仓库内夹具，机器无关）：0Harmony 2.3.3.0 ／ 2.5.2.0 ⇒ 选较新 ═══
+            string repoRoot15d = FindRepoRoot();
+            string hOld = repoRoot15d == null ? null
+                : System.IO.Path.Combine(repoRoot15d, @"Source\UELoader\lib\0Harmony.dll");
+            string hNew = repoRoot15d == null ? null
+                : System.IO.Path.Combine(repoRoot15d,
+                    @"Source\UE-4.9.0-official\UnityExplorer-4.9.0\UnityEditorPackage\Runtime\0Harmony.dll");
+            bool hfx = hOld != null && hNew != null && System.IO.File.Exists(hOld) && System.IO.File.Exists(hNew);
+            Check("⑮d-③′ 前置：仓库内两份同简单名 0Harmony.dll（2.3.3.0 ／ 2.5.2.0）都在", hfx,
+                (hOld ?? "<null>") + " | " + (hNew ?? "<null>"));
+            if (hfx)
+            {
+                var healerH = new ReferenceHealer(new[]
+                {
+                    System.IO.Path.GetDirectoryName(hOld), System.IO.Path.GetDirectoryName(hNew),
+                });
+                healerH.ReportSink = HealSinkCapture;
+                s_healSink.Clear();
+                string gotH = healerH.Resolve(
+                    "(1,1): error CS0246: The type or namespace name 'HarmonyLib' could not be found"
+                    + " (are you missing a using directive or an assembly reference?)",
+                    new System.Collections.Generic.List<string>());
+                Check("⑮d-③′ Roslyn 端到端（仓库夹具）：同简单名多份 ⇒ 选较新 2.5.2（不是 2.3.3）",
+                    gotH != null && SameStemChoice.SamePath(gotH, hNew) && !SameStemChoice.SamePath(gotH, hOld),
+                    gotH ?? "<null>");
+            }
+
+            // ═══ ④ mcs 侧：同一候选集在 mcs 偏好下选 **4.5**（注册表 + 探针 + 一轮自愈端到端）═══
+            System.Reflection.Assembly asm45 = null, asm13 = null;
+            if (fx)
+            {
+                try { asm45 = System.Reflection.Assembly.Load(System.IO.File.ReadAllBytes(pOld)); }
+                catch { asm45 = null; }
+                try { asm13 = System.Reflection.Assembly.Load(System.IO.File.ReadAllBytes(pNew)); }
+                catch { asm13 = null; }
+            }
+            Check("⑮d-④ 前置：两份 Newtonsoft.Json（4.5.0.0 ／ 13.0.0.0）都已加载进本进程（同简单名两个身份）",
+                asm45 != null && asm13 != null,
+                "45=" + (asm45 == null ? "<null>" : asm45.GetName().Version.ToString())
+                + " 13=" + (asm13 == null ? "<null>" : asm13.GetName().Version.ToString()));
+            if (asm45 != null && asm13 != null)
+            {
+                var reg15d = new LoadedAssemblyRegistry();
+                bool r1 = reg15d.Register(asm45);
+                bool r2 = reg15d.Register(asm13);
+                Check("⑮d-④ 注册表**保留同简单名的两个身份**（不再『先到者胜』）：新登记 true、Count=1、枚举 2 份",
+                    r1 && r2 && reg15d.Count == 1 && reg15d.FindAllBySimpleName("Newtonsoft.Json").Count == 2);
+                Check("⑮d-④ 注册表取件按 mcs 偏好（Oldest）⇒ 返回 **4.5**（旧编译器配旧库）",
+                    reg15d.FindBySimpleName("Newtonsoft.Json") == asm45);
+                System.Collections.Generic.IList<System.Reflection.Assembly> allNs
+                    = reg15d.FindAllDeclaringNamespace("Newtonsoft.Json");
+                Check("⑮d-④ 命名空间探针：两份都声明 'Newtonsoft.Json'（枚举 2 份），按 Oldest 取 **4.5**",
+                    allNs.Count == 2 && reg15d.FindDeclaringNamespace("Newtonsoft.Json") == asm45,
+                    "enum=" + allNs.Count);
+                string d4 = McsReferenceHealer.DescribeLoadedChoice(asm45, allNs,
+                    SameStemPreference.Oldest, "已加载件命名空间探针通道");
+                Check("⑮d-④ mcs 披露同款：采用=4.5（身份 Version=4.5.0.0, PKT=…）／未采用 1 份点名 13.0／原因="
+                    + SameStemChoice.OldestReason,
+                    d4 != null && d4.Contains("采用=") && d4.Contains("Version=4.5.0.0")
+                    && d4.Contains("未采用 1 份") && d4.Contains("Version=13.0.0.0")
+                    && d4.Contains("原因=" + SameStemChoice.OldestReason), d4 ?? "<null>");
+
+                var added4 = new System.Collections.Generic.List<System.Reflection.Assembly>();
+                var reports4 = new System.Collections.Generic.List<string>();
+                var h4 = new McsReferenceHealer(reg15d)
+                {
+                    PathLoader = p => null,
+                    AddReference = a => { added4.Add(a); return true; },
+                    CandidatePathProvider = () => new System.Collections.Generic.List<string>(),
+                    LoadedNamespaceProbe = reg15d.FindDeclaringNamespace,
+                    LoadedNamespaceProbeAll = reg15d.FindAllDeclaringNamespace,
+                    LoadedRegistryAll = reg15d.FindAllBySimpleName,
+                    IsAlreadyReferenced = a => false,
+                    ReportSink = reports4.Add,
+                };
+                string got4 = h4.TryHealOne(
+                    "(1,1): error CS0012: The type 'JObject' is defined in an assembly that is not referenced."
+                    + " You must add a reference to assembly 'Newtonsoft.Json, Version=4.5.0.0, Culture=neutral,"
+                    + " PublicKeyToken=30ad4fe6b2a6aeed'.");
+                Check("⑮d-④ 一轮自愈端到端：mcs 偏好下加入 **4.5**（命名空间探针通道、0 次 LoadFrom）",
+                    got4 != null && added4.Count == 1 && added4[0] == asm45 && h4.LoadCallCount == 0
+                    && h4.NamespaceProbeHitCount == 1,
+                    "got=" + (got4 ?? "<null>") + " added=" + added4.Count);
+                Check("⑮d-④ 命中日志补上**身份与路径**（原码只报名字 ⇒ 看不出补的是哪一版）",
+                    h4.LastReport.Contains("自愈命中已加载件") && h4.LastReport.Contains("身份=Version=4.5.0.0"),
+                    h4.LastReport);
+                Check("⑮d-④ 多份时打出**同款披露**（未采用清单点名 13.0.0.0 + 原因=mcs 选较旧）",
+                    LinesContaining(reports4, "采用披露") == 1
+                    && reports4.Exists(m => m != null && m.Contains("Version=13.0.0.0")
+                        && m.Contains("原因=" + SameStemChoice.OldestReason)),
+                    reports4.Count == 0 ? "<无日志>" : Head(reports4[0], 240));
+            }
+
+            // ═══ ⑤ 护栏：mcs 侧零 Roslyn 载荷引用 + 新共享件 net35 安全 ═══
+            string bridgeDir = repoRoot15d == null ? null
+                : System.IO.Path.Combine(repoRoot15d, @"Source\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge");
+            string mcsCode = null, sharedCode = null;
+            try
+            {
+                mcsCode = bridgeDir == null ? null : StripSource(
+                    System.IO.File.ReadAllText(System.IO.Path.Combine(bridgeDir, "McsReferenceHealer.cs"))
+                    + System.IO.File.ReadAllText(System.IO.Path.Combine(bridgeDir, "McsHealingPolicy.cs")), true);
+                sharedCode = bridgeDir == null ? null : StripSource(
+                    System.IO.File.ReadAllText(System.IO.Path.Combine(bridgeDir, "SameStemChoice.cs")), true);
+            }
+            catch { }
+            Check("⑮d-⑤ 护栏：mcs 侧两件零 `Microsoft.CodeAnalysis` 引用（mcs 模式载荷根本不在进程里）",
+                mcsCode != null && mcsCode.IndexOf("Microsoft.CodeAnalysis", StringComparison.Ordinal) < 0);
+            Check("⑮d-⑤ 护栏：新共享件零 Roslyn/UE 依赖 + net35 安全（无 Array.Empty 等 net40+ API）",
+                sharedCode != null
+                && sharedCode.IndexOf("Microsoft.CodeAnalysis", StringComparison.Ordinal) < 0
+                && sharedCode.IndexOf("Array.Empty", StringComparison.Ordinal) < 0
+                && sharedCode.IndexOf("UnityEngine", StringComparison.Ordinal) < 0);
+        }
+
+        /// <summary>任务 15d：定位工坊件（不存在 ⇒ null）。来源依次试：环境变量 RIMWORLD_GAME_DIR 的同级
+        /// `workshop`／仓库根的 `..\..\..\workshop`／本机默认 Steam 路径——路径参量化，不在源码里写死单机路径。</summary>
+        static string FindWorkshopFile(string relative)
+        {
+            var roots = new System.Collections.Generic.List<string>();
+            string game = Environment.GetEnvironmentVariable("RIMWORLD_GAME_DIR");
+            if (!string.IsNullOrEmpty(game))
+            {
+                try
+                {
+                    string common = System.IO.Path.GetDirectoryName(game);
+                    string apps = common == null ? null : System.IO.Path.GetDirectoryName(common);
+                    if (apps != null) roots.Add(System.IO.Path.Combine(apps, "workshop"));
+                }
+                catch { }
+            }
+            string repo = FindRepoRoot();
+            if (repo != null)
+            {
+                try { roots.Add(System.IO.Path.GetFullPath(System.IO.Path.Combine(repo, @"..\..\..\workshop"))); }
+                catch { }
+            }
+            roots.Add(@"C:\SteamLibrary\steamapps\workshop");
+            for (int i = 0; i < roots.Count; i++)
+            {
+                if (string.IsNullOrEmpty(roots[i])) continue;
+                string p = System.IO.Path.Combine(roots[i], relative);
+                if (System.IO.File.Exists(p)) return p;
+            }
+            return null;
         }
 
         /// <summary>任务 13（内存加载支持面）：**符号通道失败必须响亮**——旧码在"符号通道也没找到文件候选"

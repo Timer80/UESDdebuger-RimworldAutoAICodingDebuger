@@ -97,6 +97,10 @@ namespace UnityExplorer.CSConsole
                     // 零 LoadFrom——模组程序集本就被 RimWorld 加载）；②"该件是否已在引用集"判据
                     // （mcs 的 ReferenceAssembly 不去重也不报错 ⇒ 缺它就会把重复加当补上了）。
                     LoadedNamespaceProbe = _registry.FindDeclaringNamespace,
+                    // 任务 15d：同简单名多份 ⇒ 按编译器策略取件（mcs 路 = 选**较旧**：旧编译器配旧库），
+                    // 并把"采用谁 / 未采用哪些 / 为什么"完整披露（枚举端口只喂披露用）。
+                    LoadedNamespaceProbeAll = _registry.FindAllDeclaringNamespace,
+                    LoadedRegistryAll = _registry.FindAllBySimpleName,
                     IsAlreadyReferenced = IsReferencedAssembly,
                 };
                 // 登记**先于**引用：最小集里"已在进程中的件"直接复用，不再 LoadFrom 一份（避免双副本/双身份）。

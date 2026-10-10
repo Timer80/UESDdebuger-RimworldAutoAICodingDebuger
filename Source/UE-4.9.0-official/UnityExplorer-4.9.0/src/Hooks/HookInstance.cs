@@ -63,11 +63,19 @@ namespace UnityExplorer.Hooks
 
         // ~~~~~~ Roslyn 路径（交付配置 STANDALONE_Mono；任务 10） ~~~~~~
         // 流程：包装源码 → 交**当前生效求值器**编译并加载产物 → 从产物里定位补丁类型 → 取四个补丁方法
-        // → 交给 Harmony 的 PatchProcessor。包装/定位/取方法三段是 RoslynBridge.DynamicPatch 里的**生产代码**，
-        // 同一段代码有离线断言（RoslynBridgeTests.TestHookCompile，见报告 §24）。
+        // → **DynamicPatch.FailureReason 纯判定**（产物 null / 找不到类型 / 四方法全 null ⇒ 响亮失败）
+        // → 交给 Harmony 的 PatchProcessor。包装/定位/取方法/失败判定是 RoslynBridge.DynamicPatch 里的
+        // **生产代码**，同一段代码有离线断言（RoslynBridgeTests.TestHookCompile，见报告 §24/§25）。
         public bool CompileAndGenerateProcessor(string patchSource)
         {
             Unpatch();
+
+            // R-d② 判据支撑：重编译前先清空四个补丁方法字段 —— 否则编译失败时字段仍留着上一次的
+            // 陈旧方法，Patch() 的"是否注册过任何补丁方法"判据会被假阳性穿透（空 processor 静默 On）。
+            prefix = null;
+            postfix = null;
+            finalizer = null;
+            transpiler = null;
 
             try
             {
@@ -83,7 +91,7 @@ namespace UnityExplorer.Hooks
                 if (!evaluator.Evaluate(code, out string diag))
                     throw new FormatException("Unable to compile the generated patch!\n" + diag);
 
-                // 只有 Roslyn 路径有"编译产物程序集"这一概念；控制台回退 mcs 时动态补丁不可用
+                // 只有 Roslyn 路有"编译产物程序集"这一概念；控制台回退 mcs 时动态补丁不可用
                 // ——**响亮报错**（进 HookCreator 的日志），不静默"创建成功却不生效"。
                 RoslynScriptEvaluator roslyn = evaluator as RoslynScriptEvaluator;
                 if (roslyn == null)
@@ -91,20 +99,25 @@ namespace UnityExplorer.Hooks
                         + "（Roslyn 未生效，已回退 mcs）⇒ 动态补丁需要 Roslyn 求值器。");
 
                 Assembly asm = roslyn.LastCompiledAssembly;
-                if (asm == null)
-                    throw new FormatException("补丁已编译但没有拿到编译产物程序集。");
 
                 // ⚠️ 不能 `asm.GetType(typeName)`：REPL 把本次提交的顶层类型嵌进生成类 `Submission_N`
                 //（见 DynamicPatch.Locate 的说明）⇒ 按简单名扫描嵌套类型。
                 Type patchClass = DynamicPatch.Locate(asm, typeName);
-                if (patchClass == null)
-                    throw new FormatException("编译产物里找不到补丁类型 " + typeName + "。");
 
                 DynamicPatch.FindPatchMethods(patchClass, out prefix, out postfix, out finalizer, out transpiler);
 
-                if (prefix == null && postfix == null && finalizer == null && transpiler == null)
-                    ExplorerCore.LogWarning("补丁源码里没有任何可识别的方法"
-                        + "（Prefix/Postfix/Finalizer/Transpiler，且必须是 static）——补丁已编译但不会生效。");
+                // R-d① + R-e：失败判定收敛成 DynamicPatch.FailureReason 纯函数（离线断言覆盖三类）：
+                // 非 null ⇒ LogWarning + return false。此前"四方法全 null 只 LogWarning 仍 return true"
+                // 会让 create_hook 拿到 success:true 却挂 0 个补丁函数（静默假绿），现按失败处理。
+                string reason = DynamicPatch.FailureReason(asm, patchClass, prefix, postfix, finalizer, transpiler);
+                if (reason != null)
+                {
+                    // Locate 失败时补上类型名（FailureReason 是纯判定、不带 typeName，诊断细节在调用方补）。
+                    if (asm != null && patchClass == null)
+                        reason += " 补丁类型名：" + typeName;
+                    ExplorerCore.LogWarning(reason);
+                    return false;
+                }
 
                 // Create the harmony patches as defined（顺序与旧实现一致：postfix 先注册）
 
@@ -142,6 +155,13 @@ namespace UnityExplorer.Hooks
         public bool CompileAndGenerateProcessor(string patchSource)
         {
             Unpatch();
+
+            // R-d② 判据支撑（与 Roslyn 路径同款，纯字段清空、不改本分支的失败语义）：
+            // 编译失败时若字段留着上一次的陈旧方法，共享的 Patch() 判据会被假阳性穿透。
+            prefix = null;
+            postfix = null;
+            finalizer = null;
+            transpiler = null;
 
             StringBuilder codeBuilder = new();
 
@@ -308,6 +328,17 @@ namespace UnityExplorer.Hooks
 
         public void Patch()
         {
+            // R-d②（质量审实测：Lib.Harmony 2.3.3 + net472 下**空 PatchProcessor.Patch() 不抛**、
+            // Unpatch 未注册也是静默 no-op）：若"没注册过任何补丁方法"也置 Enabled=true，就会得到
+            // "开关显示 On、补丁没挂、零报错"。⇒ 判据：四个补丁方法字段全 null（它们与 Add* 调用
+            // 一一对应，且每次重编译前已清空）⇒ 拒绝启用并**响亮**，Enabled 保持 Off。
+            if (prefix == null && postfix == null && finalizer == null && transpiler == null)
+            {
+                ExplorerCore.LogWarning("拒绝启用补丁（" + signature + "）：没有任何已注册的补丁方法"
+                    + "（Prefix/Postfix/Finalizer/Transpiler，须存在且为 static）——Enabled 保持 Off。");
+                return;
+            }
+
             try
             {
                 patchProcessor.Patch();

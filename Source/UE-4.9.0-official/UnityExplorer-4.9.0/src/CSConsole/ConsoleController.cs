@@ -141,12 +141,43 @@ namespace UnityExplorer.CSConsole
         static string LastProbeDiagnostics;
 
         /// <summary>
+        /// R-f①（任务 10 修复轮）：控制台 Reset/Dispose **前**检查活 hook —— HookList 非空 ⇒ 响亮日志
+        /// （列出 hook 数与目标方法）。原因：Reset 不会 Unpatch，而补丁已编译进控制台会话；本次
+        /// Evaluator.Dispose 摘掉会话的 AssemblyResolve 后，补丁体若引用控制台里定义的类型/会话变量，
+        /// 该补丁首次执行（JIT）会在被补丁的游戏方法内部抛 TypeLoadException/FileNotFoundException，
+        /// UI 却仍显示 On。判据本身（遍历 HookList、计数 > 0 才产出警告）在
+        /// DynamicPatch.ActiveHookResetWarning 里，可离线断言（报告 §25 R-f）。
+        /// </summary>
+        static void WarnActiveHooksOnReset()
+        {
+            string warn = DynamicPatch.ActiveHookResetWarning(
+                UnityExplorer.Hooks.HookList.currentHooks, DescribeHookTargetForResetLog);
+            if (warn != null)
+                ExplorerCore.LogWarning(warn);
+        }
+
+        /// <summary>R-f① 单条 hook 的描述器：**用方法不用 lambda**（C.5 闭包纪律，不生成闭包类）。</summary>
+        static string DescribeHookTargetForResetLog(object hook)
+        {
+            UnityExplorer.Hooks.HookInstance hi = hook as UnityExplorer.Hooks.HookInstance;
+            if (hi == null || hi.TargetMethod == null)
+                return "<未知 hook>";
+            Type declaring = hi.TargetMethod.DeclaringType;
+            return (hi.Enabled ? "[On] " : "[Off] ")
+                + (declaring == null ? "<无声明类型>" : declaring.FullName)
+                + "." + hi.TargetMethod.Name + "()";
+        }
+
+        /// <summary>
         /// 构造求值器 + 预置默认 using + **探针**，返回终态（追加 E 的纯决策函数在此被喂入三个输入）。
         /// 顺序（追加 D 明确要求）：先按引用集可用性组装**有效** using → 再构造 → 再探针；
         /// 探针失败且初始是 Roslyn → 以 forceMcs 递归一次（forceMcs=true 时不再进 Roslyn 分支，无深度风险）。
         /// </summary>
         static EvaluatorChoice ResetConsoleCore(bool logSuccess, bool forceMcs)
         {
+            // R-f①：Dispose 摘掉会话 AssemblyResolve 前，先对"活 hook"响亮登记（HookList 非空才出声）。
+            WarnActiveHooksOnReset();
+
             // 替换/卸载会话时 Dispose（任务 6 生命周期契约：Roslyn 侧转发 s_session.Dispose 摘钩）
             Evaluator?.Dispose();
 

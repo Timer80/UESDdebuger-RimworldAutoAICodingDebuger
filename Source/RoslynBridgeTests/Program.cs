@@ -64,6 +64,8 @@ namespace RoslynBridgeTests
             TestCompletion();
             // 任务 10：HookInstance 的 Roslyn 补丁链路（包装 → 提交编译 → 产物取回 → Harmony 挂载生效）
             TestHookCompile();
+            // 任务 10 修复轮（报告 §25 R-f）：Reset/Dispose 前"活 hook"判据（纯函数，离线断言）
+            TestActiveHookResetWarning();
             // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
             // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
             Console.WriteLine("COUNTS parent_pass=" + passLines + " parent_fail=" + failures
@@ -2335,14 +2337,69 @@ namespace RoslynBridgeTests
                 Check("任务10 取到 Postfix（隐式 private 也必须取到）", postfix != null);
                 Check("任务10 判别力：该 Postfix 非 public（Public-only 查找必取不到）",
                     postfix != null && !postfix.IsPublic);
-                // ②的正面实测：简报步骤 3 的 flags（Static|Public）在本形态下**一个都取不到**。
+                // ②的正面实测 + R-b 对称两侧：钉住**简报写法**（Static|Public）与**生产写法**
+                // （DynamicPatch.PatchMethodFlags = Public|NonPublic|Static）在同一形态（隐式 private 的
+                // static Postfix）下的判别力 —— 用途是**防未来照简报回退**，**不是**历史缺陷取证：
+                // 旧 mcs 路径本就用含 NonPublic 的 `ReflectionUtility.FLAGS`，报告 §24.2-② 已勘误（§25 R-a）。
                 // 若哪天 `GenerateDefaultPatchSourceCode` 改成发 `public static void Postfix`，本行变红
                 // ⇒ 提醒"Public-only 变体此刻也会成立"，别把它当成永久安全。
-                Check("任务10 判别力：简报 flags（Static|Public）确实取不到 Postfix",
+                Check("任务10 判别力：简报写法（Static|Public）取不到隐式 private 的 Postfix（钉住简报写法、防照简报回退）",
                     patchType != null && patchType.GetMethod("Postfix",
                         System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public) == null);
+                // R-b 正向断言（与上一条构成对称两侧）：生产 flags 必须**能**取到隐式 private 的 Postfix。
+                Check("任务10 对称正向：PatchMethodFlags（Public|NonPublic|Static）能取到隐式 private 的 Postfix",
+                    patchType != null && patchType.GetMethod("Postfix", DynamicPatch.PatchMethodFlags) != null);
                 Check("任务10 未定义的方法返回 null（Prefix/Finalizer/Transpiler）",
                     prefix == null && finalizer == null && transpiler == null);
+
+                // ── R-e①：生产编排纯判定 FailureReason（三类失败 + 合法一例；覆盖 HookInstance 的调用面）──
+                System.Reflection.MethodInfo none = null;
+                Check("R-e FailureReason：产物程序集 null ⇒ 非 null（必须失败）",
+                    DynamicPatch.FailureReason(null, null, none, none, none, none) != null);
+                Check("R-e FailureReason：产物里找不到补丁类型（class null）⇒ 非 null（必须失败）",
+                    DynamicPatch.FailureReason(asm, null, none, none, none, none) != null);
+                Check("R-e FailureReason：四个补丁方法全 null ⇒ 非 null（R-d① 响亮失败的离线证明）",
+                    DynamicPatch.FailureReason(asm, patchType, none, none, none, none) != null);
+                Check("R-e FailureReason：合法 postfix ⇒ null（可继续注册补丁方法）",
+                    DynamicPatch.FailureReason(asm, patchType, prefix, postfix, finalizer, transpiler) == null);
+
+                // ── R-e②：两 hook 连发不串 —— 一次提交里放两个补丁类，按名 Locate 各取各的 ──
+                const string twoHooksSource =
+                    "public static class DynamicPatch_T10A { static void Postfix(ref int __result) { __result += 1; } }" + "\n"
+                    + "public static class DynamicPatch_T10B { static void Postfix(ref int __result) { __result += 2; } }";
+                string diagA;
+                Check("R-e② 一次提交里两个补丁类编译成功", ev.Evaluate(twoHooksSource, out diagA), diagA);
+                var asm2 = ev.LastCompiledAssembly;
+                Type typeA = DynamicPatch.Locate(asm2, "DynamicPatch_T10A");
+                Type typeB = DynamicPatch.Locate(asm2, "DynamicPatch_T10B");
+                Check("R-e② Locate 各自取回（A、B 均非 null 且 ReferenceEquals 区分，不串包）",
+                    typeA != null && typeB != null && !object.ReferenceEquals(typeA, typeB),
+                    "A=" + typeA + " B=" + typeB);
+                System.Reflection.MethodInfo preA, postA, finA, traA;
+                DynamicPatch.FindPatchMethods(typeA, out preA, out postA, out finA, out traA);
+                System.Reflection.MethodInfo preB, postB, finB, traB;
+                DynamicPatch.FindPatchMethods(typeB, out preB, out postB, out finB, out traB);
+                Check("R-e② FindPatchMethods 取到的是各自那个类型的方法（DeclaringType 分别为 A/B）",
+                    postA != null && postB != null
+                        && object.ReferenceEquals(postA.DeclaringType, typeA)
+                        && object.ReferenceEquals(postB.DeclaringType, typeB)
+                        && !object.ReferenceEquals(postA, postB),
+                    "postA=" + postA + " postB=" + postB);
+
+                // ── R-e③：非 static Postfix ⇒ FindPatchMethods 取不到 ⇒ FailureReason 非 null（响亮失败离线证明）──
+                const string nonStaticSource =
+                    "public class DynamicPatch_T10NS { void Postfix(ref int __result) { __result += 1; } }";
+                string diagNS;
+                Check("R-e③ 非 static 补丁类编译成功", ev.Evaluate(nonStaticSource, out diagNS), diagNS);
+                var asm3 = ev.LastCompiledAssembly;
+                Type typeNS = DynamicPatch.Locate(asm3, "DynamicPatch_T10NS");
+                System.Reflection.MethodInfo preNS, postNS, finNS, traNS;
+                DynamicPatch.FindPatchMethods(typeNS, out preNS, out postNS, out finNS, out traNS);
+                Check("R-e③ FindPatchMethods 取不到非 static 的 Postfix（四方法全 null）",
+                    typeNS != null && preNS == null && postNS == null && finNS == null && traNS == null,
+                    "postNS=" + postNS);
+                Check("R-e③ FailureReason 判必须失败（非 null ⇒ 生产路径响亮 return false）",
+                    DynamicPatch.FailureReason(asm3, typeNS, preNS, postNS, finNS, traNS) != null);
 
                 // ③ Harmony 链路端到端：真的挂上去、真的改变行为
                 int before = HarmonyProbeTarget(1);
@@ -2380,6 +2437,58 @@ namespace RoslynBridgeTests
         static System.Reflection.MethodInfo HarmonyProbeTargetMethod()
             => typeof(Program).GetMethod("HarmonyProbeTarget",
                 System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+
+        // ════════════ 任务 10 修复轮（报告 §25 R-f）：Reset/Dispose 活 hook 判据 ════════════
+
+        /// <summary>
+        /// R-f① 判据离线断言：生产侧 `ConsoleController.ResetConsoleCore` 在 `Evaluator?.Dispose()` 前调
+        /// `DynamicPatch.ActiveHookResetWarning(HookList.currentHooks, …)`。HookList 是 Unity UI 类型、
+        /// 进不了测试工程 ⇒ 用**同型容器**（OrderedDictionary：签名 → hook，与 HookList.currentHooks 同型）
+        /// 走**生产代码本体**遍历：计数 == 0 ⇒ null（不打扰日志）；计数 &gt; 0 ⇒ 响亮警告（列 hook 数 + 目标方法）。
+        /// 「计数 &gt; 0 才产出警告」= "路径真执行"的离线判据（ConsoleController 的接线属产物面，无法离线断言）。
+        /// </summary>
+        static void TestActiveHookResetWarning()
+        {
+            var hooks = new System.Collections.Specialized.OrderedDictionary();
+
+            Check("R-f 判据：HookList 为空 ⇒ 返回 null（Reset 不打扰日志）",
+                DynamicPatch.ActiveHookResetWarning(hooks, DescribeHookForResetTest) == null);
+            Check("R-f 判据：HookList 为 null ⇒ 返回 null（防御）",
+                DynamicPatch.ActiveHookResetWarning(null, DescribeHookForResetTest) == null);
+
+            hooks.Add("Sig.A", new FakeHookForResetTest("Verse.GenTicks.get_TicksGame", true));
+            hooks.Add("Sig.B", new FakeHookForResetTest("Verse.GenTicks.TicksGame", false));
+
+            string warn = DynamicPatch.ActiveHookResetWarning(hooks, DescribeHookForResetTest);
+            Check("R-f 判据：遍历 HookList 计数 > 0 ⇒ 产出响亮警告（含 hook 数 2）",
+                warn != null && warn.Contains("2 个 hook"), warn ?? "<null>");
+            Check("R-f 判据：警告逐条列出各目标方法（A、B 都在，含 On/Off 态）",
+                warn != null
+                    && warn.Contains("[On] Verse.GenTicks.get_TicksGame()")
+                    && warn.Contains("[Off] Verse.GenTicks.TicksGame()"),
+                warn ?? "<null>");
+        }
+
+        /// <summary>R-f 描述器（测试侧）：与生产的 ConsoleController.DescribeHookTargetForResetLog 同形——
+        /// **用方法不用 lambda**（C.5 闭包纪律）。</summary>
+        static string DescribeHookForResetTest(object hook)
+        {
+            FakeHookForResetTest h = hook as FakeHookForResetTest;
+            return h == null ? "<null>" : h.Describe();
+        }
+
+        /// <summary>HookInstance 的离线替身（只承载描述所需的两个值；字段 string/bool，非载荷类型）。</summary>
+        sealed class FakeHookForResetTest
+        {
+            readonly string target;
+            readonly bool enabled;
+            public FakeHookForResetTest(string target, bool enabled)
+            {
+                this.target = target;
+                this.enabled = enabled;
+            }
+            public string Describe() => (enabled ? "[On] " : "[Off] ") + target + "()";
+        }
     }
 
     /// <summary>

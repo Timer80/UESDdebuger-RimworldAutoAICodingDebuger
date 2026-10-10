@@ -149,6 +149,13 @@ namespace UnityExplorer.Hooks
                 return;
             }
 
+            // R-d③（登记，任务 10 修复轮）：`new HookInstance(method)` 内部编译失败（CompileAndGenerateProcessor
+            // 返回 false ⇒ 不 Patch、Enabled=Off）时，本 UI 路径**照样把 hook 收进列表**——点开关会走
+            // "没注册任何补丁方法"的空 processor；该形态现在由 Patch() 的 R-d② 判据**响亮拒绝**（拒绝置
+            // Enabled=true 并 LogWarning），不再是"开关显示 On、补丁没挂、零报错"。
+            // 本轮**不挡收列表**：编辑器路径（EditorInputSave → CompileAndGenerateProcessor）依赖 hook 在
+            // 列表内才能就地修补丁源码；API 路径（UEHttpHandler.CreateHook 的 patchCode 分支）已检查返回值
+            // ⇒ compile 失败直接 HOOK_CREATE_ERROR。详见报告 §25 R-d③。
             HookInstance hook = new(method);
             HookList.hookedSignatures.Add(sig);
             HookList.currentHooks.Add(sig, hook);

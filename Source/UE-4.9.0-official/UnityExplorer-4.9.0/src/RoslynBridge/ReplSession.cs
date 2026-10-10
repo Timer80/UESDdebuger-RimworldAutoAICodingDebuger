@@ -52,11 +52,11 @@ namespace UnityExplorer.RoslynBridge
         public CompileResult LastResult { get; private set; }
 
         /// <summary>
-        /// 最近一次**成功**提交的编译产物程序集（任务 10：动态 Harmony 补丁要从产物里取回补丁类型）。
-        /// 语义 = `Submit` 里 `Assembly.Load(pe)` 的产物；失败提交不推进（与 s_lastAssembly 的赋值点一致）。
-        /// ⚠️ 消费方必须知道：REPL 会把本次提交的顶层成员**嵌进生成类** `Submission_N`
-        /// （见 <see cref="BuildSubmissionSource"/>），故产物里的类型**不是**顶层类型 ——
-        /// 按全名取类型请用 <see cref="DynamicPatch.Locate"/>（扫描型），不要 `Assembly.GetType(用户写的名字)`。
+        /// 最近一次**编译成功并 `Assembly.Load(pe)`** 的提交产物程序集（任务 10：动态 Harmony 补丁从产物取回补丁类型）。
+        /// 推进规则（R-g 勘误："失败提交不推进"过强）：**编译失败不推进**（Load 前早退）；**`Run()` 运行时异常已推进**
+        /// （字节已加载无法回滚，按设计按失败记账，:421-423 先于 :428）⇒ 判成败看 `LastResult.Success`，勿只看本属性前进。
+        /// ⚠️ 消费方必须知道：REPL 把本次提交的顶层成员**嵌进生成类** `Submission_N`（见 <see cref="BuildSubmissionSource"/>）——
+        /// 产物里的类型**不是**顶层类型，按全名取请用 <see cref="DynamicPatch.Locate"/>（扫描型），不要 `Assembly.GetType(用户写的名字)`。
         /// </summary>
         public Assembly LastAssembly => s_lastAssembly;
 

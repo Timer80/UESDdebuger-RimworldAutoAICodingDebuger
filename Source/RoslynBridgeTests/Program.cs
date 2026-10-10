@@ -3029,6 +3029,219 @@ namespace RoslynBridgeTests
             Check("⑮b-③ 5 轮驱动到顶：诊断仍在（末尾追加到顶文案，未截断），日志用 HealLogLine（点名不可撤回）",
                 capped5.Contains("已补 5 个引用仍未通过") && capped5.EndsWith(diag5)
                 && healLog5.Contains("（mcs 路径，加入后不可撤回）"), Head(capped5, 200));
+
+            // ═══════════════════════════════════════════════════════════════════════════
+            // 任务 15c：**命名空间探针**（Roslyn 侧 `DefinesNamespace` 的"已加载件"等价物）——
+            // 修两类实测缺口：①`UnityEngine.Video` 的首段 `UnityEngine` 被错配到**本就在最小集里**的
+            // UnityEngine.dll（连加 5 次、5 轮空转到顶，诊断一字未变）；②`FlightPawn2Framework` 在
+            // `TEXT20.dll` 里而**程序集名 ≠ 命名空间** ⇒ 按名/按首段都匹配不上（"该加也加不上"）。
+            // 探针只遍历**已加载件**的类型 ⇒ 零 `LoadFrom`、零副本、零污染（模组程序集本就被 RimWorld 加载）。
+            // ═══════════════════════════════════════════════════════════════════════════
+            System.Collections.Generic.List<string> refs15c = ReferenceSetForThisProcess();
+            System.Reflection.Assembly asmText20 = LoadFixtureAssembly(refs15c, "TEXT20",
+                "namespace FlightPawn2Framework.FogThrough { public class FogThroughHelper { public class Inner { } } }");
+            // 诱饵 = 复刻 UnityEngine.dll：程序集名 == demanded 首段，且它的类型也落在 `UnityEngine.Video.` 前缀下
+            System.Reflection.Assembly asmUnity = LoadFixtureAssembly(refs15c, "UnityEngine",
+                "namespace UnityEngine { public class DecoyRoot { } }"
+                + " namespace UnityEngine.Video.Legacy { public class LegacyTrap { } }");
+            System.Reflection.Assembly asmVideo = LoadFixtureAssembly(refs15c, "UnityEngine.VideoModule",
+                "namespace UnityEngine.Video { public class VideoPlayer { } }");
+            Check("⑮c-⓪ 夹具三件都是**真实加载**的程序集（真身份 + 真命名空间元数据 + 真 GetTypes）",
+                asmText20 != null && asmUnity != null && asmVideo != null
+                && asmText20.GetName().Name == "TEXT20" && asmUnity.GetName().Name == "UnityEngine"
+                && asmVideo.GetName().Name == "UnityEngine.VideoModule"
+                && asmText20.GetType("FlightPawn2Framework.FogThrough.FogThroughHelper") != null,
+                "text20=" + (asmText20 == null ? "<null>" : asmText20.GetName().Name)
+                + " unity=" + (asmUnity == null ? "<null>" : asmUnity.GetName().Name)
+                + " video=" + (asmVideo == null ? "<null>" : asmVideo.GetName().Name));
+
+            // ═══ ④ 树匹配（探针本体；诱饵**先登记**，故结论不能来自"注册顺序"）═══
+            var regProbe = new LoadedAssemblyRegistry();
+            regProbe.Register(asmUnity);
+            regProbe.Register(asmText20);
+            regProbe.Register(asmVideo);
+            Check("⑮c-④ 树匹配①：demanded=完整命名空间 `FlightPawn2Framework.FogThrough` ⇒ **精确**命中 TEXT20",
+                regProbe.FindDeclaringNamespace("FlightPawn2Framework.FogThrough") == asmText20);
+            Check("⑮c-④ 树匹配②：demanded=首段 `FlightPawn2Framework` ⇒ 经**前缀**命中 TEXT20（程序集名 ≠ 命名空间）",
+                regProbe.FindDeclaringNamespace("FlightPawn2Framework") == asmText20);
+            Check("⑮c-④ 树匹配③：demanded=类型全名 `FlightPawn2Framework.FogThrough.FogThroughHelper` ⇒ 命中 TEXT20",
+                regProbe.FindDeclaringNamespace("FlightPawn2Framework.FogThrough.FogThroughHelper") == asmText20);
+            Check("⑮c-④ 树匹配④：**精确优先于前缀**（`UnityEngine.Video` 精确在 VideoModule，诱饵只有 `UnityEngine.Video.Legacy`）",
+                regProbe.FindDeclaringNamespace("UnityEngine.Video") == asmVideo);
+            Check("⑮c-④ 树匹配⑤：谁都没声明 ⇒ null（探针不瞎给）",
+                regProbe.FindDeclaringNamespace("No.Such.NamespaceZz") == null);
+            var regCacheProbe = new LoadedAssemblyRegistry();
+            bool miss15c1 = regCacheProbe.FindDeclaringNamespace("FlightPawn2Framework") == null;
+            bool miss15c2 = regCacheProbe.FindDeclaringNamespace("FlightPawn2Framework") == null;
+            bool hit15cAfter = regCacheProbe.Register(asmText20)
+                && regCacheProbe.FindDeclaringNamespace("FlightPawn2Framework") == asmText20;
+            Check("⑮c-④ 探针缓存：未命中先缓存（重复问同答 null），Register 见到新件即失效 ⇒ 同问即命中",
+                miss15c1 && miss15c2 && hit15cAfter);
+
+            // ═══ ① 探针命中优先 + **PathLoadCount 为 0**（两类缺口各一条）═══
+            string diagC0234 = "(1,1): error CS0234: The type or namespace name `Video' does not exist"
+                + " in the namespace `UnityEngine' (are you missing an assembly reference?)";
+            string diagC0246 = "(1,1): error CS0246: The type or namespace name `FlightPawn2Framework'"
+                + " could not be found (are you missing a using directive or an assembly reference?)";
+            int loadsC = 0;
+            var addedC = new System.Collections.Generic.List<System.Reflection.Assembly>();
+            var reportsC = new System.Collections.Generic.List<string>();
+            var hC = new McsReferenceHealer(regProbe)
+            {
+                PathLoader = p => { loadsC++; return null; },
+                AddReference = a => { addedC.Add(a); return true; },
+                CandidatePathProvider = () => new System.Collections.Generic.List<string>(),
+                LoadedNamespaceProbe = regProbe.FindDeclaringNamespace,
+                // 模拟"UnityEngine.dll 本就在最小集里"：首段通道若先命中诱饵就是实测缺口①
+                IsAlreadyReferenced = a => McsReferenceHealer.SimpleNameOf(a) == "UnityEngine",
+                ReportSink = reportsC.Add,
+            };
+            string gotC1 = hC.TryHealOne(diagC0234);
+            Check("⑮c-① 缺口①修复（`UnityEngine.Video`）：探针命中 UnityEngine.VideoModule，**不是**首段 UnityEngine",
+                gotC1 == "UnityEngine.VideoModule" && addedC.Count == 1 && addedC[0] == asmVideo
+                && hC.LastFromLoadedRegistry && hC.NamespaceProbeHitCount == 1
+                && hC.LastReport.Contains("命名空间探针"),
+                "got=" + (gotC1 ?? "<null>") + " " + hC.LastReport);
+            Check("⑮c-① 探针通道 **零 LoadFrom**（PathLoader 调用 " + loadsC + " 次 / LoadCallCount "
+                + hC.LoadCallCount + "）", loadsC == 0 && hC.LoadCallCount == 0);
+            Check("⑮c-① 诱饵（首段同名的已加载件）**未被加入**（探针优先于按首段）",
+                !addedC.Contains(asmUnity));
+            string gotC2 = hC.TryHealOne(diagC0246);
+            Check("⑮c-① 缺口②修复（`FlightPawn2Framework`）：探针命中 **TEXT20**（程序集名 ≠ 命名空间，按名匹配不上）",
+                gotC2 == "TEXT20" && addedC.Count == 2 && addedC[1] == asmText20
+                && loadsC == 0 && hC.NamespaceProbeHitCount == 2, "got=" + (gotC2 ?? "<null>"));
+
+            // ═══ ② 已在引用集/已加入过 ⇒ 跳过（**不计轮次、不重复记日志、不 LoadFrom**）═══
+            int loadsD = 0;
+            var addedD = new System.Collections.Generic.List<System.Reflection.Assembly>();
+            var reportsD = new System.Collections.Generic.List<string>();
+            var hD = new McsReferenceHealer(regProbe)
+            {
+                PathLoader = p => { loadsD++; return null; },
+                AddReference = a => { addedD.Add(a); return true; },
+                CandidatePathProvider = () => new System.Collections.Generic.List<string>(),
+                LoadedNamespaceProbe = regProbe.FindDeclaringNamespace,
+                IsAlreadyReferenced = a => McsReferenceHealer.SimpleNameOf(a) == "TEXT20",
+                ReportSink = reportsD.Add,
+            };
+            int roundsD = 0;
+            for (int round = 0; round < McsReferenceHealer.MaxHealRounds; round++)
+            {
+                if (hD.TryHealOne(diagC0246) == null) break;
+                roundsD++;
+            }
+            Check("⑮c-② 探针命中但**已在引用集** ⇒ 返回 null、0 次加引用、0 次 LoadFrom、跳过计数 1、标记跳过",
+                addedD.Count == 0 && loadsD == 0 && hD.LoadCallCount == 0
+                && hD.AlreadyReferencedSkipCount == 1 && hD.LastSkippedAlreadyReferenced
+                && hD.LastReport.Contains("已在引用集"), hD.LastReport);
+            Check("⑮c-② 跳过**不占轮次**（5 轮上限里 1 轮都没走 ⇒ healed=0 ⇒ 无到顶文案，诊断逐字回传）",
+                roundsD == 0 && McsReferenceHealer.AppendCapIfNeeded(roundsD, diagC0246) == diagC0246,
+                "rounds=" + roundsD);
+            Check("⑮c-② 跳过**不重复记日志**：没有『自愈补引用』、没有『自愈命中已加载件』，且『自愈跳过』只 1 行",
+                LinesContaining(reportsD, "自愈补引用") == 0 && LinesContaining(reportsD, "自愈命中已加载件") == 0
+                && LinesContaining(reportsD, "自愈跳过") == 1);
+            string gotC3 = hC.TryHealOne(diagC0246);   // hC 刚在①里加过 TEXT20 ⇒ 同一件第二轮
+            Check("⑮c-② 本实例已加入过（同一件第二轮）⇒ 跳过：返回 null、不再加第二次、不占轮次、日志不出现第二条命中",
+                gotC3 == null && addedC.Count == 2 && loadsC == 0 && hC.AlreadyReferencedSkipCount == 1
+                && LinesContaining(reportsC, "自愈命中已加载件") == 2
+                && LinesContaining(reportsC, "自愈跳过") == 1);
+            var reportsE = new System.Collections.Generic.List<string>();
+            int loadsE = 0;
+            var addedE = new System.Collections.Generic.List<System.Reflection.Assembly>();
+            var hE = new McsReferenceHealer(regProbe)      // **不注入探针** ⇒ 逐字走 15b 的"按首段 + 按名"
+            {
+                PathLoader = p => { loadsE++; return null; },
+                AddReference = a => { addedE.Add(a); return true; },
+                CandidatePathProvider = () => new System.Collections.Generic.List<string> { @"C:\fake\UnityEngine.dll" },
+                IsAlreadyReferenced = a => McsReferenceHealer.SimpleNameOf(a) == "UnityEngine",
+                ReportSink = reportsE.Add,
+            };
+            Check("⑮c-② 无探针时**按首段通道**也挡住（缺口①的空转根源）：0 加引用、0 LoadFrom、响亮说已在引用集",
+                hE.TryHealOne(diagC0234) == null && addedE.Count == 0 && loadsE == 0 && hE.LoadCallCount == 0
+                && hE.AlreadyReferencedSkipCount == 1 && hE.LastSkippedAlreadyReferenced,
+                hE.LastReport);
+            Check("⑮c-② **文件通道**同判据：候选 UnityEngine.dll 与已在引用集的同名件同身份 ⇒ 不 LoadFrom（不记『自愈补引用』）",
+                hE.LastReport.Contains("UnityEngine.dll") && hE.LastReport.Contains("已在引用集")
+                && LinesContaining(reportsE, "自愈补引用") == 0 && LinesContaining(reportsE, "自愈命中已加载件") == 0,
+                hE.LastReport);
+
+            // ═══ ③ 探针未命中 + 按名未命中 ⇒ **仍响亮拒绝**（"宁可不加也不猜"这条安全语义保留）═══
+            int loadsF = 0;
+            var addedF = new System.Collections.Generic.List<System.Reflection.Assembly>();
+            var reportsF = new System.Collections.Generic.List<string>();
+            var hF = new McsReferenceHealer(regProbe)
+            {
+                PathLoader = p => { loadsF++; return null; },
+                AddReference = a => { addedF.Add(a); return true; },
+                CandidatePathProvider = () => new System.Collections.Generic.List<string>(),
+                LoadedNamespaceProbe = regProbe.FindDeclaringNamespace,
+                ReportSink = reportsF.Add,
+            };
+            string gotF = hF.TryHealOne("(1,1): error CS0246: The type or namespace name `No.Such.NsZz'"
+                + " could not be found (are you missing a using directive or an assembly reference?)");
+            Check("⑮c-③ 探针未命中 + 按名未命中 ⇒ 返回 null、0 加引用、0 LoadFrom、**不算跳过**（是真没候选）",
+                gotF == null && addedF.Count == 0 && loadsF == 0 && hF.LoadCallCount == 0
+                && !hF.LastSkippedAlreadyReferenced && hF.AlreadyReferencedSkipCount == 0);
+            Check("⑮c-③ 拒绝文案**响亮**：点名『已尝试已加载件命名空间探针』+『按名无匹配』+『不可撤回』",
+                hF.LastReport.Contains("命名空间探针") && hF.LastReport.Contains("未命中")
+                && hF.LastReport.Contains("按名无匹配") && hF.LastReport.Contains("不可撤回"), hF.LastReport);
+
+            // ═══ ⑥ `Assembly.GetTypes()` 抛 `ReflectionTypeLoadException` 时仍要能判定（拿 .Types 里的非 null 项）═══
+            System.Collections.Generic.List<string> refsDep = ReferenceSetForThisProcess();
+            var depCompiled = RoslynCompiler.Compile("MissingDep15c",
+                "namespace MissingDep15c { public class DepBase { } }", refsDep, includePolyfills: true);
+            string depPath15c = System.IO.Path.Combine(AppContext.BaseDirectory, "UESD_15c_missing_dep.dll");
+            bool depOnDisk = false;
+            if (depCompiled.Success && depCompiled.PeBytes != null)
+            {
+                // 只落盘当引用、**不加载** ⇒ Broken15c 的基类型解析不到 ⇒ GetTypes() 抛 ReflectionTypeLoadException
+                System.IO.File.WriteAllBytes(depPath15c, depCompiled.PeBytes);
+                depOnDisk = true;
+            }
+            var refsBroken = new System.Collections.Generic.List<string>(refsDep);
+            if (depOnDisk) refsBroken.Add(depPath15c);
+            var brokenCompiled = RoslynCompiler.Compile("Broken15c",
+                "namespace Broken15c { public class Broken : MissingDep15c.DepBase { } }"
+                + " namespace Broken15c.FineNs { public class Fine { } }", refsBroken, includePolyfills: true);
+            System.Reflection.Assembly asmBroken = brokenCompiled.Success && brokenCompiled.PeBytes != null
+                ? System.Reflection.Assembly.Load(brokenCompiled.PeBytes) : null;
+            bool getTypesThrew = false;
+            if (asmBroken != null)
+            {
+                try { asmBroken.GetTypes(); }
+                catch (System.Reflection.ReflectionTypeLoadException) { getTypesThrew = true; }
+                catch { }
+            }
+            Check("⑮c-⑥ 夹具证据：Broken15c.GetTypes() 真的抛 ReflectionTypeLoadException（依赖件未加载）",
+                getTypesThrew, depOnDisk ? brokenCompiled.Diagnostics : "依赖件落盘失败：" + depCompiled.Diagnostics);
+            var regBroken = new LoadedAssemblyRegistry();
+            if (asmBroken != null) regBroken.Register(asmBroken);
+            regBroken.Register(asmText20);
+            Check("⑮c-⑥ 探针**不抛**且拿 `.Types` 里的非 null 项继续：能命中该件里**正常**的那个类型所在命名空间",
+                asmBroken != null && regBroken.FindDeclaringNamespace("Broken15c.FineNs") == asmBroken);
+            Check("⑮c-⑥ 该件缺席的命名空间 ⇒ null（探针不抛、不瞎给）",
+                regBroken.FindDeclaringNamespace("MissingDep15c") == null);
+        }
+
+        /// <summary>任务 15c：用 Roslyn **现编一份真实程序集**并 `Assembly.Load` 进本进程 ——
+        /// 真身份、真命名空间元数据、真 `GetTypes()`（不是无法验证的假象）。失败 ⇒ null（由调用方 Check 报出）。</summary>
+        static System.Reflection.Assembly LoadFixtureAssembly(System.Collections.Generic.List<string> refs, string asmName, string source)
+        {
+            try
+            {
+                var r = RoslynCompiler.Compile(asmName, source, refs, includePolyfills: true);
+                if (!r.Success || r.PeBytes == null) return null;
+                return System.Reflection.Assembly.Load(r.PeBytes);
+            }
+            catch { return null; }
+        }
+
+        static int LinesContaining(System.Collections.Generic.List<string> lines, string needle)
+        {
+            int n = 0;
+            for (int i = 0; i < lines.Count; i++)
+                if (lines[i] != null && lines[i].Contains(needle)) n++;
+            return n;
         }
 
         static void TestHealCapMessage()

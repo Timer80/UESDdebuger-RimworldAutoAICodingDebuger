@@ -55,6 +55,9 @@ namespace UnityExplorer.CSConsole
         private Func<IList<string>> _modPathProvider;
         private bool _allowModTypeResolution = true;
         private readonly List<string> _excludedModDirs = new List<string>();
+        /// <summary>任务 15c：**已进引用集的程序集简单名**（最小集模式下维护）。自愈据此判定"这件已在引用集
+        /// ⇒ 再 ReferenceAssembly 是空转"（mcs 的 `ReferenceAssembly` 不去重也不报错）。</summary>
+        private readonly HashSet<string> _referencedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         /// <summary>本轮求值的自愈日志缓冲（并入 <c>output</c>，见 Evaluate：mcs 路径日志不进 Player.log）。</summary>
         private readonly StringBuilder _healLog = new StringBuilder();
 
@@ -90,6 +93,11 @@ namespace UnityExplorer.CSConsole
                     IsRefused = IsBlacklisted,
                     IsExcludedPath = IsModExcludedPath,
                     ReportSink = AppendHealLine,
+                    // 任务 15c：①已加载件**命名空间探针**（Roslyn 侧 DefinesNamespace 的等价物，
+                    // 零 LoadFrom——模组程序集本就被 RimWorld 加载）；②"该件是否已在引用集"判据
+                    // （mcs 的 ReferenceAssembly 不去重也不报错 ⇒ 缺它就会把重复加当补上了）。
+                    LoadedNamespaceProbe = _registry.FindDeclaringNamespace,
+                    IsAlreadyReferenced = IsReferencedAssembly,
                 };
                 // 登记**先于**引用：最小集里"已在进程中的件"直接复用，不再 LoadFrom 一份（避免双副本/双身份）。
                 RegisterLoadedAssemblies();
@@ -302,7 +310,16 @@ namespace UnityExplorer.CSConsole
                 return false;
 
             ReferenceAssembly(asm);
+            // 任务 15c：只记最小集模式的引用集名单（旧模式的失败/成功路径逐字不变，不自愈）。
+            if (_minimalReferences) _referencedNames.Add(name);
             return true;
+        }
+
+        /// <summary>任务 15c：该件是否已在引用集（自愈的"不要重复加同一件"判据；仅最小集模式注入）。</summary>
+        private bool IsReferencedAssembly(Assembly asm)
+        {
+            string name = McsReferenceHealer.SimpleNameOf(asm);
+            return !string.IsNullOrEmpty(name) && _referencedNames.Contains(name);
         }
 
         private static CompilerContext BuildContext(TextWriter tw)

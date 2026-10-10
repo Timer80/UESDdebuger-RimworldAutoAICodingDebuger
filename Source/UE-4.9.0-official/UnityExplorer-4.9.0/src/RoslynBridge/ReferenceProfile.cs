@@ -72,6 +72,10 @@ namespace UnityExplorer.RoslynBridge
             out List<string> missingUeSideAssemblies)
         {
             var set = new ReferenceSet();
+            // §4.10-2：同简单名不同身份的去重**不得静默**——把 ReferenceSet 的结构化日志收进报告串
+            //（方法组注入，C.5：无 lambda 捕获；报告串由宿主写进日志）。
+            var dedupe = new List<string>();
+            set.ReportSink = dedupe.Add;
             int fromManaged = 0, fromUe = 0, self = 0;
             missingUeSideAssemblies = new List<string>();
 
@@ -114,6 +118,10 @@ namespace UnityExplorer.RoslynBridge
             if (self == 0)
                 report += "；⚠ 宿主自引用缺失（selfAssemblyPath=" + (selfAssemblyPath ?? "<不可判定>")
                     + "）→ 提交类继承 `ReplHostBase` 会 CS0246、REPL 助手不可用";
+            // §4.10-2：去重一律随报告出现（防"新版静默不生效"——dll 热重载场景的病根）
+            if (dedupe.Count > 0)
+                report += "；⚠ 引用集去重 " + dedupe.Count + " 例（同简单名只保留先到者、已结构化登记）："
+                    + string.Join(" | ", dedupe.ToArray());
 
             return set;
         }

@@ -72,6 +72,7 @@ namespace RoslynBridgeTests
             TestHealerRefusalsAndSwitch();
             TestHealCapMessage();
             TestHealRollbackOnNoEffect();
+            TestReferenceSetDedupeLog();
             TestHealReplIntegration();
             // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
             // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
@@ -2667,6 +2668,39 @@ namespace RoslynBridgeTests
             Check("⑦ 无关自愈被回滚（日志含『自愈回滚』）", log.Contains("自愈回滚"), log);
             Check("⑦ 回滚后引用集未增长", refs.Count == before, "before=" + before + " after=" + refs.Count);
             Check("⑦ 回滚后仍未成功（不得假装修好）", !rr.Success, rr.Success ? "意外成功" : "失败（预期）");
+        }
+
+        /// <summary>任务 13 §4.10-2（微审③指出的唯一缺口）：同简单名不同身份的去重**不得静默**。
+        /// 用"框架目录 System.dll"与"进程内已加载 System 的 Location"（不同路径、同简单名）驱动：
+        /// 断言先到者进入、后者被拒、且**有**结构化日志（保留/丢弃/身份/原因）；同路径重复加入不报。</summary>
+        static void TestReferenceSetDedupeLog()
+        {
+            string fw = System.IO.Path.GetDirectoryName(typeof(object).Assembly.Location);
+            string a = System.IO.Path.Combine(fw, "System.dll");
+            string b = null;
+            foreach (System.Reflection.Assembly asm in System.AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try { if (asm.GetName().Name == "System") { b = asm.Location; break; } } catch { }
+            }
+            bool pre = System.IO.File.Exists(a) && !string.IsNullOrEmpty(b) && System.IO.File.Exists(b)
+                && !string.Equals(a, b, System.StringComparison.OrdinalIgnoreCase);
+            Check("⑩ 前置：同简单名两个不同路径文件都在", pre, a + " | " + (b ?? "<null>"));
+            if (!pre) return;
+            var set = new ReferenceSet();
+            var log = new System.Collections.Generic.List<string>();
+            set.ReportSink = log.Add;                        // 方法组（无 lambda 捕获）
+            bool first = set.TryAdd(a, "System", null);
+            bool second = set.TryAdd(b, "System", null);
+            Check("⑩ 先到者进入、后者被拒（单一编译内不可同简单名两版本）",
+                first && !second, "first=" + first + " second=" + second);
+            Check("⑩ 去重**不静默**：结构化日志含保留/丢弃/身份/原因",
+                log.Count == 1 && log[0].Contains("保留=") && log[0].Contains("丢弃=")
+                    && log[0].Contains("身份=") && log[0].Contains("原因="),
+                log.Count == 0 ? "<无日志>" : log[0]);
+            log.Clear();
+            bool again = set.TryAdd(a, "System", null);
+            Check("⑩ 同路径重复加入不再报（去重日志只针对**不同**路径）",
+                !again && log.Count == 0, "again=" + again + " logN=" + log.Count);
         }
 
         static void TestHealCapMessage()

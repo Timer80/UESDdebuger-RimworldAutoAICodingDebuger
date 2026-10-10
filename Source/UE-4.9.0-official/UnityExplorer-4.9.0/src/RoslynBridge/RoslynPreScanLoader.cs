@@ -1,6 +1,5 @@
 #if STANDALONE_MONO
 using System;
-using System.IO;
 using Verse; // StaticConstructorOnStartup 只在 STANDALONE 配置可用（ML/BIE 配置无 RimWorld 引用）
 
 namespace UnityExplorer.RoslynBridge
@@ -11,10 +10,14 @@ namespace UnityExplorer.RoslynBridge
     /// UE 的 init 链（UELoader→ExplorerStandalone→ExplorerCore.Init）不在 CallAll 内、晚于
     /// ReportProbablyMissingAttributes 字段扫描——ExplorerCore.Init 处的早加载从未先于扫描运行过。
     /// 唯一可靠的扫描前注入点 = [StaticConstructorOnStartup]：CallAll 在 DoPlayLoad 内先跑完全部
-    /// 该类 .cctor、之后才做字段扫描。本壳 cctor 在此窗口加载载荷并挂 AppDomain 级
-    /// AssemblyResolve 应答器（RoslynAssemblyLoader.EnsureLoaded 内置，追加 8：无应答方时
-    /// GetFields 绑定 VM 直接挂死——peer mono 调试桥实测）。
-    /// 幂等：EnsureLoaded 有 s_attempted 锁 + 应答器 "-="/"+=" 重挂；与 ExplorerCore.Init 的
+    /// 该类 .cctor、之后才做字段扫描。本壳 cctor 在此窗口**请前置包 UE.Roslyn 供载荷**
+    /// （RoslynAssemblyLoader.EnsureFrontPayload：反射 + 字符串，零编译期引用）并挂 AppDomain 级
+    /// AssemblyResolve 应答器（追加 8：无应答方时 GetFields 绑定 VM 直接挂死——peer mono 调试桥实测；
+    /// 前置包自身不挂应答器，故这层仍归 UE）。
+    /// 时序保障：RimWorld 在 CallAll **之前**已把全部启用模组的程序集 LoadFrom 进 AppDomain（与模组
+    /// 列表顺序无关）⇒ 只要前置包启用，本壳 cctor 扫 AppDomain 必然找到它；`loadAfter`/`modDependencies`
+    /// 只是意图表达，不承担正确性（见 About.xml 与前置包 README）。
+    /// 幂等：EnsureFrontPayload 有 s_attempted 锁 + 应答器 "-="/"+=" 重挂；与 ExplorerCore.Init 的
     /// 调用点谁先谁生效（追加 7）。失败缓存走 s_attempted，控制台 Reset 时回退 mcs。
     /// 日志走 Verse.Log（进 Player.log，验收 grep 锚点）+ LogToExplorerPanel（进 UE 面板缓存；
     /// 此期 ExplorerCore.Log 内部的 Loader 回调必 NRE，故只能 best-effort 包裹，见该方法注释）。
@@ -28,27 +31,34 @@ namespace UnityExplorer.RoslynBridge
         {
             try
             {
-                bool ok = RoslynAssemblyLoader.EnsureLoaded(DerivePayloadDir());
+                string failure;
+                bool ok = RoslynAssemblyLoader.EnsureFrontPayload(out failure);
                 int mapped = RoslynAssemblyLoader.LoadedPayloadCount;
                 bool resolver = RoslynAssemblyLoader.ResolverInstalled;
+                int expected = RoslynAssemblyLoader.LoadOrder.Length;
 
                 // 追加 9 修订 3：正锚点只报**可验证事实**（映射条数 + 委托挂载位）。
                 // ⚠️ 不要用 `typeof(ReplSession).GetFields(...)` 当"钩子自检"：C.5 已把 ReplSession 的
                 // 载荷类型字段全部擦除，载荷未载/应答器未挂时它**照样成功**——那是假阳性，会把缺陷
                 // 放进验收。钩子真正生效的证据只有两条：Player.log 零 TypeLoadException +
                 // 控制台 Roslyn 路径实际可用（本锚点证明不了它们，故不做此承诺）。
-                if (ok && mapped == 8 && resolver)
+                // 任务 14（F1）：载荷来源 = 前置包 UE.Roslyn（UE 侧不再有 UE_Data\...\Roslyn\ 副本）
+                // ⇒ 锚点点名"谁供载荷"；未就绪分支必须让玩家一眼分清"包没装/没启用"（可去装/启用）
+                // 与"包在但加载失败"（看它自己的 [Roslyn] 日志），且明说控制台仍可用。
+                if (ok && mapped == expected && resolver)
                 {
-                    string msg = "[CSConsole] Roslyn 扫描前加载完成（载荷映射 8/8，解析器已挂载）";
+                    string msg = "[CSConsole] Roslyn 扫描前加载完成（前置包 " + RoslynFrontGate.FrontPackageId
+                        + " 供载荷 " + mapped + "/" + expected + "，解析器已挂载）";
                     Verse.Log.Message(msg);
                     LogToExplorerPanel(msg, false);
                 }
                 else
                 {
-                    string msg = "[CSConsole] Roslyn 扫描前加载未就绪（avail=" + ok
-                        + "，载荷映射 " + mapped + "/8，解析器已挂载=" + resolver
-                        + "，原因=" + (RoslynAssemblyLoader.FailureReason ?? "未尝试/未知")
-                        + "）：控制台将在 Reset 时以正确路径重试或回退 mcs";
+                    string msg = "[CSConsole] Roslyn 扫描前加载未就绪（前置包 " + RoslynFrontGate.FrontPackageId
+                        + " 未安装或加载失败："
+                        + (failure ?? RoslynFrontGate.FailureReason ?? "未尝试/未知")
+                        + "；载荷映射 " + mapped + "/" + expected + "，解析器已挂载=" + resolver
+                        + "）：控制台将回退 mcs（mcs 不依赖前置包，控制台仍可用）";
                     Verse.Log.Warning(msg);
                     LogToExplorerPanel(msg, true);
                 }
@@ -97,26 +107,10 @@ namespace UnityExplorer.RoslynBridge
 
         static bool s_panelChannelReported;
 
-        // ExplorerCore.ExplorerFolder 此时尚不可用，故不能直接复用：它是
-        // `Path.Combine(Loader.ExplorerFolderDestination, Loader.ExplorerFolderName)`（ExplorerCore.cs:28）
-        // ——Loader 由 ExplorerCore.Init 赋值、ExplorerStandalone.explorerFolderDest 由 UELoader 的
-        // RedirectConfigFolder 预置（ExplorerBootstrap.cs:182），两者都是运行期赋值（非静态初始化器/
-        // 非常量），本 cctor 早于它们 → 直接读必 NRE。故按同一套规则自行推导（Live 部署实测命中主候选）：
-        //   UE 程序集目录 = <ModRoot>/Assemblies → <ModRoot>/UE_Data/sinai-dev-UnityExplorer/Roslyn；
-        // 回落官方默认（ExplorerStandalone.CheckExplorerFolder 未被重定向时用 DLL 旁目录）：
-        //   <ModRoot>/Assemblies/sinai-dev-UnityExplorer/Roslyn。
-        // 按"目录存在"择优；都不存在时取重定向路径（EnsureLoaded 缓存失败并告警，可见可查）。
-        static string DerivePayloadDir()
-        {
-            string asmDir = Path.GetDirectoryName(
-                Uri.UnescapeDataString(new Uri(typeof(ExplorerCore).Assembly.CodeBase).AbsolutePath));
-            string modRoot = Path.GetDirectoryName(asmDir);
-            string redirected = Path.Combine(modRoot, "UE_Data",
-                ExplorerCore.DEFAULT_EXPLORER_FOLDER_NAME, "Roslyn");
-            if (Directory.Exists(redirected)) return redirected;
-            string besideDll = Path.Combine(asmDir, ExplorerCore.DEFAULT_EXPLORER_FOLDER_NAME, "Roslyn");
-            return Directory.Exists(besideDll) ? besideDll : redirected;
-        }
+        // 任务 14（F1）：原 `DerivePayloadDir()`（推导 UE 侧 `<ModRoot>\UE_Data\sinai-dev-UnityExplorer\
+        // Roslyn`，回落 DLL 旁目录）已删除——UE 不再分发载荷，交付路径改请前置包供货（RoslynFrontGate）。
+        // 前置包程序集路径的推导搬到了 RoslynFrontGate（`<game>\Mods\Roslyn\Assemblies\Roslyn.dll`，
+        // 只用于把失败原因说清楚，不据此装载）。
     }
 }
 #endif

@@ -22,6 +22,9 @@
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\RoslynCompletion.cs" Link="RoslynCompletion.cs" />
     <!-- 根因清扫轮（§17，追加 E）：纯决策逻辑（无 Unity/UE/Roslyn/mcs 依赖）链接进来做真值表离线断言 -->
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\EvaluatorSelector.cs" Link="EvaluatorSelector.cs" />
+    <!-- 任务 14（F1）：前置包反射门（无 Verse/Unity/UE 依赖，只用 System.*）⇒ 离线断言
+         "缺席 ⇒ false + 响亮 failure + 不抛"、"三态回退原因互不相同"、"零编译期引用" -->
+    <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\RoslynFrontGate.cs" Link="RoslynFrontGate.cs" />
     <!-- 任务 10：动态 Harmony 补丁的"包装 + 产物里取回"纯逻辑（无 Unity/UE/Roslyn/mcs 依赖）⇒ 可离线断言
          "包装 → 提交编译 → 产物里定位嵌套补丁类型 → 取隐式 private 的补丁方法 → Harmony 挂载生效"。 -->
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\DynamicPatch.cs" Link="DynamicPatch.cs" />

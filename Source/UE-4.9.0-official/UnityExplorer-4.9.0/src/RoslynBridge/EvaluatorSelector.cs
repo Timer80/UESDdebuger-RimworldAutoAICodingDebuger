@@ -2,7 +2,25 @@ using System;
 
 namespace UnityExplorer.RoslynBridge
 {
-    /// <summary>求值器选择结果（追加 E）：三类终态，与 ConsoleController 的实际分支一一对应。</summary>
+    /// <summary>
+    /// "为什么没走 Roslyn"的四态（任务 14 / F1）。前三条是要求**可分辨**的三种回退原因：
+    /// 配置关闭 / 前置包缺席或加载失败 / 探针失败；第四条是"本配置根本没编 Roslyn 实现"（ML/BIE/CPP）。
+    /// </summary>
+    public enum McsFallbackReason
+    {
+        /// <summary>`C# Console Use Roslyn`=false（玩家显式关闭；语义 = 不用 Roslyn，非"降级"）。</summary>
+        ConfigDisabled,
+        /// <summary>前置包 `UE.Roslyn` 未安装/未启用/加载失败 ⇒ 自动降级 mcs。</summary>
+        FrontPackageUnavailable,
+        /// <summary>前置包供上了载荷但探针（`0 == 0`）编译失败 ⇒ 自动降级 mcs。</summary>
+        ProbeFailed,
+        /// <summary>本配置未编入 Roslyn 实现（`RoslynCompiledIn`=false），与前置包无关。</summary>
+        NotCompiledIn,
+    }
+
+    /// <summary>
+    /// 求值器选择结果（追加 E）：三类终态，与 ConsoleController 的实际分支一一对应。
+    /// </summary>
     public enum EvaluatorChoice
     {
         /// <summary>Roslyn 路径（实际生效者必须是 RoslynScriptEvaluator）。</summary>
@@ -78,6 +96,31 @@ namespace UnityExplorer.RoslynBridge
                 case EvaluatorChoice.Roslyn: return "Roslyn";
                 case EvaluatorChoice.Mcs: return "mcs";
                 default: return "禁用";
+            }
+        }
+
+        /// <summary>
+        /// 回退原因的**日志文本**（任务 14 / F1：禁静默、且三态可分辨）。
+        /// 纯函数 ⇒ 离线可断言"三种原因给出三条互不相同、各自点明原因的文本"
+        ///（见 RoslynBridgeTests.TestMcsFallbackReasonTexts）；ConsoleController 只负责喂 reason+detail，
+        /// 不得自行拼串（否则又变成"只把日志字样改对、逻辑没动"）。
+        /// ⚠️ 前置包缺席/探针失败都是**自动降级**（控制台仍可用），文本必须让玩家能直接分辨是哪一种。
+        /// </summary>
+        public static string DescribeMcsFallback(McsFallbackReason reason, string detail)
+        {
+            switch (reason)
+            {
+                case McsFallbackReason.ConfigDisabled:
+                    return "[CSConsole] 使用 mcs 求值器（配置关闭 Roslyn：`C# Console Use Roslyn`=false）";
+                case McsFallbackReason.FrontPackageUnavailable:
+                    return "[CSConsole] 回退 mcs：前置包 " + RoslynFrontGate.FrontPackageId
+                        + " 未安装或加载失败"
+                        + (string.IsNullOrEmpty(detail) ? "（未给出原因）" : " → " + detail);
+                case McsFallbackReason.ProbeFailed:
+                    return "[CSConsole] Roslyn 探针失败，回退 mcs："
+                        + (string.IsNullOrEmpty(detail) ? "evaluator probe failed" : detail);
+                default:
+                    return "[CSConsole] 使用 mcs 求值器（本配置未编入 Roslyn 实现）";
             }
         }
     }

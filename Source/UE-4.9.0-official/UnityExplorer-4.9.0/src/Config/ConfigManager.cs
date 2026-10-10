@@ -139,8 +139,10 @@ namespace UnityExplorer.Config
                 "");
 
             CSharp_Console_Use_Roslyn = new("C# Console Use Roslyn",
-                "Use the Roslyn compiler (C# 13) for the C# Console instead of the legacy Mono.CSharp compiler.\n" +
-                "If Roslyn fails to initialize, the console automatically falls back to Mono.CSharp.",
+                "Prefer the Roslyn compiler (C# 13) for the C# Console over the legacy Mono.CSharp compiler.\n" +
+                "Requires the prerequisite mod 'Roslyn' (packageId UE.Roslyn) - the Roslyn payload is no longer\n" +
+                "bundled with this mod. Without it the console automatically falls back to Mono.CSharp: still\n" +
+                "fully usable, but C# 13 syntax is unavailable.",
                 true);
 
             CSharp_Console_Allow_Mod_Type_Resolution = new("C# Console Allow Mod Type Resolution",

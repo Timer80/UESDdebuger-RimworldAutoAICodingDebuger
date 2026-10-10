@@ -68,16 +68,18 @@ namespace UnityExplorer
             // ③ ExplorerCore 无 [StaticConstructorOnStartup]，早加载不可能先于扫描。
             // 对应修复三层：① 擦除载荷字段（C.5-lite）；② AppDomain 级 AssemblyResolve 应答器
             // （RoslynAssemblyLoader，追加 8）；③ 壳类扫描前注入（追加 6）。
-            // 不读配置——配置只决定"是否使用"，不决定"是否加载"；ResetConsole 处的 EnsureLoaded
-            // 幂等命中缓存（s_attempted 锁 + 应答器 "-="/"+=" 重挂），行为不变，与壳类谁先谁生效。
-            // 跨配置安全：RoslynAssemblyLoader 不在 csproj 非 STANDALONE 排除组（排除组仅
-            // ReferenceScanner + RoslynCompiler/DiagnosticFormatter/ReplSession/RoslynScriptEvaluator
-            // 五件，本类仅依赖 System.*），9 配置全编译，无需 #if。
+            // 不读配置——配置只决定"是否使用"，不决定"是否加载"；ResetConsole 处的 EnsureFrontPayload
+            // 幂等命中缓存（s_attempted 锁 + 应答器 "-="/"+=" 重挂），行为不变，与壳类谁先生效谁的。
+            // 任务 14（F1）：载荷来源改为**前置包 UE.Roslyn**（反射 + 字符串，零编译期引用）；UE 侧不再有
+            // `UE_Data\...\Roslyn\` 副本，此处第二层防御与壳类 cctor 同路（前置包缺席则响亮失败、退回 mcs）。
+            // 跨配置安全：RoslynAssemblyLoader/RoslynFrontGate 均不在 csproj 非 STANDALONE 排除组
+            // （排除组仅 ReferenceScanner + RoslynCompiler/DiagnosticFormatter/ReplSession/RoslynScriptEvaluator
+            // 五件，二者仅依赖 System.*），9 配置全编译，无需 #if。
             // 升级路径（C 方案，已登记任务 12 矩阵/最终审查）：以上三层均为同一程序集内的止血；
-            // 治本 = Roslyn 四件移出主程序集为卫星程序集（本调用点随之下沉/迁走）。前置包与壳类已是
-            // 该路径的第一步；若再有早期反射器（UniverseLib/Harmony/第三方 mod 检查器）报同类
+            // 治本 = Roslyn 四件移出主程序集为卫星程序集（本调用点随之下沉/迁走）。F1 已走完该路径第一步
+            // （载荷不再由 UE 分发）；若再有早期反射器（UniverseLib/Harmony/第三方 mod 检查器）报同类
             // TypeLoadException，直接上 C 方案，勿再加时序类补丁。
-            try { RoslynAssemblyLoader.EnsureLoaded(Path.Combine(ExplorerFolder, "Roslyn")); }
+            try { RoslynAssemblyLoader.EnsureFrontPayload(out _); }
             catch (Exception ex)
             {
                 LogWarning($"[CSConsole] Roslyn 载荷早加载失败（控制台将在 Reset 时回退 mcs）：{ex.Message}");

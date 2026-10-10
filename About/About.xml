@@ -6,11 +6,27 @@
   <modVersion>0.9.0.1</modVersion>
   <description>RimWorld debug toolkit: in-game UnityExplorer (F7) for inspecting objects, running C# and hooking methods, a local MCP server exposing 191 tools (process control, log reading, quick test map, C#/Hook, colony and map data queries, DebugAction, zone/selection, camera and video stream, map coordinate markers, long-running profiling tasks) that lets AI clients drive the game, and a Mono SDB code-level debugger with 20 tools (breakpoints, call stack, locals, stepping, eval, object inspection).
 调试工具链模组：游戏内 UnityExplorer（F7 检视对象、执行 C#、Hook 方法）+ 本地 MCP 服务器（191 个工具：进程控制、读日志、快速进测试地图、C#/Hook、殖民地与地图数据查询、DebugAction、区域/选中、相机与视频流、地图坐标光标、长任务性能采样），让 AI 客户端直接驱动游戏 + Mono SDB 代码级调试器（20 个工具：断点、调用栈、局部变量、单步、求值、对象检查）。
+前置依赖：C# 控制台的 Roslyn（C# 13）编译器由前置包 Roslyn（packageId UE.Roslyn）提供——本模组不再内置 Roslyn 载荷。不装该前置包时控制台仍完全可用，但会自动降级为旧版 mcs 编译器（无 C# 13 语法）。
+Prerequisite: the C# Console's Roslyn (C# 13) compiler is supplied by the separate 'Roslyn' mod (packageId UE.Roslyn); this mod no longer bundles the Roslyn payload. Without it the console still works but falls back to the legacy mcs compiler (no C# 13 syntax).
 Portions of the materials used to create this content/mod are trademarks and/or copyrighted works of Ludeon Studios Inc. All rights reserved by Ludeon. This content/mod is not official and is not endorsed by Ludeon.</description>
   <supportedVersions>
     <li>1.6</li>
   </supportedVersions>
+  <!-- 任务 14（F1）：Roslyn 载荷不再随本包分发，改由前置包 UE.Roslyn 提供（Mods\Roslyn）。
+       二者都**不保证** cctor 顺序（loadAfter 仅"重置/修复排序"时经拓扑排序生效；modDependencies
+       只驱动 UI）。真正的保障是时序事实：本模组 [StaticConstructorOnStartup] 的壳类 cctor 运行在
+       CallAll 内，而 CallAll 之前全部启用模组的程序集已 LoadFrom 进 AppDomain（与列表顺序无关）；
+       UE 侧再用反射（零编译期引用）请前置包供载荷。未装前置包 ⇒ 控制台自动降级 mcs（仍可用）。 -->
+  <loadAfter>
+    <li>UE.Roslyn</li>
+  </loadAfter>
   <modDependencies>
+    <!-- Roslyn 前置依赖包（本地包 Mods\Roslyn，packageId 见其 About.xml）。
+         不装它本模组仍可运行：C# 控制台自动降级为 mcs（无 C# 13 语法）。 -->
+    <li>
+      <packageId>UE.Roslyn</packageId>
+      <displayName>Roslyn</displayName>
+    </li>
     <!-- Harmony Steam Workshop: https://steamcommunity.com/sharedfiles/filedetails/?id=2009463077 -->
     <li>
       <packageId>brrainz.harmony</packageId>

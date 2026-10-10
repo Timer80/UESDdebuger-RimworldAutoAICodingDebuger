@@ -45,6 +45,12 @@
 | `<MOD>/Source/` | UELoader / UE / UniverseLib 源码 |
 | `<MOD>/RimWorldWin64_Data/boot.config` | 已含 `wait-for-managed-debugger=1` 与 `player-connection-debug=1` |
 
+> **Roslyn 载荷归属（F1 起）**：C# 控制台的 Roslyn（C# 13）编译器由**前置包**
+> `C:\SteamLibrary\steamapps\common\RimWorld\Mods\Roslyn`（packageId `UE.Roslyn`）提供。
+> UE 侧**不再**持有/分发 Roslyn 8 件载荷，`<MOD>/UE_Data/sinai-dev-UnityExplorer/Roslyn/` **应当不存在**；
+> 仓库里的 `Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/roslyn/` 只是**开发期编译期引用来源**
+> （`Private=false`，不进输出、不随包分发）。缺前置包 ⇒ 控制台自动降级 mcs（仍可用，无 C# 13 语法）。
+
 ### 2.2 端口约定（重要）
 
 | 端口 | 用途 | 说明 |
@@ -80,6 +86,14 @@
 3. **config.json 路径核对**：`gamePath` / `logPath` / `steamPath` / `appId`。日志路径中的 `%USERNAME%` 会被替换为当前用户名。
 4. **附属模组（可选但推荐）**：RIMAPI、RimBridgeServer、DebugAction 相关。RIMAPI / RimBridgeServer 无需排在 UESDdebuger 前面。
 5. **McpRimDebug（SDB）是否需要**：需要代码级调试才做 §6 的 Unity 调试模式改造（部署耗时最久，非必需可跳过）。
+6. **Roslyn 前置包（`Mods\Roslyn`，packageId `UE.Roslyn`）**：C# 控制台的 Roslyn（C# 13）由它供货
+   （F1 起 UE 不再内置载荷）。缺它控制台自动降级 mcs —— 仍完全可用，只是没有 C# 13 语法。
+   - ⚠️ **不要**再把 `Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/roslyn/*.dll` 拷进
+     `<MOD>/UE_Data/sinai-dev-UnityExplorer/Roslyn/`：F1 前的部署步骤曾这么做，**该步骤已作废**
+     （UE 侧已不读该目录，且前置包自带一份 12.68 MB 载荷，拷贝只会造成两份并存）。
+   - 验收锚点（Player.log）：装了前置包 ⇒
+     `[CSConsole] Roslyn 扫描前加载完成（前置包 UE.Roslyn 供载荷 8/8，解析器已挂载）`；
+     没装 ⇒ `[CSConsole] 回退 mcs：前置包 UE.Roslyn 未安装或加载失败 …`（响亮，非静默）。
 
 ---
 

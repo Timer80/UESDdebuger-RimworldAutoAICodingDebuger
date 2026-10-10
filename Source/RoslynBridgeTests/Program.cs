@@ -21,6 +21,8 @@ namespace RoslynBridgeTests
         {
             if (args.Length > 0 && args[0] == "--success-path")
                 return RunSuccessPathInChild();
+            if (args.Length > 0 && args[0] == "--adopt-path")
+                return RunAdoptPathInChild();
             TestLoadOrder();
             TestLoadFailureDoesNotThrow();
             TestEnsureLoadedPathKeyedLatch();
@@ -46,6 +48,11 @@ namespace RoslynBridgeTests
             TestDiagnosticsDoNotLeakAcrossSubmissions();
             TestAnonymousTypeReadable();
             TestEvaluatorSelection();
+            // 任务 14（F1）：前置包反射门（缺席 ⇒ 响亮退回 mcs）+ 认领已载载荷 + 三态回退原因 + 零编译期引用
+            TestFrontGateMissingFrontPackage();
+            TestFrontGateAdoptLoadedPayload();
+            TestMcsFallbackReasonTexts();
+            TestFrontGateDeclaresNoCompilerReference();
             TestUsingPrimeEquivalence();
             // 复审修订轮（§18）
             TestMcsErrorCountingSemantics();
@@ -2871,6 +2878,415 @@ namespace RoslynBridgeTests
             Check("Submit 自愈后编译成功", sr.Success, sr.Diagnostics);
             Check("Submit LastHealLog 记录补引用", sessionS.LastHealLog.Contains("System.Xml"), sessionS.LastHealLog);
             Check("Submit ReferenceRevision>0", sessionS.ReferenceRevision > 0, "rev=" + sessionS.ReferenceRevision);
+        }
+
+        // ══════════════ 任务 14（F1）：前置包反射门 / 三态回退 / 零编译期引用 ══════════════
+
+        /// <summary>
+        /// 断言①（简报 §4.4-①）：**前置包缺席 ⇒ 反射门返回 false + failure 响亮非空 + 不抛**。
+        /// 四层都测：空集合取型 / 只有框架程序集的集合 / 注入"包没装"与"包在盘上未加载"两种候选路径 /
+        /// **真入口 TryEnsure**（真扫本进程 AppDomain）。真入口在测试进程里必然找不到前置包
+        /// （前置包程序集不在本进程），故不依赖本机是否装了 Mods\Roslyn。
+        /// </summary>
+        static void TestFrontGateMissingFrontPackage()
+        {
+            // ① 取型是纯函数：喂任意集合都不抛
+            try
+            {
+                Check("前置包门：空集合 → 找不到入口类型（null，不抛）",
+                    RoslynFrontGate.FindLoaderType(new System.Reflection.Assembly[0]) == null);
+                Check("前置包门：只有框架程序集的集合 → null（不抛）",
+                    RoslynFrontGate.FindLoaderType(new System.Reflection.Assembly[] { typeof(string).Assembly }) == null);
+                Check("前置包门：null 集合 → null（不抛）",
+                    RoslynFrontGate.FindLoaderType(null) == null);
+            }
+            catch (Exception e)
+            {
+                Check("前置包门：取型不抛异常", false, e.GetType().Name + ": " + e.Message);
+                return;
+            }
+
+            // ② 注入"未安装"（候选路径不存在）→ false + 响亮文本
+            string failure = null, source = "未赋值";
+            int count = -7;
+            bool ok = true;
+            try
+            {
+                ok = RoslynFrontGate.TryEnsureCore(new System.Reflection.Assembly[0],
+                    RoslynFrontGate.CandidateAssemblyPaths(@"Z:\c5\nomods"),
+                    out failure, out count, out source);
+            }
+            catch (Exception e)
+            {
+                Check("前置包门（缺席）：不抛异常", false, e.GetType().Name + ": " + e.Message);
+                return;
+            }
+            Check("前置包门（缺席）：返回 false", !ok);
+            Check("前置包门（缺席）：failure 响亮非空", !string.IsNullOrEmpty(failure), "failure=" + failure);
+            Check("前置包门（缺席）：failure 点名 packageId + 未安装/未加载",
+                failure != null && failure.Contains("UE.Roslyn") && failure.Contains("未安装或未加载"), failure);
+            Check("前置包门（缺席）：failure 给出可执行线索（未安装）",
+                failure != null && failure.Contains("未安装"), failure);
+            Check("前置包门（缺席）：件数 0、来源 null", count == 0 && source == null,
+                "count=" + count + " source=" + source);
+
+            // ③ 包在盘上但没被加载（候选路径指向真实存在的文件）⇒ 文本必须能分辨
+            string real = FindRealPayloadDir();
+            string existingFile = real == null ? null
+                : System.IO.Path.Combine(real, "Microsoft.CodeAnalysis.dll");
+            if (existingFile == null || !System.IO.File.Exists(existingFile))
+            {
+                Check("前置包门（盘上有包未加载）：找得到真实文件当反例", false, existingFile);
+            }
+            else
+            {
+                string f2; int c2; string s2;
+                bool ok2 = RoslynFrontGate.TryEnsureCore(new System.Reflection.Assembly[0],
+                    new string[] { existingFile }, out f2, out c2, out s2);
+                Check("前置包门（盘上有包未加载）：仍 false + 文本改为'已安装但未启用/未被加载'",
+                    !ok2 && f2 != null && f2.Contains("已安装但未启用"), f2);
+            }
+
+            // ④ 真入口：真扫本进程 AppDomain（测试进程里没有前置包程序集）
+            bool realOk = true;
+            string realFailure = null;
+            try { realOk = RoslynFrontGate.TryEnsure(out realFailure); }
+            catch (Exception e)
+            {
+                Check("前置包门（真入口）：不抛异常", false, e.GetType().Name + ": " + e.Message);
+                return;
+            }
+            Check("前置包门（真入口）：本进程无前置包 → false", !realOk);
+            Check("前置包门（真入口）：failure 响亮非空", !string.IsNullOrEmpty(realFailure), "failure=" + realFailure);
+            Check("前置包门（真入口）：Attempted=true（区分'没跑过'与'跑了但失败'）",
+                RoslynFrontGate.Attempted);
+            Check("前置包门（真入口）：幂等（二次调用同结论，不抛）",
+                RoslynFrontGate.TryEnsure(out realFailure) == false && realFailure != null);
+
+            // ⑤ UE 侧聚合入口：前置包缺席时 EnsureFrontPayload 必须响亮失败而不是抛（调用方据此退回 mcs）
+            string aggFailure = null;
+            bool aggOk = true;
+            try { aggOk = RoslynAssemblyLoader.EnsureFrontPayload(out aggFailure); }
+            catch (Exception e)
+            {
+                Check("前置包门（聚合入口）：不抛异常", false, e.GetType().Name + ": " + e.Message);
+                return;
+            }
+            Check("前置包门（聚合入口）：false + failure 点名前置包",
+                !aggOk && aggFailure != null && aggFailure.Contains("UE.Roslyn"), "failure=" + aggFailure);
+            Check("前置包门（聚合入口）：failure 明说'未安装或加载失败'",
+                aggFailure != null && aggFailure.Contains("未安装或加载失败"), aggFailure);
+        }
+
+        /// <summary>
+        /// 生产认领路径的行为断言（独立子进程：静态一次性状态必须与失败侧隔离，
+        /// 理由同 RunSuccessPathInChild）。子进程里**先自己 LoadFrom 8 件**（模拟前置包供货，
+        /// 不走 EnsureLoaded），再断言 AdoptLoadedPayload 认领成功 + 应答器挂上。
+        /// </summary>
+        static void TestFrontGateAdoptLoadedPayload()
+        {
+            RunChildMode("--adopt-path", "前置包供载荷认领（子进程）");
+        }
+
+        /// <summary>子进程模式 `--adopt-path`。</summary>
+        static int RunAdoptPathInChild()
+        {
+            string real = FindRealPayloadDir();
+            if (real == null)
+            {
+                Check("认领：找得到载荷目录（模拟前置包供货）", false, "未找到 lib\\roslyn");
+            }
+            else
+            {
+                string thrown = null;
+                try
+                {
+                    foreach (string file in RoslynAssemblyLoader.LoadOrder)
+                        System.Reflection.Assembly.LoadFrom(System.IO.Path.Combine(real, file));
+                }
+                catch (Exception e) { thrown = e.GetType().Name + ": " + e.Message; }
+                Check("认领：模拟前置包先把 8 件 LoadFrom 进 AppDomain", thrown == null, thrown);
+
+                string failure = null;
+                bool ok = false;
+                try { ok = RoslynAssemblyLoader.AdoptLoadedPayload(out failure); }
+                catch (Exception e) { failure = "抛异常：" + e.GetType().Name + ": " + e.Message; }
+                Check("认领：AdoptLoadedPayload==true（AppDomain 实测 8/8）", ok, failure);
+                Check("认领：映射 8 条（先填后挂）", PayloadMapCount() == 8, "count=" + PayloadMapCount());
+                Check("认领：LoadedPayloadCount==8", RoslynAssemblyLoader.LoadedPayloadCount == 8,
+                    "count=" + RoslynAssemblyLoader.LoadedPayloadCount);
+                Check("认领：应答器已挂载（ResolverInstalled）", RoslynAssemblyLoader.ResolverInstalled);
+                Check("认领：IsAvailable==true", RoslynAssemblyLoader.IsAvailable);
+                Check("认领：幂等（二次调用仍 true）",
+                    RoslynAssemblyLoader.AdoptLoadedPayload(out failure) && failure == null, failure);
+
+                object answered = InvokePayloadResolver(
+                    "Microsoft.CodeAnalysis, Version=4.14.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35");
+                Check("认领：应答器按简单名应答载荷（认领的实例真进了映射）",
+                    answered is System.Reflection.Assembly
+                    && ((System.Reflection.Assembly)answered).GetName().Name == "Microsoft.CodeAnalysis",
+                    answered == null ? "返回 null" : answered.ToString());
+            }
+
+            Console.WriteLine("COUNTS child_pass=" + passLines + " child_fail=" + failures);
+            Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
+            return failures == 0 ? 0 : 1;
+        }
+
+        /// <summary>
+        /// 断言③（简报 §4.4-③）：三种回退原因产生**三条互不相同**的日志文本，各自动点名原因。
+        /// 纯函数（EvaluatorSelector.DescribeMcsFallback）⇒ 离线可断言；ConsoleController 只喂 reason+detail。
+        /// </summary>
+        static void TestMcsFallbackReasonTexts()
+        {
+            string disabled = EvaluatorSelector.DescribeMcsFallback(McsFallbackReason.ConfigDisabled, null);
+            string noFront = EvaluatorSelector.DescribeMcsFallback(McsFallbackReason.FrontPackageUnavailable,
+                "前置包 UE.Roslyn 未安装或未加载（未在已载程序集中找到类型）");
+            string probe = EvaluatorSelector.DescribeMcsFallback(McsFallbackReason.ProbeFailed, "error CS5001");
+            string notCompiled = EvaluatorSelector.DescribeMcsFallback(McsFallbackReason.NotCompiledIn, null);
+
+            Check("三态回退：三条文本互不相同（配置关闭 / 前置包缺失 / 探针失败）",
+                disabled != noFront && disabled != probe && noFront != probe,
+                "disabled=" + disabled + " ｜ noFront=" + noFront + " ｜ probe=" + probe);
+            Check("三态回退：配置关闭态点名配置项", disabled.Contains("配置关闭 Roslyn"), disabled);
+            Check("三态回退：前置包缺失态点名 UE.Roslyn + 未安装或加载失败",
+                noFront.Contains("UE.Roslyn") && noFront.Contains("未安装或加载失败"), noFront);
+            Check("三态回退：前置包缺失态回显真因（禁静默）",
+                noFront.Contains("未在已载程序集中找到类型"), noFront);
+            Check("三态回退：探针失败态点名探针且带诊断",
+                probe.Contains("探针失败") && probe.Contains("CS5001"), probe);
+            Check("三态回退：四条互不相同（含'本配置未编入'）",
+                notCompiled != disabled && notCompiled != noFront && notCompiled != probe, notCompiled);
+            Check("三态回退：诊断为 null 时也非空（禁空串日志）",
+                EvaluatorSelector.DescribeMcsFallback(McsFallbackReason.FrontPackageUnavailable, null).Length > 0
+                && EvaluatorSelector.DescribeMcsFallback(McsFallbackReason.ProbeFailed, null).Length > 0);
+        }
+
+        /// <summary>
+        /// 断言②（简报 §4.4-②）+ 断言⑤（§4.4-5）：**零编译期引用前置包**、`lib/roslyn` 仍是唯一编译期来源。
+        /// 三面取证：源码面（去注释与字面量后扫入口类型 / 原始文本正则扫引用形态）+
+        /// 工程面（两个 csproj 的 Reference/HintPath/Private）+ 产物面（真 UE dll 的 AssemblyRef 集合）。
+        /// </summary>
+        static void TestFrontGateDeclaresNoCompilerReference()
+        {
+            string root = FindRepoRoot();
+            if (root == null)
+            {
+                Check("零编译期引用：找得到仓库根", false, "未找到 Source\\UE-4.9.0-official\\...\\RoslynFrontGate.cs");
+                return;
+            }
+
+            string bridgeDir = System.IO.Path.Combine(root,
+                @"Source\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge");
+            string[] files = new string[]
+            {
+                System.IO.Path.Combine(bridgeDir, "RoslynFrontGate.cs"),
+                System.IO.Path.Combine(bridgeDir, "RoslynAssemblyLoader.cs"),
+                System.IO.Path.Combine(bridgeDir, "RoslynPreScanLoader.cs"),
+                System.IO.Path.Combine(bridgeDir, "EvaluatorSelector.cs"),
+                System.IO.Path.Combine(root, @"Source\UE-4.9.0-official\UnityExplorer-4.9.0\src\CSConsole\ConsoleController.cs"),
+                System.IO.Path.Combine(root, @"Source\UE-4.9.0-official\UnityExplorer-4.9.0\src\ExplorerCore.cs"),
+            };
+
+            int scanned = 0, missing = 0, rawHits = 0, strippedHits = 0, usingHits = 0;
+            var detail = new System.Text.StringBuilder();
+            foreach (string f in files)
+            {
+                if (!System.IO.File.Exists(f)) { missing++; detail.AppendLine("缺文件：" + f); continue; }
+                scanned++;
+                string raw = System.IO.File.ReadAllText(f);
+                string stripped = StripSource(raw, keepLiterals: false);
+                // 注释不参与编译、字面量是惰性数据 ⇒ 判据跑在"去注释、留字面量"的文本上：
+                // 既不误报文档里写的反例（如 "using Roslyn;" 这句禁令），又能抓到
+                // `$"{Roslyn.RoslynLoader.X}"` 这类**藏在插值串洞里的真引用**。
+                string code = StripSource(raw, keepLiterals: true);
+                string name = System.IO.Path.GetFileName(f);
+                if (stripped.Contains("Roslyn.RoslynLoader")) { strippedHits++; detail.AppendLine(name + "：代码里出现入口类型引用"); }
+                if (System.Text.RegularExpressions.Regex.IsMatch(code, @"using\s+Roslyn\s*;")) { usingHits++; detail.AppendLine(name + "：using Roslyn;"); }
+                if (System.Text.RegularExpressions.Regex.IsMatch(code, @"Roslyn\.RoslynLoader\s*[\.\(]")
+                    || System.Text.RegularExpressions.Regex.IsMatch(code, @"(typeof|new)\s*\(\s*Roslyn\s*\."))
+                { rawHits++; detail.AppendLine(name + "：出现引用形态（成员访问/typeof/new）"); }
+            }
+
+            Check("零编译期引用（源码面）：六个改点/载体文件全部在场（扫 " + scanned + "）",
+                missing == 0, detail.ToString().TrimEnd());
+            Check("零编译期引用（源码面）：去注释与字面量后零 'Roslyn.RoslynLoader' 类型引用",
+                strippedHits == 0, detail.ToString().TrimEnd());
+            Check("零编译期引用（源码面）：原始文本零引用形态（含插值串洞）/零 'using Roslyn;'",
+                rawHits == 0 && usingHits == 0, detail.ToString().TrimEnd());
+            Check("零编译期引用（源码面）：入口名只以字符串常量形式存在",
+                System.IO.File.ReadAllText(System.IO.Path.Combine(bridgeDir, "RoslynFrontGate.cs"))
+                    .Contains("const string EntryTypeName = \"Roslyn.RoslynLoader\""));
+
+            // ── 工程面 ──
+            string ueCsproj = System.IO.Path.Combine(root,
+                @"Source\UE-4.9.0-official\UnityExplorer-4.9.0\src\UnityExplorer.csproj");
+            string testCsproj = System.IO.Path.Combine(root, @"Source\RoslynBridgeTests\RoslynBridgeTests.csproj");
+            string ueText = System.IO.File.Exists(ueCsproj) ? System.IO.File.ReadAllText(ueCsproj) : null;
+            string testText = System.IO.File.Exists(testCsproj) ? System.IO.File.ReadAllText(testCsproj) : null;
+
+            Check("零编译期引用（工程面）：产品 csproj 零 'Mods\\Roslyn' / 'Roslyn\\Assemblies' 引用",
+                ueText != null && !ueText.Contains(@"Mods\Roslyn") && !ueText.Contains(@"Roslyn\Assemblies"),
+                ueCsproj);
+            Check("零编译期引用（工程面）：测试 csproj 同上零前置包引用",
+                testText != null && !testText.Contains(@"Mods\Roslyn") && !testText.Contains(@"Roslyn\Assemblies"),
+                testCsproj);
+            Check("断言⑤：产品 csproj 的 8 件载荷 HintPath 全在 lib\\roslyn 且 Private=False（不进输出）",
+                ueText != null && System.Text.RegularExpressions.Regex.Matches(
+                    ueText, @"<HintPath>\.\.\\lib\\roslyn\\[^<]+</HintPath>\s*<Private>False</Private>").Count == 8,
+                "matches=" + (ueText == null ? -1 : System.Text.RegularExpressions.Regex.Matches(
+                    ueText, @"<HintPath>\.\.\\lib\\roslyn\\[^<]+</HintPath>\s*<Private>False</Private>").Count));
+            Check("断言⑤：测试 csproj 编译期来源也只有 lib\\roslyn（7 条：测试不引 System.Numerics.Vectors）",
+                testText != null
+                && System.Text.RegularExpressions.Regex.Matches(
+                    testText, @"<HintPath>\.\.\\UE-4\.9\.0-official\\UnityExplorer-4\.9\.0\\lib\\roslyn\\").Count == 7,
+                "matches=" + (testText == null ? -1 : System.Text.RegularExpressions.Regex.Matches(
+                    testText, @"<HintPath>\.\.\\UE-4\.9\.0-official\\UnityExplorer-4\.9\.0\\lib\\roslyn\\").Count));
+            Check("断言⑤：测试工程已 link 前置包门（否则本组断言根本没跑在交付代码上）",
+                testText != null && testText.Contains(@"RoslynBridge\RoslynFrontGate.cs"));
+
+            // ── 产物面（真 UE dll 的 AssemblyRef 集合）──
+            string ue = FindBuiltUeAssembly();
+            if (ue == null)
+            {
+                Check("零编译期引用（产物面）：找得到已构建 UE 程序集", false, "未找到 Release 产物");
+                return;
+            }
+
+            var comp = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create("frontGateScan",
+                null, new[] { Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(ue) });
+            var asm = comp.GetAssemblyOrModuleSymbol(comp.References.First()) as Microsoft.CodeAnalysis.IAssemblySymbol;
+            if (asm == null)
+            {
+                Check("零编译期引用（产物面）：能读到程序集符号", false, ue);
+                return;
+            }
+
+            var mod = asm.Modules.First();
+            var refNames = new System.Text.StringBuilder();
+            bool frontReferenced = false;
+            foreach (var r in mod.ReferencedAssemblySymbols)
+            {
+                refNames.Append(r.Identity.Name).Append(' ');
+                if (string.Equals(r.Identity.Name, "Roslyn", StringComparison.OrdinalIgnoreCase)) frontReferenced = true;
+            }
+            Check("零编译期引用（产物面）：UE 程序集没有名为 Roslyn 的 AssemblyRef（实际 " 
+                + mod.ReferencedAssemblySymbols.Length + " 条）", !frontReferenced, refNames.ToString());
+
+            // 交付代码真的在产物里（防止"源码改了但产物是旧的"这种假绿）
+            bool gateShipped = asm.GetTypeByMetadataName("UnityExplorer.RoslynBridge.RoslynFrontGate") != null;
+            bool shellShipped = asm.GetTypeByMetadataName("UnityExplorer.RoslynBridge.RoslynPreScanLoader") != null;
+            Check("零编译期引用（产物面）：前置包门与扫描前壳都在 STANDALONE 产物里", gateShipped && shellShipped,
+                "gate=" + gateShipped + " shell=" + shellShipped);
+        }
+
+        /// <summary>把子进程输出原样打印并**精确**计入 child 计数（口径同 S3：按行计）。</summary>
+        static void RunChildMode(string mode, string label)
+        {
+            string exe = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo(exe, mode)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                using (var p = System.Diagnostics.Process.Start(psi))
+                {
+                    string output = p.StandardOutput.ReadToEnd();
+                    string err = p.StandardError.ReadToEnd();
+                    p.WaitForExit();
+
+                    Console.WriteLine("--- 子进程输出开始（" + label + "） ---");
+                    Console.Write(output);
+                    if (!string.IsNullOrEmpty(err)) Console.WriteLine("[stderr] " + err);
+                    Console.WriteLine("--- 子进程输出结束（" + label + "） ---");
+
+                    int pFail = CountLines(output, "FAIL ");
+                    childPassLines += CountLines(output, "PASS ");
+                    childFailLines += pFail;
+                    Check(label + " 退出码=0", p.ExitCode == 0, "exit=" + p.ExitCode);
+                    Check(label + " 子进程零失败（FAIL 行数=" + pFail + "）", pFail == 0);
+                }
+            }
+            catch (Exception e)
+            {
+                Check(label + " 能启动", false, e.GetType().Name + ": " + e.Message);
+            }
+        }
+
+        /// <summary>仓库根（标记 = 新文件 RoslynFrontGate.cs；向上逐级找）。</summary>
+        static string FindRepoRoot()
+        {
+            var dir = new System.IO.DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
+            while (dir != null)
+            {
+                if (System.IO.File.Exists(System.IO.Path.Combine(dir.FullName,
+                        @"Source\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\RoslynFrontGate.cs")))
+                    return dir.FullName;
+                dir = dir.Parent;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 去掉注释（可选连字面量一起去掉）。判据分两档：**token 档**（去注释+去字面量，断言代码里没有
+        /// 入口类型引用）、**形态档**（去注释、留字面量，用正则抓 `using Roslyn;` / 成员访问 / typeof|new，
+        /// 连插值串洞里的引用也能抓到）。注释不参与编译，故文档里写反例（禁令本身）不算违规。
+        /// </summary>
+        static string StripSource(string src, bool keepLiterals)
+        {
+            var sb = new System.Text.StringBuilder(src.Length);
+            int i = 0;
+            while (i < src.Length)
+            {
+                char c = src[i];
+                if (c == '/' && i + 1 < src.Length && src[i + 1] == '/')
+                {
+                    while (i < src.Length && src[i] != '\n') i++;
+                }
+                else if (c == '/' && i + 1 < src.Length && src[i + 1] == '*')
+                {
+                    i += 2;
+                    while (i + 1 < src.Length && !(src[i] == '*' && src[i + 1] == '/')) i++;
+                    i = i + 1 < src.Length ? i + 2 : src.Length;
+                }
+                else if (c == '@' && i + 1 < src.Length && src[i + 1] == '"')
+                {
+                    int start = i;
+                    i += 2;
+                    while (i < src.Length)
+                    {
+                        if (src[i] == '"')
+                        {
+                            if (i + 1 < src.Length && src[i + 1] == '"') { i += 2; continue; }
+                            i++;
+                            break;
+                        }
+                        i++;
+                    }
+                    if (keepLiterals) sb.Append(src, start, i - start);
+                }
+                else if (c == '"')
+                {
+                    int start = i;
+                    i++;
+                    while (i < src.Length && src[i] != '"') { if (src[i] == '\\') i++; i++; }
+                    i++;
+                    if (keepLiterals) sb.Append(src, start, Math.Min(i, src.Length) - start);
+                }
+                else if (c == '\'')
+                {
+                    int start = i;
+                    i++;
+                    while (i < src.Length && src[i] != '\'') { if (src[i] == '\\') i++; i++; }
+                    i++;
+                    if (keepLiterals) sb.Append(src, start, Math.Min(i, src.Length) - start);
+                }
+                else { sb.Append(c); i++; }
+            }
+            return sb.ToString();
         }
 
         /// <summary>HookInstance 的离线替身（只承载描述所需的两个值；字段 string/bool，非载荷类型）。</summary>

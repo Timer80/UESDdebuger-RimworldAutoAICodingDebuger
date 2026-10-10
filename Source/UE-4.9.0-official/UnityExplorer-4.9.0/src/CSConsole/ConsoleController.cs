@@ -197,14 +197,14 @@ namespace UnityExplorer.CSConsole
                 if (!defaultUsings.Contains(use)) defaultUsings.Add(use);
 #endif
 
-            // 输入 ③：载荷是否就绪（只有真要走 Roslyn 时才付这个代价）
+            // 输入 ③：载荷是否就绪（只有真要走 Roslyn 时才付这个代价）。
+            // 任务 14（F1）：载荷由**前置包** UE.Roslyn 提供（UE 侧不再随包分发 8 件副本）⇒ 这里问的是
+            // 前置包，而不是某个目录。失败原因原样带进回退日志（禁静默）。
             bool payloadLoaded = false;
+            string payloadFailure = null;
 #if STANDALONE_MONO
             if (roslynCompiled && wantRoslyn)
-            {
-                string payloadDir = Path.Combine(ExplorerCore.ExplorerFolder, "Roslyn");
-                payloadLoaded = RoslynAssemblyLoader.EnsureLoaded(payloadDir);
-            }
+                payloadLoaded = RoslynAssemblyLoader.EnsureFrontPayload(out payloadFailure);
 #endif
 
             // 输入 ①②③ → 纯函数决策（追加 E：真值表离线可断言）
@@ -247,7 +247,7 @@ namespace UnityExplorer.CSConsole
                 // （离线测试工程只 link RoslynBridge 源码，直接调 ExplorerCore 会链接失败）⇒ 委托注入。
                 // 补全跑在**每次按键**路径上：异常必须降级成一条日志，而不是打断输入或静默消失。
                 RoslynCompletion.ReportDiagnostic = CompletionDiagnostics;
-                ExplorerCore.Log($"[CSConsole] Roslyn 求值器就绪（{report}）");
+                ExplorerCore.Log($"[CSConsole] Roslyn 求值器就绪（前置包 {RoslynFrontGate.FrontPackageId} 供载荷；{report}）");
 #endif
             }
             else
@@ -256,13 +256,19 @@ namespace UnityExplorer.CSConsole
                 {
                     InteractiveBaseClass = typeof(ScriptInteraction)
                 };
+                // 三态回退原因（任务 14 / F1，禁静默且必须可分辨）：
+                //   ① 前置包缺失/加载失败 ⇒ 自动降级 mcs（本节）；② 配置显式关闭；③ 探针失败（下文）。
+                // 文本一律来自 EvaluatorSelector.DescribeMcsFallback（纯函数，离线可断言三态互不相同）。
                 if (roslynCompiled && wantRoslyn && !payloadLoaded)
-                    ExplorerCore.LogWarning($"[CSConsole] 回退 mcs：{RoslynAssemblyLoader.FailureReason}");
+                    ExplorerCore.LogWarning(EvaluatorSelector.DescribeMcsFallback(
+                        McsFallbackReason.FrontPackageUnavailable, payloadFailure));
                 else if (roslynCompiled && !forceMcs)   // C2：仅配置显式关闭 Roslyn 时打此行；forceMcs 回退路径
                                                         // 由"Roslyn 探针失败，回退 mcs"行覆盖，此处静默以免误标。
-                    ExplorerCore.Log("[CSConsole] 使用 mcs 求值器（配置关闭 Roslyn）");
+                    ExplorerCore.Log(EvaluatorSelector.DescribeMcsFallback(
+                        McsFallbackReason.ConfigDisabled, null));
                 else if (!roslynCompiled)
-                    ExplorerCore.Log("[CSConsole] 使用 mcs 求值器（本配置未编入 Roslyn 实现）");
+                    ExplorerCore.Log(EvaluatorSelector.DescribeMcsFallback(
+                        McsFallbackReason.NotCompiledIn, null));
             }
 
             // ── 预置 using：Roslyn 侧一次校验编译（B4：旧路径 = 每项一次完整提交 + Assembly.Load），
@@ -293,8 +299,8 @@ namespace UnityExplorer.CSConsole
             EvaluatorChoice after = EvaluatorSelector.ChooseAfterProbe(choice, probeOk);
             if (after == EvaluatorChoice.Mcs && choice == EvaluatorChoice.Roslyn)
             {
-                ExplorerCore.LogWarning("[CSConsole] Roslyn 探针失败，回退 mcs："
-                    + (string.IsNullOrEmpty(probeDiag) ? "evaluator probe failed" : probeDiag));
+                ExplorerCore.LogWarning(EvaluatorSelector.DescribeMcsFallback(
+                    McsFallbackReason.ProbeFailed, probeDiag));
                 return ResetConsoleCore(logSuccess, forceMcs: true);   // 一次性回退，见方法注释
             }
             // R4（复审必修）：Disable **不再早退** —— 统一收尾（更新 UsingRoslyn + 打"求值器生效"行 +

@@ -9,6 +9,11 @@ namespace UnityExplorer.RoslynBridge
     /// 固定顺序加载 Roslyn 载荷。
     /// ⚠️ 顺序不可调换：System.Memory 先于 System.Numerics.Vectors 加载时，Mono 会缓存
     /// typeref 解析失败，之后补齐也无法恢复（需重启进程）。见可行性报告 §4.2。
+    /// <para><b>任务 14（计划 F1）：载荷来源改为前置包 <c>UE.Roslyn</c>。</b>UE 不再随包分发自己那份 8 件，
+    /// 交付路径走 <see cref="EnsureFrontPayload"/>（反射请前置包供载荷 → <see cref="AdoptLoadedPayload"/>
+    /// 认领 + 挂应答器）；<see cref="EnsureLoaded"/> 保留为**开发期/自测用底层原语**（从指定目录
+    /// LoadFrom），交付路径不再调用它（部署后 UE 侧已无 `UE_Data\...\Roslyn\` 目录）。
+    /// 本类的 `LoadOrder` / 应答器 / "先填后挂" / 失败门闩等机制不变。</para>
     /// ⚠️ 失败门闩**按路径键控**（追加 8 修订 1）：同一路径只试一次（Mono 会缓存失败的类型解析，
     /// 重试无益），但未试过且存在的**不同**路径允许一次新尝试——避免"壳类推导错一次即永久锁死 mcs"。
     /// ⚠️ 应答器应答面**收窄**（追加 8 修订 2）：只应答请求方是本 UE 或 8 件载荷（或请求方不可判定）
@@ -44,8 +49,10 @@ namespace UnityExplorer.RoslynBridge
         // LoadFolders 分出 `1.5/` 版本子目录时，UE 程序集目录的父目录**不是** mod 根），
         // 一次性锁就把 mcs 永久锁死，之后持正确路径的调用点（ExplorerCore.Init /
         // ConsoleController.ResetConsole）再也纠正不了。
-        // 线程安全（记录，非本轮修复项）：本集合只被 EnsureLoaded 触碰，而两个调用点都在主线程；
+        // 线程安全（记录，非本轮修复项）：本集合只被 EnsureLoaded 触碰，而调用点（壳类 cctor /
+        // ExplorerCore.Init / ConsoleController.ResetConsole）都在主线程；
         // 应答器从不回调 EnsureLoaded ⇒ check-then-act 无并发窗口。将来若加后台调用点须补锁。
+        // （AdoptLoadedPayload 同理：只在主线程改 s_available/映射。）
         static readonly HashSet<string> s_attemptedPaths =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -181,6 +188,100 @@ namespace UnityExplorer.RoslynBridge
                 s_available = false;
             }
             return s_available;
+        }
+
+        /// <summary>
+        /// **交付路径入口（任务 14 / F1）**：请前置包 <c>UE.Roslyn</c>（反射 + 字符串，零编译期引用）供载荷，
+        /// 成功则**认领**已载入 AppDomain 的 8 件并挂应答器。
+        /// 前置包缺席/未启用/加载失败 ⇒ **响亮失败**（failure 非空），调用方据此干净退回 mcs；永不抛。
+        /// 与 <c>EnsureLoaded(dir)</c>（开发期/自测用底层原语：从指定目录 LoadFrom）互不干扰——载荷只加载
+        /// 一次，两条路谁先成功谁生效（<c>s_available</c> 短路）。
+        /// </summary>
+        public static bool EnsureFrontPayload(out string failure)
+        {
+            if (s_available) { failure = null; return true; }
+
+            string frontFailure;
+            if (!RoslynFrontGate.TryEnsure(out frontFailure))
+            {
+                s_failure = "前置包 " + RoslynFrontGate.FrontPackageId + " 未安装或加载失败：" + frontFailure;
+                failure = s_failure;
+                return false;
+            }
+
+            return AdoptLoadedPayload(out failure);
+        }
+
+        /// <summary>
+        /// 认领「已由前置包按自身加载顺序 LoadFrom 进 AppDomain」的 8 件载荷：填映射 → 挂应答器。
+        /// 判据是 **AppDomain 实测**（不信任任何自报件数）：8 件齐才挂，缺一件即响亮失败且**不**挂
+        /// （"先填后挂、无部分装载态"不变）。
+        /// ⚠️ 应答器仍归 UE：前置包只 LoadFrom、**不**挂 AssemblyResolve（其源码无该处理器，已核实），
+        /// 而"GetFields 绑定缺应答方 ⇒ VM 直接挂死"是 UE 自己程序集的风险（peer mono 调试桥实测）。
+        /// </summary>
+        public static bool AdoptLoadedPayload(out string failure)
+        {
+            if (s_available) { failure = null; return true; }
+
+            Dictionary<string, Assembly> found =
+                new Dictionary<string, Assembly>(StringComparer.OrdinalIgnoreCase);
+            Assembly[] loaded;
+            try { loaded = AppDomain.CurrentDomain.GetAssemblies(); }
+            catch (Exception ex)
+            {
+                s_failure = "认领已载载荷失败（枚举 AppDomain 异常）：" + ex.GetType().Name + ": " + ex.Message;
+                failure = s_failure;
+                return false;
+            }
+
+            foreach (Assembly a in loaded)
+            {
+                string name = SimpleNameOf(a);
+                if (name == null || !PayloadSimpleNameSet.Contains(name)) continue;
+                if (!found.ContainsKey(name)) found[name] = a;
+            }
+
+            if (found.Count < LoadOrder.Length)
+            {
+                s_failure = "前置包 " + RoslynFrontGate.FrontPackageId + " 已加载，但 AppDomain 里载荷不全："
+                    + found.Count + "/" + LoadOrder.Length + "（缺失：" + DescribeMissingPayload(found) + "）";
+                failure = s_failure;
+                return false;
+            }
+
+            PayloadAssembliesByName.Clear();
+            foreach (KeyValuePair<string, Assembly> kv in found)
+                PayloadAssembliesByName[kv.Key] = kv.Value;
+
+            AppDomain.CurrentDomain.AssemblyResolve -= PayloadResolveHandler;
+            AppDomain.CurrentDomain.AssemblyResolve += PayloadResolveHandler;
+            s_resolverInstalled = true;
+            s_available = true;
+            s_failure = null;
+            failure = null;
+            return true;
+        }
+
+        static string SimpleNameOf(Assembly assembly)
+        {
+            if (assembly == null) return null;
+            try { return assembly.GetName().Name; }
+            catch { return null; }
+        }
+
+        /// <summary>缺失载荷清单（诊断；用文件名口径，与 LoadOrder 一致）。</summary>
+        static string DescribeMissingPayload(Dictionary<string, Assembly> found)
+        {
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            foreach (string file in LoadOrder)
+            {
+                string simple = file.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+                    ? file.Substring(0, file.Length - 4) : file;
+                if (found.ContainsKey(simple)) continue;
+                if (sb.Length > 0) sb.Append("、");
+                sb.Append(file);
+            }
+            return sb.Length == 0 ? "<无>" : sb.ToString();
         }
     }
 }

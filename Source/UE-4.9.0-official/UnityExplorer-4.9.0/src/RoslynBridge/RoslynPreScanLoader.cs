@@ -48,7 +48,8 @@ namespace UnityExplorer.RoslynBridge
                 if (ok && mapped == expected && resolver)
                 {
                     string msg = "[CSConsole] Roslyn 扫描前加载完成（前置包 " + RoslynFrontGate.FrontPackageId
-                        + " 供载荷 " + mapped + "/" + expected + "，解析器已挂载）";
+                        + " 供载荷 " + mapped + "/" + expected + "，供体程序集=" 
+                        + (RoslynFrontGate.SourcePath ?? "<未定位>") + "，解析器已挂载）";
                     Verse.Log.Message(msg);
                     LogToExplorerPanel(msg, false);
                 }

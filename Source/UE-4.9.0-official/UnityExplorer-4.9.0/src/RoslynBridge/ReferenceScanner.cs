@@ -31,10 +31,6 @@ namespace UnityExplorer.RoslynBridge
         /// <summary>报告分母（`refs: small=&lt;n&gt;/22 total=&lt;m&gt;`）。</summary>
         public const int ExpectedProfileCount = ReferenceProfile.ExpectedProfileCount;
 
-        /// <summary>本体根目录（实测 Application.dataPath == &lt;game&gt;/RimWorldWin64_Data）。</summary>
-        public static string GameRootOfThisProcess()
-            => Path.GetDirectoryName(UnityEngine.Application.dataPath);
-
         /// <summary>本体 Managed 目录（实测存在且 106 个 dll 齐全）。</summary>
         public static string ManagedDir()
             => Path.Combine(UnityEngine.Application.dataPath, "Managed");

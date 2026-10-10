@@ -485,18 +485,6 @@ namespace UnityExplorer.RoslynBridge
             return best == null || string.IsNullOrEmpty(best.Path) ? group[0] : best.Path;
         }
 
-        /// <summary>只读元数据取身份（版本+公钥标记）；取不到 → "&lt;未知&gt;"。**只读，不加载程序集**。
-        /// 任务 15d：实现收敛到 <see cref="SameStemChoice.IdentityOfFile"/>（两路同一份身份口径）。</summary>
-        static string IdentityOf(string path)
-        {
-            return SameStemChoice.IdentityOfFile(path);
-        }
-
-        static bool SamePath(string a, string b)
-        {
-            return SameStemChoice.SamePath(a, b);
-        }
-
         // ───────────────────────── 身份/路径小工具 ─────────────────────────
 
         static bool IdentityEquals(AssemblyName an, string version, string culture, string pkt)

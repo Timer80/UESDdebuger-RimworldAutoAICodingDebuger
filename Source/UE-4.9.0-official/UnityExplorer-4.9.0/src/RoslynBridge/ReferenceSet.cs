@@ -1,8 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Reflection;
-using System.Text;
 
 namespace UnityExplorer.RoslynBridge
 {
@@ -25,9 +22,6 @@ namespace UnityExplorer.RoslynBridge
         public bool Contains(string simpleName)
             => !string.IsNullOrEmpty(simpleName) && s_names.Contains(simpleName);
 
-        /// <summary>已收录的 simple name 快照（顺序无关，供诊断/测试打印）。</summary>
-        public ICollection<string> SimpleNames => s_names;
-
         public bool TryAdd(string location, string simpleName, string blacklist)
         {
             if (string.IsNullOrEmpty(location)) return false;
@@ -39,14 +33,14 @@ namespace UnityExplorer.RoslynBridge
             {
                 string kept;
                 s_pathByName.TryGetValue(simpleName, out kept);
-                if (!SameFile(kept, location))
+                if (!SameStemChoice.SamePath(kept, location))
                 {
                     Action<string> sink = ReportSink;
                     if (sink != null)
                     {
                         sink("引用集去重（保留先到者）：名字=" + simpleName
-                            + " 保留=" + (kept ?? "<未知>") + " 身份=" + IdentityOf(kept)
-                            + " 丢弃=" + location + " 身份=" + IdentityOf(location)
+                            + " 保留=" + (kept ?? "<未知>") + " 身份=" + SameStemChoice.IdentityOfFile(kept)
+                            + " 丢弃=" + location + " 身份=" + SameStemChoice.IdentityOfFile(location)
                             + " 原因=同一编译内同简单名只能有一个版本（Roslyn CS1704）；"
                             + "若需换用新版本，请调整加载顺序/黑名单或先卸载旧版本");
                     }
@@ -57,35 +51,6 @@ namespace UnityExplorer.RoslynBridge
             s_pathByName[simpleName] = location;
             s_paths.Add(location);
             return true;
-        }
-
-        /// <summary>只读元数据取身份（版本+公钥标记）；取不到就返回"&lt;未知&gt;"——**只读**，不加载程序集。</summary>
-        static string IdentityOf(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return "<未知>";
-            try
-            {
-                AssemblyName an = AssemblyName.GetAssemblyName(path);
-                if (an == null) return "<未知>";
-                string v = an.Version == null ? "<无版本>" : an.Version.ToString();
-                byte[] pkt = an.GetPublicKeyToken();
-                string token = "<无标记>";
-                if (pkt != null && pkt.Length > 0)
-                {
-                    var sb = new StringBuilder(pkt.Length * 2);
-                    for (int i = 0; i < pkt.Length; i++) sb.Append(pkt[i].ToString("x2"));
-                    token = sb.ToString();
-                }
-                return "Version=" + v + ", PKT=" + token;
-            }
-            catch { return "<未知>"; }
-        }
-
-        static bool SameFile(string a, string b)
-        {
-            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
-            try { return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase); }
-            catch { return string.Equals(a, b, StringComparison.OrdinalIgnoreCase); }
         }
 
         public static bool IsBlacklisted(string simpleName, string blacklist)

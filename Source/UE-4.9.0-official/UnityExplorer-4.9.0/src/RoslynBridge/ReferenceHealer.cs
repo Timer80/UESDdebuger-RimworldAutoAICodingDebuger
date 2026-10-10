@@ -373,10 +373,14 @@ namespace UnityExplorer.RoslynBridge
             return dirs;
         }
 
-        /// <summary>只读元数据判断该 dll 是否定义了命名空间 ns（Roslyn 读程序集符号，不加载程序集）。
-        /// **"存在命名空间节点"不等于"提供该命名空间的类型"**：类型转发会让节点凭空存在
-        /// （System.dll 转发 Microsoft.CSharp.* ⇒ 节点在、类型不在）⇒ 必须再要求该命名空间下
-        /// **至少有一个由本程序集定义的类型**，否则会误配出"引用了不提供目标类型的程序集"（假自愈）。
+        /// <summary>只读元数据判断该 dll 是否**声明**了命名空间 ns（Roslyn 读程序集符号，不加载程序集）。
+        /// 判据 = 命名空间节点存在（<b>不</b>校验"该命名空间下至少有一个由本程序集定义的类型"）。
+        /// 为什么不做更严的校验：①实测 `System.dll` **真声明** `Microsoft.CSharp.CSharpCodeProvider`
+        /// （不是类型转发），所以"含该命名空间"本就有多个合法 provider，严校验也区分不出"诊断要哪一个"；
+        /// ②曾按"须有本程序集定义的类型"（`SymbolEqualityComparer`）实现，实测把**合法匹配也判否**
+        /// （`Microsoft.CSharp.dll` 被拒 ⇒ 测试 ④ ON 反而失败）⇒ 已回退。
+        /// 真正的防线在上层：**同名程序集优先**（`stemDeclares`，文件名==命名空间者不被其它 provider 顶替）
+        /// + **无效自愈回滚**（加入后诊断无变化即撤回，见 `ReplSession.Submit`/`CompileWithHealing`）。
         /// 载荷类型只作局部，无 lambda/迭代器捕获（C.5）。</summary>
         static bool DefinesNamespace(string dllPath, string ns)
         {

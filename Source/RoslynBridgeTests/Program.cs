@@ -74,6 +74,7 @@ namespace RoslynBridgeTests
             TestHealRollbackOnNoEffect();
             TestReferenceSetDedupeLog();
             TestRollbackLeavesNoSideEffects();
+            TestSameStemAdoptionDisclosure();
             TestHealReplIntegration();
             // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
             // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
@@ -2734,6 +2735,42 @@ namespace RoslynBridgeTests
                 "len " + usingsBefore.Length + " -> " + s.GetUsing().Length);
             Check("④ 回滚后引用集未增长", s.ReferencePaths.Count == refsBefore,
                 "before=" + refsBefore + " after=" + s.ReferencePaths.Count);
+        }
+
+        /// <summary>任务 13 §4.10-2（**上机 13-10 抓到的缺口**）：命名空间通道从"同简单名多份"里取件时
+        /// **必须披露采用哪一份**——旧码这一路**零日志**，所以"补上了"根本不告诉你补的是哪一版
+        ///（正是 dll 热重载"新版静默不生效"的病根）。用**仓库内两份同简单名、不同版本**的
+        /// `0Harmony.dll`（`Source\UELoader\lib` = 2.3.3.0 ／ `UnityEditorPackage\Runtime` = 2.5.2.0）
+        /// 驱动纯判定函数；同身份副本必须**不报**（零噪声）。</summary>
+        static void TestSameStemAdoptionDisclosure()
+        {
+            var d = new System.IO.DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
+            string root = null;
+            while (d != null)
+            {
+                if (System.IO.Directory.Exists(System.IO.Path.Combine(d.FullName, "Source"))) { root = d.FullName; break; }
+                d = d.Parent;
+            }
+            string a = root == null ? null : System.IO.Path.Combine(root, @"Source\UELoader\lib\0Harmony.dll");
+            string b = root == null ? null : System.IO.Path.Combine(root,
+                @"Source\UE-4.9.0-official\UnityExplorer-4.9.0\UnityEditorPackage\Runtime\0Harmony.dll");
+            bool pre = a != null && System.IO.File.Exists(a) && System.IO.File.Exists(b);
+            Check("⑪ 前置：两份同简单名不同版本 0Harmony.dll 都在", pre,
+                (a ?? "<null>") + " | " + (b ?? "<null>"));
+            if (!pre) return;
+
+            var one = new System.Collections.Generic.List<string> { a };
+            Check("⑪ 池内只有一份 ⇒ 不报警（零噪声）",
+                ReferenceHealer.DescribeSameStemChoices(a, one) == null, "非 null（不该报警）");
+
+            var two = new System.Collections.Generic.List<string> { a, b };
+            string msg = ReferenceHealer.DescribeSameStemChoices(a, two);
+            Check("⑪ 同简单名**身份不同** ⇒ 必披露「采用 / 未采用 / 原因」",
+                msg != null && msg.Contains("采用=") && msg.Contains("未采用") && msg.Contains("原因="),
+                msg ?? "<null>");
+            Check("⑪ 披露文本含两份路径与各自版本（采用哪版可观测）",
+                msg != null && msg.Contains("0Harmony.dll") && msg.Contains("2.3.3") && msg.Contains("2.5.2"),
+                msg ?? "<null>");
         }
 
         static void TestHealCapMessage()

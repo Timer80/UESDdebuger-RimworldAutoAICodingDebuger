@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
@@ -328,6 +329,7 @@ namespace UnityExplorer.RoslynBridge
                     if (!DefinesNamespace(p, prefix)) continue;
                     stemDeclares = true;
                     if (!allowMod && IsModPath(p, modPaths)) { blockedAtPrefix = true; continue; }
+                    ReportSameStemChoices(p, pool);
                     s_nsCache[genKey + prefix] = p;
                     return p;
                 }
@@ -339,6 +341,7 @@ namespace UnityExplorer.RoslynBridge
                         if (ContainsPath(currentRefs, p)) continue;
                         if (!DefinesNamespace(p, prefix)) continue;
                         if (!allowMod && IsModPath(p, modPaths)) { blockedAtPrefix = true; continue; }
+                        ReportSameStemChoices(p, pool);
                         s_nsCache[genKey + prefix] = p;
                         return p;
                     }
@@ -404,6 +407,71 @@ namespace UnityExplorer.RoslynBridge
                 return true;   // 命名空间节点存在即算"定义"（转发/同名多provider 的区分交给上层"同名程序集优先"规则）
             }
             catch { return false; }
+        }
+
+        // ───────────────────────── 同简单名多份的**采用披露**（§4.10-2） ─────────────────────────
+
+        void ReportSameStemChoices(string chosen, List<string> pool)
+        {
+            string msg = DescribeSameStemChoices(chosen, pool);
+            if (msg != null) Report(msg);
+        }
+
+        /// <summary>**命名空间通道的采用披露**（上机 13-10 抓到的缺口）：命名空间通道只按池内**首个**命中
+        /// 取件，若池内还有**同简单名但身份不同**的候选（典型=同一个 dll 的两个版本），必须说清
+        /// "采用谁 / 另有哪些 / 为什么" —— 否则日志里的"补上了"根本没告诉你补的是哪一版，
+        /// 这正是 dll 热重载场景"新版静默不生效"的病根（§4.10）。
+        /// 返回 null = 无同简单名多身份（**常态，零噪声**：同身份副本不报）。公开静态 ⇒ 可离线断言。</summary>
+        public static string DescribeSameStemChoices(string chosen, IList<string> pool)
+        {
+            if (string.IsNullOrEmpty(chosen) || pool == null) return null;
+            string stem = FileNameStem(chosen);
+            if (string.IsNullOrEmpty(stem)) return null;
+            string chosenId = IdentityOf(chosen);
+            List<string> others = null;
+            foreach (string q in pool)
+            {
+                if (string.IsNullOrEmpty(q) || SamePath(q, chosen)) continue;
+                if (!string.Equals(FileNameStem(q), stem, StringComparison.OrdinalIgnoreCase)) continue;
+                string id = IdentityOf(q);
+                if (string.Equals(id, chosenId, StringComparison.OrdinalIgnoreCase)) continue;   // 同身份副本：无歧义
+                if (others == null) others = new List<string>();
+                others.Add(q + "（身份=" + id + "）");
+            }
+            if (others == null) return null;
+            return "命名空间通道采用披露：候选池里同简单名 '" + stem + "' 有 **身份不同** 的多份 ⇒ 采用="
+                + chosen + "（身份=" + chosenId + "）；未采用 " + others.Count + " 份："
+                + string.Join("；", others.ToArray())
+                + "。原因=命名空间通道按池内首个命中取件（同一编译内同简单名只能引用一份，故不把多版本当等价）";
+        }
+
+        /// <summary>只读元数据取身份（版本+公钥标记）；取不到 → "&lt;未知&gt;"。**只读，不加载程序集**。</summary>
+        static string IdentityOf(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return "<未知>";
+            try
+            {
+                AssemblyName an = AssemblyName.GetAssemblyName(path);
+                if (an == null) return "<未知>";
+                string v = an.Version == null ? "<无版本>" : an.Version.ToString();
+                byte[] pkt = an.GetPublicKeyToken();
+                string token = "<无标记>";
+                if (pkt != null && pkt.Length > 0)
+                {
+                    var sb = new StringBuilder(pkt.Length * 2);
+                    for (int i = 0; i < pkt.Length; i++) sb.Append(pkt[i].ToString("x2"));
+                    token = sb.ToString();
+                }
+                return "Version=" + v + ", PKT=" + token;
+            }
+            catch { return "<未知>"; }
+        }
+
+        static bool SamePath(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
+            try { return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase); }
+            catch { return string.Equals(a, b, StringComparison.OrdinalIgnoreCase); }
         }
 
         // ───────────────────────── 身份/路径小工具 ─────────────────────────

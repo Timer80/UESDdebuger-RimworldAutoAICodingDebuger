@@ -278,9 +278,16 @@ namespace UnityExplorer.RoslynBridge
                     if (seen.Add(p)) pool.Add(p);
                 }
 
-            // 缓存键按"池代际"（currentRefs 数 / 开关 / 模组路径数）：池按 §4.1 每次现算，
-            // 跨代际复用正缓存会返回"上一代池里的最佳解"（顶替成无关程序集）。
+            // 缓存键 = **池内容指纹**（不是计数！）：微审实测指出"计数相同但内容不同"（卸 ModA 装 ModB、
+            // 引用集数量不变而内容换血）会命中上一代的解 —— 正向静默返回无关程序集、负向把本次已有解判成无解。
+            // 指纹取"本代际现算池的全部路径 + 开关 + 引用集数"的滚动哈希；命中分支另有 pool.Contains 成员校验。
             int gen = currentRefs.Count * 7919 + (allowMod ? 131 : 0) + (modPaths == null ? 0 : modPaths.Count);
+            int ph = 17;
+            foreach (string p in pool)
+            {
+                ph = ph * 31 + (p == null ? 0 : p.GetHashCode());
+            }
+            gen = gen * 31 + ph;
             string genKey = "#" + gen + "|";
 
             foreach (string prefix in prefixes)
@@ -302,7 +309,10 @@ namespace UnityExplorer.RoslynBridge
                 {
                     bool ok;
                     try { ok = File.Exists(cached); } catch { ok = false; }
-                    if (ok && !ContainsPath(currentRefs, cached) && GatePass(cached, modPaths, allowMod))
+                    // pool.Contains 是"仍是本代际候选"的证据（微审指出：File.Exists/GatePass 只证明缓存值自身，
+                    // 文件还在但已不是正确解正好落在盲区）。
+                    if (ok && pool.Contains(cached) && !ContainsPath(currentRefs, cached)
+                        && GatePass(cached, modPaths, allowMod))
                         return cached;
                 }
                 else if (cachedFound)

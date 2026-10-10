@@ -416,11 +416,8 @@ namespace UnityExplorer.RoslynBridge
                     string add = s_healer.Resolve(result.Diagnostics, s_referencePaths);
                     if (add == null) break;                       // 解析不出来：原样返回诊断（原因已响亮）
                     if (ContainsReferencePath(add)) break;        // 防御：已在引用集里（补了也没用）
+                    string diagBefore = result.Diagnostics;
                     s_referencePaths.Add(add);
-                    healed++;
-                    string line = "自愈补引用：" + Path.GetFileName(add);
-                    LastHealLog += line + Environment.NewLine;
-                    if (sink != null) sink(line);
                     OnReferenceAdded();
                     srcText = BuildSubmissionSource(className, baseName, fields, statements, lastExpr,
                         assignValue: lastExpr != null, pendingUsings: pendingUsings, classesSource: classes,
@@ -428,6 +425,22 @@ namespace UnityExplorer.RoslynBridge
                     metadataRefs = BuildReferences();
                     compilation = CreateSubmissionCompilation(srcText, asmName, metadataRefs, out generatedTree);
                     result = EmitOnce(compilation, srcText, notes, out firstDiag);
+                    // 无效自愈回滚（微审①：本循环原不校验"加入后诊断是否改善"⇒ 可连加满 5 个"只碰巧定义
+                    // 该前缀命名空间"的 dll 并**永久**留在会话引用集）。判据 = 诊断文本**完全未变**
+                    //（保守：不误伤"修好一个又暴露一个"的合法级联——那类情况诊断必变）。
+                    if (!result.Success && string.Equals(result.Diagnostics, diagBefore, StringComparison.Ordinal))
+                    {
+                        s_referencePaths.RemoveAt(s_referencePaths.Count - 1);
+                        string back = "自愈回滚：" + Path.GetFileName(add)
+                            + " 加入后诊断无任何变化（判为无关引用，已从会话引用集撤回）";
+                        LastHealLog += back + Environment.NewLine;
+                        if (sink != null) sink(back);
+                        break;
+                    }
+                    healed++;
+                    string line = "自愈补引用：" + Path.GetFileName(add);
+                    LastHealLog += line + Environment.NewLine;
+                    if (sink != null) sink(line);
                 }
                 if (!result.Success && healed >= 5)
                 {

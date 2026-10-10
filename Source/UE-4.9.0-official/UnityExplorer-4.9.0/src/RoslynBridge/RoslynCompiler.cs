@@ -94,11 +94,26 @@ namespace UnityExplorer.RoslynBridge
                 string add = healer == null ? null : healer.Resolve(r.Diagnostics, referencePaths);
                 if (add == null) break;                  // 解析不出来：原样返回诊断（原因已响亮）
                 if (ContainsPath(referencePaths, add)) break;   // 防御：已在引用集里（补了也没用）
+                string diagBefore = r.Diagnostics;
                 referencePaths.Add(add);
-                healed++;
-                healLog += "自愈补引用：" + Path.GetFileName(add) + Environment.NewLine;
                 if (session != null) session.OnReferenceAdded();
                 r = Compile(assemblyName, source, referencePaths, includePolyfills);
+                // 无效自愈回滚（与 Submit 同判据，微审①）：诊断文本完全未变 ⇒ 该引用无关，撤回。
+                if (!r.Success && string.Equals(r.Diagnostics, diagBefore, StringComparison.Ordinal))
+                {
+                    referencePaths.RemoveAt(referencePaths.Count - 1);
+                    string back = "自愈回滚：" + Path.GetFileName(add)
+                        + " 加入后诊断无任何变化（判为无关引用，已撤回）";
+                    healLog += back + Environment.NewLine;
+                    if (healer != null)
+                    {
+                        Action<string> bsink = healer.ReportSink;
+                        if (bsink != null) bsink(back);
+                    }
+                    break;
+                }
+                healed++;
+                healLog += "自愈补引用：" + Path.GetFileName(add) + Environment.NewLine;
             }
             if (!r.Success && healed >= 5)
             {

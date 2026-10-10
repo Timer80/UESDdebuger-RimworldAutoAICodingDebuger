@@ -71,6 +71,7 @@ namespace RoslynBridgeTests
             TestHealerByNamespace();
             TestHealerRefusalsAndSwitch();
             TestHealCapMessage();
+            TestHealRollbackOnNoEffect();
             TestHealReplIntegration();
             // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
             // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
@@ -2647,6 +2648,27 @@ namespace RoslynBridgeTests
         }
 
         /// <summary>定稿测试②：≥6 个缺引用（框架目录取材，不造临时文件）⇒ 5 轮到顶必须打文案、不静默截断。</summary>
+        /// <summary>任务 13（微审①修复）：**无关引用必须回滚**——加入后诊断文本完全未变即判无效并撤回，
+        /// 防引用集被"只碰巧定义该前缀命名空间"的 dll 永久污染（自愈循环原不校验改善）。驱动方式：
+        /// 源码用 `System.Foo`（System 命名空间里不存在的成员）⇒ CS0234 'Foo' in 'System' ⇒
+        /// 命名空间通道退到前缀 `System` 并命中 System.dll，但该引用**不能**消除 CS0234 ⇒ 必须回滚。</summary>
+        static void TestHealRollbackOnNoEffect()
+        {
+            string searchDir = System.IO.Path.GetDirectoryName(typeof(object).Assembly.Location);
+            var healer = new ReferenceHealer(new[] { searchDir });
+            healer.ReportSink = HealSinkCapture;
+            healer.AllowModTypeResolution = false;
+            s_healSink.Clear();
+            var refs = new System.Collections.Generic.List<string> { typeof(object).Assembly.Location };
+            int before = refs.Count;
+            string log;
+            var rr = RoslynCompiler.CompileWithHealing("HealRollbackProbe",
+                "public class HRollback { public static void M() { System.Foo x; } }", refs, false, healer, out log);
+            Check("⑦ 无关自愈被回滚（日志含『自愈回滚』）", log.Contains("自愈回滚"), log);
+            Check("⑦ 回滚后引用集未增长", refs.Count == before, "before=" + before + " after=" + refs.Count);
+            Check("⑦ 回滚后仍未成功（不得假装修好）", !rr.Success, rr.Success ? "意外成功" : "失败（预期）");
+        }
+
         static void TestHealCapMessage()
         {
             string searchDir = System.IO.Path.GetDirectoryName(typeof(object).Assembly.Location);

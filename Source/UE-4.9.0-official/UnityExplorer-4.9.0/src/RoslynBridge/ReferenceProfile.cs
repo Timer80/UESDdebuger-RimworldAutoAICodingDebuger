@@ -118,10 +118,17 @@ namespace UnityExplorer.RoslynBridge
             if (self == 0)
                 report += "；⚠ 宿主自引用缺失（selfAssemblyPath=" + (selfAssemblyPath ?? "<不可判定>")
                     + "）→ 提交类继承 `ReplHostBase` 会 CS0246、REPL 助手不可用";
-            // §4.10-2：去重一律随报告出现（防"新版静默不生效"——dll 热重载场景的病根）
+            // §4.10-2：去重一律随报告出现（防"新版静默不生效"——dll 热重载场景的病根）。
+            // 微审④低危：条目数没有天然上限，报告串要**截断**（前 3 条 + 总数），避免整串写进日志过长。
             if (dedupe.Count > 0)
+            {
+                const int shown = 3;
+                var head = new List<string>();
+                for (int i = 0; i < dedupe.Count && i < shown; i++) head.Add(dedupe[i]);
                 report += "；⚠ 引用集去重 " + dedupe.Count + " 例（同简单名只保留先到者、已结构化登记）："
-                    + string.Join(" | ", dedupe.ToArray());
+                    + string.Join(" | ", head.ToArray())
+                    + (dedupe.Count > shown ? " …（仅示前 " + shown + " 例）" : "");
+            }
 
             return set;
         }

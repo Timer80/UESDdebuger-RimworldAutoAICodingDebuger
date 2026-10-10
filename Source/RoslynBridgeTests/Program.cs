@@ -73,6 +73,7 @@ namespace RoslynBridgeTests
             TestHealCapMessage();
             TestHealRollbackOnNoEffect();
             TestReferenceSetDedupeLog();
+            TestRollbackLeavesNoSideEffects();
             TestHealReplIntegration();
             // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
             // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
@@ -2701,6 +2702,38 @@ namespace RoslynBridgeTests
             bool again = set.TryAdd(a, "System", null);
             Check("⑩ 同路径重复加入不再报（去重日志只针对**不同**路径）",
                 !again && log.Count == 0, "again=" + again + " logN=" + log.Count);
+        }
+
+        /// <summary>任务 13（微审④中危修复）：**回滚不得留下副作用**——旧码在"判有效性"之前就调了
+        /// OnReferenceAdded（`ReferenceRevision++` + 默认 using 落账），一旦撤回引用就会留下**悬空 using**
+        ///（引用的程序集没了、`using X;` 还在 ⇒ 之后每次提交都 CS0234/CS0246）。
+        /// 本用例走 **Submit 的真实自愈轮**：引用集只给 mscorlib（⇒ System.dll 可被自愈加入），
+        /// 源码 `System.Foo x;`（System 下不存在的成员）⇒ 补 System.dll → 诊断逐字未变 → 必须回滚，
+        /// 且修订计数 / using 集 / 引用集长度三者**均不变**。</summary>
+        static void TestRollbackLeavesNoSideEffects()
+        {
+            string fw = System.IO.Path.GetDirectoryName(typeof(object).Assembly.Location);
+            var healer = new ReferenceHealer(new[] { fw });
+            healer.ReportSink = HealSinkCapture;
+            healer.AllowModTypeResolution = false;
+            s_healSink.Clear();
+            var refs = new System.Collections.Generic.List<string> { typeof(object).Assembly.Location };
+            var s = new ReplSession(refs, null, healer);
+            int revBefore = s.ReferenceRevision;
+            string usingsBefore = s.GetUsing();
+            int refsBefore = s.ReferencePaths.Count;
+            var r = s.Submit("System.Foo x;");
+            Check("④ 回滚用例前置：提交失败", !r.Success, r.Success ? "意外成功" : "失败（预期）");
+            Check("④ 自愈轮确实判了无效并回滚（日志含『自愈回滚』）",
+                s.LastHealLog != null && s.LastHealLog.Contains("自愈回滚"),
+                string.IsNullOrEmpty(s.LastHealLog) ? "<空日志>" : s.LastHealLog);
+            Check("④ 回滚后 ReferenceRevision 未增长（副作用已撤回）",
+                s.ReferenceRevision == revBefore, "before=" + revBefore + " after=" + s.ReferenceRevision);
+            Check("④ 回滚后 using 集未变（无悬空 using）",
+                string.Equals(s.GetUsing(), usingsBefore, System.StringComparison.Ordinal),
+                "len " + usingsBefore.Length + " -> " + s.GetUsing().Length);
+            Check("④ 回滚后引用集未增长", s.ReferencePaths.Count == refsBefore,
+                "before=" + refsBefore + " after=" + s.ReferencePaths.Count);
         }
 
         static void TestHealCapMessage()

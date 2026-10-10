@@ -418,7 +418,13 @@ namespace UnityExplorer.RoslynBridge
                     if (ContainsReferencePath(add)) break;        // 防御：已在引用集里（补了也没用）
                     string diagBefore = result.Diagnostics;
                     s_referencePaths.Add(add);
-                    OnReferenceAdded();
+                    // 引用集已变 ⇒ 命名空间缓存必须失效；但**不**在此调用 OnReferenceAdded（微审④中危：
+                    // 它会把 ReferenceRevision 与默认 using 落账，一旦本轮判为无效而回滚就撤不回来 ——
+                    // 撤了引用却留着 `using X;` ⇒ 之后每次提交都 CS0234/CS0246）。
+                    // 改为：本轮只把"现已可用"的延迟 using 记进 pendingUsings（**提交成功才进 s_usings**，
+                    // 既有契约），回滚时自然什么都不留。
+                    InvalidateNamespaceCache();
+                    AppendRecoverableUsings(pendingUsings);
                     srcText = BuildSubmissionSource(className, baseName, fields, statements, lastExpr,
                         assignValue: lastExpr != null, pendingUsings: pendingUsings, classesSource: classes,
                         out assignmentLine);
@@ -431,6 +437,7 @@ namespace UnityExplorer.RoslynBridge
                     if (!result.Success && string.Equals(result.Diagnostics, diagBefore, StringComparison.Ordinal))
                     {
                         s_referencePaths.RemoveAt(s_referencePaths.Count - 1);
+                        OnReferenceRemoved();
                         string back = "自愈回滚：" + Path.GetFileName(add)
                             + " 加入后诊断无任何变化（判为无关引用，已从会话引用集撤回）";
                         LastHealLog += back + Environment.NewLine;
@@ -438,6 +445,7 @@ namespace UnityExplorer.RoslynBridge
                         break;
                     }
                     healed++;
+                    OnReferenceAdded();     // 该引用被**保留** ⇒ 此时才落账（ReferenceRevision + 延迟 using 重算）
                     string line = "自愈补引用：" + Path.GetFileName(add);
                     LastHealLog += line + Environment.NewLine;
                     if (sink != null) sink(line);
@@ -809,17 +817,46 @@ namespace UnityExplorer.RoslynBridge
         }
 
         /// <summary>
-        /// **引用自愈每加一个引用后必须调用**（任务 13 定稿钩子，两条自愈入口共用）：
+        /// **引用自愈每"保留"一个引用后必须调用**（任务 13 定稿钩子，两条自愈入口共用）：
         /// ① <see cref="InvalidateNamespaceCache"/>（契约双登记点名的那一步）；
         /// ② <see cref="ReferenceRevision"/> +1（观测点）；
         /// ③ §4.10-3 重算延迟 using：验证式重跑 <c>DefaultUsings.Unavailable</c>，新可用的走
         /// <see cref="AddUsings"/>（校验拒绝的退回延迟表下次再试；等价"重跑排除计算"，偏离见报告 §26）。
+        /// ⚠️ 调用时机（微审④）：**只有该引用会被保留时才调**——它会落账 using；若在"待判有效性"的
+        /// 自愈轮内先调、随后又回滚引用，就会留下悬空 using（引用的程序集没了、using 还在 ⇒ 之后每次提交
+        /// 都 CS0234/CS0246）。轮内需要 using 时用 <see cref="AppendRecoverableUsings"/>（只算不改）。
         /// </summary>
         public void OnReferenceAdded()
         {
             InvalidateNamespaceCache();
             ReferenceRevision++;
             RecomputeDeferredUsings();
+        }
+
+        /// <summary>引用被**撤回**时调用（任务 13 无效自愈回滚）：清命名空间缓存。
+        /// **不动 <see cref="ReferenceRevision"/>**——回滚后引用集与加之前**逐项相同**（净零变更），
+        /// 观测点若照样 +1 就会让"修订号变了"不再等价于"引用集真的变了"（微审④中危的本意是
+        /// "回滚不得留下任何残留状态"，故 here 只失效缓存、不留计数痕迹）；也无 using 需要处理
+        /// （自愈轮内只把恢复项记进"待加入"表，提交失败自然不会进 <c>s_usings</c>）。</summary>
+        public void OnReferenceRemoved()
+        {
+            InvalidateNamespaceCache();
+        }
+
+        /// <summary>§4.10-3（自愈轮**内**用）：把"当前引用集下已变可用"的延迟默认 using 追加进
+        /// <paramref name="pendingUsings"/>（= 本次提交待加入项，**提交成功才进 s_usings**）。
+        /// 只算不改 ⇒ 该轮若判为无效自愈并回滚引用，不会留下任何悬空 using。无 lambda（C.5）。</summary>
+        void AppendRecoverableUsings(List<string> pendingUsings)
+        {
+            if (pendingUsings == null || s_deferredUsings == null || s_deferredUsings.Count == 0) return;
+            List<string> still = DefaultUsings.Unavailable(s_deferredUsings, DeferredOwnerAvailable);
+            foreach (string ns in s_deferredUsings)
+            {
+                if (string.IsNullOrEmpty(ns) || still.Contains(ns)) continue;
+                string directive = "using " + ns + ";";
+                if (!s_usings.Contains(directive) && !pendingUsings.Contains(directive))
+                    pendingUsings.Add(directive);
+            }
         }
 
         void RecomputeDeferredUsings()

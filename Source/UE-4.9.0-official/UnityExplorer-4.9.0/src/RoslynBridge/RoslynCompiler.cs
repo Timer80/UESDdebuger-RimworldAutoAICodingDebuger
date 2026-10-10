@@ -96,12 +96,15 @@ namespace UnityExplorer.RoslynBridge
                 if (ContainsPath(referencePaths, add)) break;   // 防御：已在引用集里（补了也没用）
                 string diagBefore = r.Diagnostics;
                 referencePaths.Add(add);
-                if (session != null) session.OnReferenceAdded();
+                // 引用集已变：只失效命名空间缓存（**不**落账 using —— 微审④：若本轮随后回滚，
+                // OnReferenceAdded 落下的 using/修订计数撤不回来，会留下悬空 using）。
+                if (session != null) session.InvalidateNamespaceCache();
                 r = Compile(assemblyName, source, referencePaths, includePolyfills);
                 // 无效自愈回滚（与 Submit 同判据，微审①）：诊断文本完全未变 ⇒ 该引用无关，撤回。
                 if (!r.Success && string.Equals(r.Diagnostics, diagBefore, StringComparison.Ordinal))
                 {
                     referencePaths.RemoveAt(referencePaths.Count - 1);
+                    if (session != null) session.OnReferenceRemoved();
                     string back = "自愈回滚：" + Path.GetFileName(add)
                         + " 加入后诊断无任何变化（判为无关引用，已撤回）";
                     healLog += back + Environment.NewLine;
@@ -113,6 +116,7 @@ namespace UnityExplorer.RoslynBridge
                     break;
                 }
                 healed++;
+                if (session != null) session.OnReferenceAdded();   // 该引用被保留 ⇒ 此时才落账
                 healLog += "自愈补引用：" + Path.GetFileName(add) + Environment.NewLine;
             }
             if (!r.Success && healed >= 5)

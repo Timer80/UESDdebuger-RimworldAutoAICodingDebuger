@@ -94,6 +94,16 @@
    - 验收锚点（Player.log）：装了前置包 ⇒
      `[CSConsole] Roslyn 扫描前加载完成（前置包 UE.Roslyn 供载荷 8/8，解析器已挂载）`；
      没装 ⇒ `[CSConsole] 回退 mcs：前置包 UE.Roslyn 未安装或加载失败 …`（响亮，非静默）。
+7. **启用 / 恢复 `ue.roslyn`（前置包）时的两条上机事实**（2026-10-10 实测）：
+   - MCP 工具 `rimworld.set_mod_enabled` 的**真实参数是 `modId` / `enabled` / `save`**：传 `mod` / `persist`
+     会被忽略，并报 `A mod id, package id … is required.` ⇒ 照实传 `modId: "ue.roslyn", enabled: true`。
+   - ⚠️ **重新启用模组会被排到 `activeMods` 末尾**（本次实测把 `ue.roslyn` 排到了 `uesddebugger` 之后 ⇒
+     `get_game_status` 报 `hasOrderingIssues: true`「必须在这些mod之后加载: Roslyn」）⇒ 启用后**必须检查并手工把
+     `<li>ue.roslyn</li>` 移回原位置**（实测有效位置 = `brrainz.harmony` 之后）。改 `ModsConfig.xml` 前**先备份**，
+     UTF8 **无 BOM** 写回。
+     - **推断（未实测）**：顺序错**是否必然**导致 UE 读不到 Roslyn —— 没实测。前置包文档的论证是"正确性来自
+       字段扫描在 `CallAll()` 之后、与排序无关"。但**顺序告警必须消掉**（否则每次 `get_game_status` 都报
+       `hasOrderingIssues`，真出问题时这条噪声会掩盖信号）。
 
 ---
 

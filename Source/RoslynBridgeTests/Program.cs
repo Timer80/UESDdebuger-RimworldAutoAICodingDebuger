@@ -90,6 +90,8 @@ namespace RoslynBridgeTests
             TestMcsHealingPolicy();
             // 任务 15b：把 15a 的策略接进求值器（已加载件注册表 + 一轮解析 + 到顶判定）的离线断言
             TestMcsReferenceHealer();
+            // 任务 15f：mcs **文件候选通道**补"同简单名多份按 mcs 策略取较旧 + 同款披露"（单份零噪声）
+            TestMcsFileChannelStemPolicy();
             // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
             // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
             Console.WriteLine("COUNTS parent_pass=" + passLines + " parent_fail=" + failures
@@ -3132,6 +3134,125 @@ namespace RoslynBridgeTests
                 MissingReferenceParser.AssemblyFromCs1069(mcs1069) == "UnityEngine.VideoModule"
                 && McsHealingPolicy.DemandedName(mcs1069) == "UnityEngine.VideoModule",
                 McsHealingPolicy.DemandedName(mcs1069) ?? "<null>");
+        }
+
+        /// <summary>任务 15f：mcs **文件候选通道**补"同简单名多份 ⇒ 按编译器策略取较旧 + 同款披露"
+        /// （15d 只覆盖了已加载件的两条通道；文件通道此前是"按候选目录序取首个同 stem"、无版本比较、无披露）。
+        /// 夹具 = 仓库内两份真 `0Harmony.dll`（不同目录、不同版本）。三组断言：
+        /// ①多份（身份不同、诊断不给身份）⇒ 取**较旧**且披露三要素齐全（池序故意把较新放前面）；
+        /// ②单份／同身份副本 ⇒ **零噪声**（不产出披露）；③诊断带完整身份 ⇒ 相符那份被采用、
+        /// 全都不符 ⇒ 身份不符被拒（不回归既有语义）。</summary>
+        static void TestMcsFileChannelStemPolicy()
+        {
+            string root = FindRepoRoot();
+            string hOld = root == null ? null
+                : System.IO.Path.Combine(root, @"Source\UELoader\lib\0Harmony.dll");
+            string hNew = root == null ? null
+                : System.IO.Path.Combine(root,
+                    @"Source\UE-4.9.0-official\UnityExplorer-4.9.0\UnityEditorPackage\Runtime\0Harmony.dll");
+            bool fx = hOld != null && hNew != null && System.IO.File.Exists(hOld) && System.IO.File.Exists(hNew);
+            Check("⑮f-① 前置：仓库内两份同简单名 0Harmony.dll（不同目录）都在", fx,
+                (hOld ?? "<null>") + " | " + (hNew ?? "<null>"));
+            if (!fx) return;
+
+            Version vA = System.Reflection.AssemblyName.GetAssemblyName(hOld).Version;
+            Version vB = System.Reflection.AssemblyName.GetAssemblyName(hNew).Version;
+            Check("⑮f-① 前置：两份版本可读且不同（" + vA + " / " + vB + "）", vA != null && vB != null && vA != vB);
+            string older = vA.CompareTo(vB) < 0 ? hOld : hNew;
+            string newer = older == hOld ? hNew : hOld;
+            // 池序**故意**把较新放前面：旧语义（"取池内首个同 stem"）会取到较新那份
+            var poolBoth = new System.Collections.Generic.List<string> { newer, older };
+            // CS0246 不带程序集身份 ⇒ 走纯策略挑选（mcs 路 = 取较旧）
+            string diagNoId = "(1,1): error CS0246: The type or namespace name `0Harmony' could not be found"
+                + " (are you missing a using directive or an assembly reference?)";
+
+            // ═══ ① 多份（身份不同）⇒ 取较旧 + 披露三要素 ═══
+            string loaded1 = null;
+            var reportsF1 = new System.Collections.Generic.List<string>();
+            var hF1 = new McsReferenceHealer(new LoadedAssemblyRegistry())
+            {
+                PathLoader = p => { loaded1 = p; return typeof(string).Assembly; },
+                AddReference = a => true,
+                CandidatePathProvider = () => poolBoth,
+                IsAlreadyReferenced = a => false,
+                ReportSink = reportsF1.Add,
+            };
+            string gotF1 = hF1.TryHealOne(diagNoId);
+            Check("⑮f-① 文件通道同简单名多份 ⇒ 按 mcs 策略取**较旧**（池序把较新放前面也不变、1 次 LoadFrom）",
+                gotF1 != null && SameStemChoice.SamePath(gotF1, older) && SameStemChoice.SamePath(loaded1, older)
+                && hF1.LoadCallCount == 1 && hF1.LastReport.Contains("文件通道"),
+                "got=" + (gotF1 ?? "<null>") + " loaded=" + (loaded1 ?? "<null>"));
+            Check("⑮f-① 披露三要素：采用=较旧路径（含身份）／未采用 1 份（较新路径）／原因="
+                + SameStemChoice.OldestReason,
+                LinesContaining(reportsF1, "采用披露") == 1
+                && reportsF1.Exists(m => m != null && m.Contains("采用=" + older) && m.Contains("身份=")
+                    && m.Contains("未采用 1 份") && m.Contains(newer)
+                    && m.Contains("原因=" + SameStemChoice.OldestReason)),
+                reportsF1.Count == 0 ? "<无日志>" : Head(reportsF1[0], 260));
+
+            // ═══ ② 单份／同身份副本 ⇒ 零噪声 ═══
+            var reportsF2 = new System.Collections.Generic.List<string>();
+            var hF2 = new McsReferenceHealer(new LoadedAssemblyRegistry())
+            {
+                PathLoader = p => { loaded1 = p; return typeof(string).Assembly; },
+                AddReference = a => true,
+                CandidatePathProvider = () => new System.Collections.Generic.List<string> { older },
+                IsAlreadyReferenced = a => false,
+                ReportSink = reportsF2.Add,
+            };
+            string gotF2 = hF2.TryHealOne(diagNoId);
+            Check("⑮f-② 单份 ⇒ 取那一份、且**不打披露**（零噪声，与既有两通道同口径）",
+                gotF2 != null && SameStemChoice.SamePath(gotF2, older)
+                && LinesContaining(reportsF2, "采用披露") == 0,
+                reportsF2.Count == 0 ? "<无日志>" : Head(reportsF2[0], 200));
+            var dupOnly = new System.Collections.Generic.List<string> { older, older };
+            Check("⑮f-② 同身份副本（同 Version+PKT 的两份）**不算歧义** ⇒ 披露返回 null、取首个",
+                McsHealingPolicy.DescribeCandidateChoice(older, "0Harmony", dupOnly,
+                    SameStemPreference.Oldest, "文件候选通道") == null
+                && SameStemChoice.SamePath(McsHealingPolicy.PickCandidateByName("0Harmony", dupOnly,
+                    SameStemPreference.Oldest), older));
+
+            // ═══ ③ 诊断带完整身份 ⇒ 相符那份被采用；全不符 ⇒ 身份不符被拒（不回归）═══
+            System.Reflection.AssemblyName anNew = System.Reflection.AssemblyName.GetAssemblyName(newer);
+            byte[] tokNew = anNew.GetPublicKeyToken();
+            var sbTok = new System.Text.StringBuilder();
+            for (int i = 0; tokNew != null && i < tokNew.Length; i++) sbTok.Append(tokNew[i].ToString("x2"));
+            string pktNew = sbTok.Length == 0 ? "null" : sbTok.ToString();
+            string diagWantNewer = "(1,1): error CS0012: The type 'X' is defined in an assembly that is not referenced."
+                + " You must add a reference to assembly `0Harmony, Version=" + anNew.Version
+                + ", Culture=neutral, PublicKeyToken=" + pktNew + "'.";
+
+            string loadedF3 = null;
+            var reportsF3 = new System.Collections.Generic.List<string>();
+            var hF3 = new McsReferenceHealer(new LoadedAssemblyRegistry())
+            {
+                PathLoader = p => { loadedF3 = p; return typeof(string).Assembly; },
+                AddReference = a => true,
+                CandidatePathProvider = () => poolBoth,
+                IsAlreadyReferenced = a => false,
+                ReportSink = reportsF3.Add,
+            };
+            string gotF3 = hF3.TryHealOne(diagWantNewer);
+            Check("⑮f-③ 诊断点名的身份只匹配**较新**那份 ⇒ 取相符的那份（身份收窄优先于版本策略）",
+                gotF3 != null && SameStemChoice.SamePath(gotF3, newer) && SameStemChoice.SamePath(loadedF3, newer),
+                "got=" + (gotF3 ?? "<null>"));
+            string diagWantNone = "(1,1): error CS0012: The type 'X' is defined in an assembly that is not referenced."
+                + " You must add a reference to assembly `0Harmony, Version=9.9.9.9, Culture=neutral,"
+                + " PublicKeyToken=null'.";
+            var reportsF4 = new System.Collections.Generic.List<string>();
+            var hF4 = new McsReferenceHealer(new LoadedAssemblyRegistry())
+            {
+                PathLoader = p => { loadedF3 = p; return typeof(string).Assembly; },
+                AddReference = a => true,
+                CandidatePathProvider = () => poolBoth,
+                IsAlreadyReferenced = a => false,
+                ReportSink = reportsF4.Add,
+            };
+            string gotF4 = hF4.TryHealOne(diagWantNone);
+            Check("⑮f-③ 两份都不符诊断身份 ⇒ **不加入**且响亮点名身份不符（既有语义不回归：0 次 LoadFrom）",
+                gotF4 == null && hF4.LoadCallCount == 0
+                && hF4.LastReport.Contains("身份不符") && hF4.LastReport.Contains("未加入")
+                && hF4.LastReport.Contains("9.9.9.9"), hF4.LastReport);
         }
 
         /// <summary>任务 15b：把 15a 的策略接进 mcs 求值器后，**接线所依赖的分支事实**离线断言。

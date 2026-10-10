@@ -209,8 +209,11 @@ namespace UnityExplorer.RoslynBridge
     ///    声明了这个命名空间/类型"⇒ 直接引用，**零 `LoadFrom`**（修 `UnityEngine.Video` ⇒ 首段错配、
     ///    `FlightPawn2Framework` ⇒ 程序集名与命名空间不同名这两类"该加也加不上"）；
     /// ② 已加载件注册表按**首段**简单名命中 ⇒ 直接引用，**零 `LoadFrom`**；
-    /// ③ 否则按名（<see cref="McsHealingPolicy.PickCandidateByName"/>，首段 vs 文件名 stem）挑文件；
-    ///    诊断带完整身份时**必须** <see cref="AssemblyName.GetAssemblyName"/> 校验身份相符，不符即拒绝；
+    /// ③ 否则按名（<see cref="McsHealingPolicy.PickCandidateByName(string, IList{string}, SameStemPreference)"/>，
+    ///    首段 vs 文件名 stem）挑文件；**同简单名多份**（身份不同）⇒ 按 <see cref="Preference"/>
+    ///    取**较旧**并打**同款披露**（任务 15f；单份/同身份副本零噪声）；
+    ///    诊断带完整身份时**必须** <see cref="AssemblyName.GetAssemblyName"/> 校验身份相符，不符即拒绝
+    ///    （身份只匹配到一份时取那一份 ⇒ 策略只作用于"多份都合格"）；
     /// ④ 都不成立 ⇒ 经 <see cref="ReportSink"/> **响亮**说明原因（含"已尝试已加载件命名空间探针"），返回 null（不加入）。
     /// 依赖全部为**注入**（加载器 / 引用动作 / 候选提供者 / 黑名单 / 排除集）⇒ 离线可断言"走了哪条分支、加载了几次"。
     /// 纯逻辑：无 UE/Unity/Roslyn 依赖，net35 安全。
@@ -435,7 +438,12 @@ namespace UnityExplorer.RoslynBridge
                 }
             }
 
-            // ── ③ 文件候选：按名优先（首段 vs stem），排除集过滤 ──
+            // ── ③ 文件候选：按名优先（首段 vs stem），排除集过滤；同简单名多份 ⇒ 按 mcs 策略取较旧 ──
+            // 诊断带完整身份时的"身份收窄"与随后的身份校验共用同一份解析结果（不重复解析）。
+            string idSimple, idVersion, idCulture, idPkt;
+            bool hasIdentity = MissingReferenceParser.TryAssemblyIdentity(
+                diagnostics, out idSimple, out idVersion, out idCulture, out idPkt);
+
             IList<string> pool = CandidatePathProvider == null ? null : CandidatePathProvider();
             string cand = null;
             int seen = 0, excluded = 0;
@@ -449,7 +457,25 @@ namespace UnityExplorer.RoslynBridge
                     if (IsExcluded(p)) { excluded++; continue; }
                     usable.Add(p);
                 }
-                cand = McsHealingPolicy.PickCandidateByName(demanded, usable);
+
+                // 任务 15f：同简单名**多份**（身份不同）⇒ 按 mcs 策略取**较旧**并打**同款披露**
+                // （复用 SameStemChoice，本通道原先只是"按候选目录序取首个同 stem"、无版本比较、无披露）。
+                // 单份、同身份副本 ⇒ 结论与"池内首个同 stem"逐字一致，且**零噪声**（不报警）。
+                IList<string> sameStem = McsHealingPolicy.FindCandidatesByName(demanded, usable);
+                bool identityNarrowed = false;
+                if (hasIdentity && sameStem.Count > 1)
+                {
+                    // 严格身份只匹配到一份就取那一份（身份校验语义不变：不符的那些由下面的
+                    // IdentityMismatch 拒绝；此处只是先按同一条判据收窄候选，策略只作用于"多份都合格"）。
+                    var matched = new List<string>();
+                    for (int i = 0; i < sameStem.Count; i++)
+                        if (IdentityMismatch(sameStem[i], idVersion, idCulture, idPkt) == null) matched.Add(sameStem[i]);
+                    if (matched.Count > 0) { sameStem = matched; identityNarrowed = true; }
+                }
+                cand = McsHealingPolicy.PickCandidateByName(demanded, sameStem, Preference);
+                if (cand != null && sameStem.Count > 1 && !identityNarrowed)
+                    ReportChoiceDisclosure(McsHealingPolicy.DescribeCandidateChoice(
+                        cand, demanded, sameStem, Preference, "文件候选通道"));
             }
 
             if (cand == null)
@@ -476,10 +502,9 @@ namespace UnityExplorer.RoslynBridge
             }
 
             // ── 身份加严（仅当诊断给出完整身份）：同名不同身份 ⇒ 不加入并响亮记日志 ──
-            string simple, version, culture, pkt;
-            if (MissingReferenceParser.TryAssemblyIdentity(diagnostics, out simple, out version, out culture, out pkt))
+            if (hasIdentity)
             {
-                string mismatch = IdentityMismatch(cand, version, culture, pkt);
+                string mismatch = IdentityMismatch(cand, idVersion, idCulture, idPkt);
                 if (mismatch != null)
                 {
                     Report("自愈拒绝：" + Path.GetFileName(cand) + " 与诊断要求的身份不符（" + mismatch

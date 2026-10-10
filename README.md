@@ -10,6 +10,7 @@ RimWorld 调试工具链模组，为游戏内联调、AI 辅助开发（MCP）�
 >
 > **依赖**：
 > - [Harmony](https://steamcommunity.com/sharedfiles/filedetails/?id=2009463077)（**必须**）：模组修补框架，UnityExplorer 与游戏侧桥接均依赖；
+> - **Roslyn**（packageId `UE.Roslyn`；**推荐**）：C# 控制台的 Roslyn（C# 13）编译器由它供货（F1 起 UE 不再内置载荷）；缺它时控制台**仍可用**但自动降级 mcs、无 C# 13 语法（不报错，其余功能不受影响）——**不装也能跑**，部署细节见 `AI-DEPLOYMENT.md` §3 第 6 条；
 > - [RimBridgeServer](https://steamcommunity.com/sharedfiles/filedetails/?id=3727949765)（**推荐**）：提供 GABP 桥接，连接后**可调用**的 MCP 工具总数从 **70**（本地）增至 **191**（含 121 个 `rimworld.*` / `rimbridge.*` 镜像工具；菜单可见 188，差额是 3 个隐藏工具）；未安装时相关镜像工具不可用（菜单里仍会列出名字并标注"提供方未就绪"），其余功能不受影响；
 > - [RIMAPI](https://steamcommunity.com/sharedfiles/filedetails/?id=3593423732)（**可选**）：游戏数据查询与操作注入类工具（29 个）依赖，未安装时仅这些工具返回 `RIMAPI_NOT_READY`。
 ---

@@ -5,17 +5,17 @@ namespace UnityExplorer.RoslynBridge
     /// <summary>从 Roslyn 诊断文本里提取"缺哪个程序集 / 缺哪个名字"。实测 CS0012/CS1069 会带程序集全名（含版本）。</summary>
     public static class MissingReferenceParser
     {
-        static readonly Regex Cs0012 = new Regex(@"You must add a reference to assembly '([^,'\s]+)",
+        static readonly Regex Cs0012 = new Regex(@"You must add a reference to assembly [`']([^`,'\s]+)",
             RegexOptions.Compiled);
         // 任务 13：边界探针实测 CS1069 形态（"This type has been forwarded to assembly '…'"）——
         // 清单外 Unity 模块（VideoPlayer 等）走的就是这条，不是 CS0012。
-        static readonly Regex Cs1069 = new Regex(@"forwarded to assembly '([^,'\s]+)", RegexOptions.Compiled);
+        static readonly Regex Cs1069 = new Regex(@"forwarded to assembly [`']([^`,'\s]+)", RegexOptions.Compiled);
         // 完整身份（§4.10）：取**引号内全串**（含 Version/Culture/PublicKeyToken），与上面"取到逗号前"互补。
-        static readonly Regex IdentityQuoted = new Regex(@"assembly '([^']+)'", RegexOptions.Compiled);
-        static readonly Regex Named = new Regex(@"The (?:type or namespace name|name) '([^']+)'",
+        static readonly Regex IdentityQuoted = new Regex(@"assembly [`']([^`']+)[`']", RegexOptions.Compiled);
+        static readonly Regex Named = new Regex(@"The (?:type or namespace name|name) [`']([^`']+)[`']",
             RegexOptions.Compiled);
         // CS0234：'Xml' does not exist in the namespace 'System' —— TDD 首跑实测的主力缺命名空间码。
-        static readonly Regex Cs0234Ns = new Regex(@"does not exist in the namespace '([^']+)'",
+        static readonly Regex Cs0234Ns = new Regex(@"does not exist in the namespace [`']([^`']+)[`']",
             RegexOptions.Compiled);
 
         public static string AssemblyFromCs0012(string diagnostics)

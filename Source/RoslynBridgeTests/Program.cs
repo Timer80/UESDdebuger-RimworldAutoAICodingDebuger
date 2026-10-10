@@ -84,6 +84,8 @@ namespace RoslynBridgeTests
             TestSameStemAdoptionDisclosure();
             TestHealSymbolChannelLoudFailure();
             TestHealReplIntegration();
+            // 任务 15a：mcs 侧诊断解析兼容（反引号）+ 纯逻辑自愈策略（按名优先/给 null 不瞎给/到顶文案同款）
+            TestMcsHealingPolicy();
             // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
             // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
             Console.WriteLine("COUNTS parent_pass=" + passLines + " parent_fail=" + failures
@@ -2802,6 +2804,75 @@ namespace RoslynBridgeTests
             Check("⑫ 说明点名内存加载边界与可执行建议",
                 text.Contains("Assembly.Load(byte[])") && text.Contains("LoadFrom") && text.Contains("找不到任何"),
                 text);
+        }
+
+        /// <summary>任务 15a：mcs（反引号 `` `Foo' ``）诊断解析兼容 + 纯逻辑自愈策略（按名优先 / 不给低置信候选 / 到顶文案逐字同款）。
+        /// 15a 只做离线真值断言，不接求值器（接线在 15b）。</summary>
+        static void TestMcsHealingPolicy()
+        {
+            // ① mcs 反引号可解析（且 Roslyn 单引号不回归）
+            string mcs0246 = "(1,1): error CS0246: The type or namespace name `Foo' could not be found"
+                + " (are you missing a using directive or an assembly reference?)";
+            Check("⑮a-① mcs 反引号 CS0246 → DemandedName=Foo",
+                McsHealingPolicy.DemandedName(mcs0246) == "Foo", McsHealingPolicy.DemandedName(mcs0246));
+            string ros0246 = "(1,1): error CS0246: The type or namespace name 'Foo' could not be found"
+                + " (are you missing a using directive or an assembly reference?)";
+            Check("⑮a-① Roslyn 单引号 CS0246 不回归 → DemandedName=Foo",
+                McsHealingPolicy.DemandedName(ros0246) == "Foo", McsHealingPolicy.DemandedName(ros0246));
+
+            // ② CS0234 反引号：组合命名空间
+            string mcs0234 = "(1,1): error CS0234: The type or namespace name `CSharp' does not exist"
+                + " in the namespace `Microsoft' (are you missing an assembly reference?)";
+            Check("⑮a-② mcs 反引号 CS0234 → DemandedName=Microsoft.CSharp",
+                McsHealingPolicy.DemandedName(mcs0234) == "Microsoft.CSharp",
+                McsHealingPolicy.DemandedName(mcs0234));
+            Check("⑮a-② Roslyn 单引号 CS0234 不回归 → DemandedName=Microsoft.CSharp",
+                McsHealingPolicy.DemandedName(
+                    "(1,1): error CS0234: The type or namespace name 'CSharp' does not exist"
+                    + " in the namespace 'Microsoft' (are you missing an assembly reference?)")
+                == "Microsoft.CSharp");
+
+            // ③ 按名优先 / 不给低置信候选（mcs 引用不可撤回）
+            var two = new System.Collections.Generic.List<string> { @"C:\a\Foo.dll", @"C:\a\Bar.dll" };
+            Check("⑮a-③ 按名优先：Foo.Baz → 首段 Foo 命中 C:\\a\\Foo.dll",
+                McsHealingPolicy.PickCandidateByName("Foo.Baz", two) == @"C:\a\Foo.dll",
+                McsHealingPolicy.PickCandidateByName("Foo.Baz", two) ?? "<null>");
+            var one = new System.Collections.Generic.List<string> { @"C:\a\Bar.dll" };
+            Check("⑮a-③ 无同名候选 ⇒ **null**（绝不瞎给一个）",
+                McsHealingPolicy.PickCandidateByName("Foo.Baz", one) == null,
+                McsHealingPolicy.PickCandidateByName("Foo.Baz", one) ?? "<null>");
+            Check("⑮a-③ 大小写不敏感（mcs 侧盘上大小写不定）",
+                McsHealingPolicy.PickCandidateByName("foo.Baz", two) == @"C:\a\Foo.dll",
+                McsHealingPolicy.PickCandidateByName("foo.Baz", two) ?? "<null>");
+            Check("⑮a-③ 空/无候选 ⇒ null（不抛）",
+                McsHealingPolicy.PickCandidateByName(null, two) == null
+                && McsHealingPolicy.PickCandidateByName("Foo", null) == null
+                && McsHealingPolicy.PickCandidateByName("Foo", new System.Collections.Generic.List<string>()) == null);
+
+            // ④ 到顶文案逐字同款 + mcs 日志行点名"不可撤回"
+            string cap = McsHealingPolicy.CapMessage(5, "DIAG");
+            Check("⑮a-④ 到顶文案含与 Roslyn 侧同款的计数句且以剩余诊断结尾",
+                cap.Contains("已补 5 个引用仍未通过（上限 5 轮），剩余诊断：") && cap.EndsWith("DIAG"), cap);
+            string log = McsHealingPolicy.HealLogLine(@"C:\a\Foo.dll");
+            Check("⑮a-④ mcs 自愈日志行含文件名与『不可撤回』披露",
+                log.Contains("Foo.dll") && log.Contains("（mcs 路径，加入后不可撤回）"), log);
+
+            // ⑤ §1 其余三条正则的 mcs 引号兼容（构造的 mcs 形态；游戏内实测形态记录在报告 §28a）
+            string mcs0012 = "(1,106): error CS0012: The type 'Vector3' is defined in an assembly that is not referenced."
+                + " You must add a reference to assembly `UnityEngine.CoreModule, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null'.";
+            Check("⑮a-⑤ mcs 反引号 CS0012 → 简单名", MissingReferenceParser.AssemblyFromCs0012(mcs0012) == "UnityEngine.CoreModule",
+                MissingReferenceParser.AssemblyFromCs0012(mcs0012));
+            string n, v, c, k;
+            Check("⑮a-⑤ mcs 反引号 CS0012 → 完整身份四元组（IdentityQuoted 兼容）",
+                MissingReferenceParser.TryAssemblyIdentity(mcs0012, out n, out v, out c, out k)
+                && n == "UnityEngine.CoreModule" && v == "0.0.0.0" && c == "neutral" && k == "null",
+                n + "/" + v + "/" + c + "/" + k);
+            string mcs1069 = "(17,45): error CS1069: The type name `VideoPlayer' could not be found in the namespace"
+                + " `UnityEngine.Video'. This type has been forwarded to assembly `UnityEngine.VideoModule, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null'.";
+            Check("⑮a-⑤ mcs 反引号 CS1069 → 简单名（DemandedName 亦取 CS1069）",
+                MissingReferenceParser.AssemblyFromCs1069(mcs1069) == "UnityEngine.VideoModule"
+                && McsHealingPolicy.DemandedName(mcs1069) == "UnityEngine.VideoModule",
+                McsHealingPolicy.DemandedName(mcs1069) ?? "<null>");
         }
 
         static void TestHealCapMessage()

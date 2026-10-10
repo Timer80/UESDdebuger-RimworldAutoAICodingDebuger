@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <OutputType>Library</OutputType>
         <PlatformTarget>AnyCPU</PlatformTarget>
@@ -204,8 +204,9 @@
         <Compile Remove="RoslynBridge\RoslynScriptEvaluator.cs" />
         <!-- 任务 9：补全（RoslynCompletion）同样依赖 Microsoft.CodeAnalysis ⇒ 与上面四件同进退 -->
         <Compile Remove="RoslynBridge\RoslynCompletion.cs" />
-        <!-- 任务 13：引用自愈两件（ReferenceHealer 依赖 Microsoft.CodeAnalysis；Parser 与其同进退） -->
-        <Compile Remove="RoslynBridge\MissingReferenceParser.cs" />
+        <!-- 任务 13：引用自愈（ReferenceHealer 依赖 Microsoft.CodeAnalysis ⇒ 只在 Roslyn 配置）
+             任务 15a：MissingReferenceParser 只依赖 System.Text.RegularExpressions（**零 Roslyn 依赖**），
+             mcs 侧策略 McsHealingPolicy 复用其诊断解析 ⇒ 不再随 ReferenceHealer 一起排除，进全部配置 glob。 -->
         <Compile Remove="RoslynBridge\ReferenceHealer.cs" />
     </ItemGroup>
     <!-- 架构 A 正式接线：net472 可直接消费 netstandard2.0，按计划原样常规 <Reference>

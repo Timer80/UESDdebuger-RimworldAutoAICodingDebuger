@@ -280,6 +280,12 @@ namespace UnityExplorer.CSConsole
                 else if (!roslynCompiled)
                     ExplorerCore.Log(EvaluatorSelector.DescribeMcsFallback(
                         McsFallbackReason.NotCompiledIn, null));
+                // 任务 15g：最小集模式在此**如实记一条**（走 ExplorerCore 日志通道 ⇒ 面板/日志立即可见）。
+                // 为什么不在求值器里报：控制台 Reset 会先跑内部探针 `Evaluate("0 == 0", …)`，那才是"第一次求值"，
+                // 而它的 output 被丢弃 ⇒ 放在"首轮 output"的说明永远看不见（15e 上机实证）。
+                if (mcsEval.MinimalReferences)
+                    ExplorerCore.Log("[CSConsole] mcs 最小集模式已开启（引用=最小集 "
+                        + ReferenceProfile.ExpectedProfileCount + "+self；缺件由诊断驱动自愈按需补入）");
             }
 
             // ── 预置 using：Roslyn 侧一次校验编译（B4：旧路径 = 每项一次完整提交 + Assembly.Load），

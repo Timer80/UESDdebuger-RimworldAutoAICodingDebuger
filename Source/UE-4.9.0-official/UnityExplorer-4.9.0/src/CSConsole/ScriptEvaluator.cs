@@ -61,12 +61,6 @@ namespace UnityExplorer.CSConsole
         /// <summary>本轮求值的自愈日志缓冲（并入 <c>output</c>，见 Evaluate：mcs 路径日志不进 Player.log）。</summary>
         private readonly StringBuilder _healLog = new StringBuilder();
 
-        /// <summary>最小集模式开启时的一条启动说明（Reset 期如实写入，Evaluate 首轮并进 output；旧路径恒 null）。</summary>
-        private readonly string _minimalModeNote;
-
-        /// <summary>该说明是否已报过（每次控制台 Reset 一个求值器 ⇒ 只报一次）。</summary>
-        private bool _minimalModeReported;
-
         /// <summary>旧构造（逐字保持旧行为）：启动全扫引用 + 新加载程序集自动引用。</summary>
         public ScriptEvaluator(TextWriter tw) : this(tw, false) { }
 
@@ -84,11 +78,9 @@ namespace UnityExplorer.CSConsole
             _ownReportPrinter = _reportPrinter;
 
             _minimalReferences = minimalReferences;
-            // 任务 15e：最小集模式**构造成功**时如实报一条（走求值器 output/面板通道，不进 Player.log）。
-            _minimalModeNote = minimalReferences
-                ? "[CSConsole] mcs 最小集模式已开启（引用=最小集 " + ReferenceProfile.ExpectedProfileCount
-                    + "+self；缺件由诊断驱动自愈按需补入）"
-                : null;
+            // 任务 15g：开启说明改由**控制台层**在构造 mcs 求值器处如实记一条（见 ConsoleController 的 mcs 分支）——
+            // 15e 曾把它放进"Evaluate 首轮 output"，但控制台 Reset 时会先跑内部探针 `Evaluate("0 == 0", …)`，
+            // 那才是第一次求值、而它的 output 被丢弃 ⇒ 该说明永远看不见（上机实证）。
             _loadHandler = minimalReferences
                 ? new AssemblyLoadEventHandler(OnAssemblyLoadRegisterOnly)
                 : new AssemblyLoadEventHandler(OnAssemblyLoad);
@@ -126,7 +118,9 @@ namespace UnityExplorer.CSConsole
             AppDomain.CurrentDomain.AssemblyLoad += _loadHandler;
         }
 
-        /// <summary>最小集模式是否开启（供控制台自检/报告；旧构造 false。15e 起本类构造期据此记一条开启说明）。</summary>
+        /// <summary>最小集模式是否开启（供控制台层自检/报告；旧构造 false）。
+        /// 15g 起由 <c>ConsoleController</c> 的 mcs 分支据此**如实记一条开启说明**（15e 曾放在本类"首轮 output"里，
+        /// 但该轮被 Reset 内部探针吃掉、output 丢弃 ⇒ 永远看不见）。</summary>
         public bool MinimalReferences => _minimalReferences;
 
         /// <summary>自愈驱动（仅最小集模式非 null）——接线方能在此注入模组路径/观测日志。</summary>
@@ -171,12 +165,6 @@ namespace UnityExplorer.CSConsole
             var printer = _ownReportPrinter ?? _reportPrinter;
             string textBefore = _textWriter.ToString();
             _healLog.Length = 0;   // 自愈日志按"本次求值"计
-            // 最小集模式的"已开启"说明只报一次（Reset 后首轮），随后不再重复。
-            if (_minimalModeNote != null && !_minimalModeReported)
-            {
-                AppendHealLine(_minimalModeNote);
-                _minimalModeReported = true;
-            }
 
             CompiledMethod repl = null;
             try { repl = Compile(input); }

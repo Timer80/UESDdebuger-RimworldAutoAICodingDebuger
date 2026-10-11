@@ -44,6 +44,21 @@ namespace UELoader
         public bool toolDefaultEnabled;
         public List<ToolToggle> toolToggles = new List<ToolToggle>();
 
+        // ---------------- C# 控制台编译器（原生 XML 通道，不走项目 JSON） ----------------
+        /// <summary>
+        /// 启动时优先使用的 C# 控制台编译器：true = Roslyn（C# 13，需前置包 UE.Roslyn），false = Mono.CSharp。
+        /// **只在启动时读一次**（求值器在 UE 初始化时选定）⇒ 改这项必须重启游戏。
+        /// 前置包缺席时界面不提供选择（只显示 Mono.CSharp），本值原样保留、前置回来后按它走。
+        /// </summary>
+        public bool useRoslyn = true;
+
+        /// <summary>
+        /// 隐藏位：是否已经因为"检测到前置包"而把默认设成过 Roslyn（人类裁定：**第一次带前置加载**默认 Roslyn，
+        /// 其他时候按设置走）。前置包卸载时由启动逻辑**清空**，于是重新装上前置仍算"第一次带前置"。
+        /// 不参与界面，仅参与启动决策 —— 见 <see cref="UELoaderStartupCompiler.Apply"/>。
+        /// </summary>
+        public bool roslynDefaultApplied;
+
         // ---------------- UI 状态（不参与 Scribe 持久化） ----------------
         public Vector2 scrollPos;
         public string startTimeoutBuffer = "180000";
@@ -99,6 +114,9 @@ namespace UELoader
             Scribe_Values.Look(ref startTimeout, "startTimeout", 180000);
             Scribe_Values.Look(ref toolDefaultEnabled, "toolDefaultEnabled", false);
             Scribe_Collections.Look(ref toolToggles, "toolToggles", LookMode.Deep);
+            // C# 控制台编译器（默认 true = 优先 Roslyn；隐藏位默认 false = 还没因前置包而默认过）
+            Scribe_Values.Look(ref useRoslyn, "useRoslyn", true);
+            Scribe_Values.Look(ref roslynDefaultApplied, "roslynDefaultApplied", false);
         }
 
         // ---------------------------------------------------------------- 项目配置通道

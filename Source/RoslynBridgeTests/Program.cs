@@ -92,6 +92,9 @@ namespace RoslynBridgeTests
             TestMcsReferenceHealer();
             // 任务 15f：mcs **文件候选通道**补"同简单名多份按 mcs 策略取较旧 + 同款披露"（单份零噪声）
             TestMcsFileChannelStemPolicy();
+            // 启动编译器偏好（人类裁定 2026-10-11）：没前置⇒Mono.CSharp / 第一次带前置⇒默认 Roslyn /
+            // 之后按设置走 / 前置卸载清隐藏位 / start_game 覆写只影响本次
+            TestStartupCompilerPreference();
             // S3（§20）：**机读计数行**——口径 = 各进程内实际打印的 PASS/FAIL 行数（循环展开后按行计）。
             // 父/子分开报，避免此前"父计数里混进了子进程输出"的统计失真。
             Console.WriteLine("COUNTS parent_pass=" + passLines + " parent_fail=" + failures
@@ -1305,6 +1308,73 @@ namespace RoslynBridgeTests
             Check("未命中黑名单可加入", set.TryAdd(@"C:\a\Good.dll", "Good", "Bad;Other"));
 
             Check("顺序稳定（先加载的在前）", set.Paths[0] == @"C:\a\mscorlib.dll");
+        }
+
+        /// <summary>
+        /// 启动编译器偏好（人类裁定 2026-10-11）的离线真值表：没前置 ⇒ Mono.CSharp 且清隐藏位（设置项不动）；
+        /// 第一次带前置 ⇒ 默认 Roslyn 且置隐藏位；之后按设置走；前置卸载清隐藏位；
+        /// `start_game` 覆写只改本次生效值、不动设置项与隐藏位；解析宽容别名但**拒绝未知值**（交调用方响亮报错）。
+        /// </summary>
+        static void TestStartupCompilerPreference()
+        {
+            // ── 解析：口径 = 用户可见名 Roslyn / Mono.CSharp；宽容别名；未知 ⇒ null ──
+            Check("启动偏好：Parse(\"Roslyn\") ⇒ Roslyn",
+                StartupCompilerPreference.ParseLaunchOverride("Roslyn") == ConsoleCompiler.Roslyn);
+            Check("启动偏好：Parse(\"Mono.CSharp\") ⇒ MonoCSharp（用户可见名不写 mcs）",
+                StartupCompilerPreference.ParseLaunchOverride("Mono.CSharp") == ConsoleCompiler.MonoCSharp);
+            Check("启动偏好：别名/大小写/空白/BOM 都能解析（mcs / roslyn / 前后空白 / BOM）",
+                StartupCompilerPreference.ParseLaunchOverride("mcs") == ConsoleCompiler.MonoCSharp
+                && StartupCompilerPreference.ParseLaunchOverride("  roslyn \r\n") == ConsoleCompiler.Roslyn
+                && StartupCompilerPreference.ParseLaunchOverride("\uFEFFMono.CSharp") == ConsoleCompiler.MonoCSharp);
+            Check("启动偏好：未知值/空 ⇒ null（由调用方响亮拒绝，不静默当成『没指定』）",
+                StartupCompilerPreference.ParseLaunchOverride("dotnet") == null
+                && StartupCompilerPreference.ParseLaunchOverride("   ") == null
+                && StartupCompilerPreference.ParseLaunchOverride(null) == null);
+            Check("启动偏好：前置包判据大小写不敏感（ue.roslyn / UE.Roslyn 都算；别的不算）",
+                StartupCompilerPreference.IsFrontPackageId("ue.roslyn")
+                && StartupCompilerPreference.IsFrontPackageId(" UE.Roslyn ")
+                && !StartupCompilerPreference.IsFrontPackageId("ludeon.rimworld")
+                && !StartupCompilerPreference.IsFrontPackageId(null));
+
+            // ── ① 没有前置 ⇒ 用 Mono.CSharp；隐藏位清空；**设置项保留原值** ──
+            StartupCompilerDecision noFront = StartupCompilerPreference.Resolve(null, false, true, true);
+            Check("启动偏好：无前置 ⇒ 本次用 Mono.CSharp（设置项写 Roslyn 也照降），隐藏位被清空",
+                noFront.Effective == ConsoleCompiler.MonoCSharp
+                && noFront.PreferRoslynSetting && !noFront.DefaultApplied
+                && !string.IsNullOrEmpty(noFront.Note));
+            Check("启动偏好：无前置且隐藏位本来就没置 ⇒ 不产生多余副作用",
+                !StartupCompilerPreference.Resolve(null, false, false, false).DefaultApplied);
+
+            // ── ② 第一次带前置 ⇒ 默认设为 Roslyn（把设置项也置真，并置隐藏位） ──
+            StartupCompilerDecision first = StartupCompilerPreference.Resolve(null, true, false, false);
+            Check("启动偏好：首次带前置 ⇒ 默认 Roslyn（覆盖用户旧的 false）且隐藏位置真",
+                first.Effective == ConsoleCompiler.Roslyn && first.PreferRoslynSetting && first.DefaultApplied);
+
+            // ── ③ 之后按设置走（隐藏位已置 ⇒ 不再强制） ──
+            StartupCompilerDecision afterMono = StartupCompilerPreference.Resolve(null, true, false, true);
+            Check("启动偏好：之后按设置走（设置 false ⇒ Mono.CSharp，且不回写设置、隐藏位保持）",
+                afterMono.Effective == ConsoleCompiler.MonoCSharp
+                && !afterMono.PreferRoslynSetting && afterMono.DefaultApplied);
+            Check("启动偏好：之后按设置走（设置 true ⇒ Roslyn）",
+                StartupCompilerPreference.Resolve(null, true, true, true).Effective == ConsoleCompiler.Roslyn);
+
+            // ── ④ start_game 覆写：只改本次生效值 ──
+            StartupCompilerDecision ovMono = StartupCompilerPreference.Resolve(ConsoleCompiler.MonoCSharp, true, true, true);
+            Check("启动偏好：start_game 覆写 Mono.CSharp ⇒ 本次生效值变、设置项与隐藏位不动",
+                ovMono.Effective == ConsoleCompiler.MonoCSharp && ovMono.PreferRoslynSetting && ovMono.DefaultApplied);
+            StartupCompilerDecision ovRos = StartupCompilerPreference.Resolve(ConsoleCompiler.Roslyn, true, false, true);
+            Check("启动偏好：覆写 Roslyn ⇒ 本次用 Roslyn 但设置项仍是 false（不偷偷改设置）",
+                ovRos.Effective == ConsoleCompiler.Roslyn && !ovRos.PreferRoslynSetting);
+            StartupCompilerDecision ovNoFront = StartupCompilerPreference.Resolve(ConsoleCompiler.Roslyn, false, true, false);
+            Check("启动偏好：无前置时覆写 Roslyn ⇒ 如实报 Mono.CSharp 并在日志文本里点明『降级』",
+                ovNoFront.Effective == ConsoleCompiler.MonoCSharp && !ovNoFront.DefaultApplied
+                && ovNoFront.Note != null && ovNoFront.Note.Contains("降级"));
+
+            // ── 显示名/文件名口径（必须与 MCP 侧、界面一致） ──
+            Check("启动偏好：显示名与标记文件名口径固定（Roslyn / Mono.CSharp / .launch-compiler）",
+                StartupCompilerPreference.Describe(ConsoleCompiler.Roslyn) == "Roslyn"
+                && StartupCompilerPreference.Describe(ConsoleCompiler.MonoCSharp) == "Mono.CSharp"
+                && StartupCompilerPreference.LaunchOverrideFileName == ".launch-compiler");
         }
 
         /// <summary>

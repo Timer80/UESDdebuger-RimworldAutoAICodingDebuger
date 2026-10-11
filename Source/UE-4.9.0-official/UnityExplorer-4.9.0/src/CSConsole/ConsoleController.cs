@@ -17,6 +17,17 @@ namespace UnityExplorer.CSConsole
         /// <summary>本次会话实际生效的求值器：true=Roslyn，false=mcs（回退）。</summary>
         public static bool UsingRoslyn { get; private set; }
 
+        /// <summary>
+        /// **启动编译器偏好注入点**（UELoader 在 UE 初始化之前用方法组注入；**首个 Reset 消费一次**后置 null）。
+        /// 为什么放在这里：取舍规则（"没前置就没有选择 / 第一次带前置默认 Roslyn / 前置卸载清隐藏位 /
+        /// start_game 参数只覆盖本次"）在壳类里算，纯逻辑见 <see cref="StartupCompilerPreference"/>；
+        /// UE 侧只负责把它**同步进既有配置项** `C# Console Use Roslyn`（于是 F7 面板显示的即事实），
+        /// 之后一切照走 <see cref="EvaluatorSelector"/> 的真值表，本类不新增判定分支。
+        /// ⚠️ 类型是 <c>Func&lt;bool&gt;</c>（System.Func），不是载荷类型 ⇒ 不违反 C.5；
+        /// UE 侧不创建 lambda（由壳类用方法组注入），也不做每 Reset 复读。
+        /// </summary>
+        public static Func<bool> StartupCompilerPreference { get; set; }
+
         public static LexerBuilder Lexer { get; private set; }
         public static CSAutoCompleter Completer { get; private set; }
 
@@ -169,6 +180,49 @@ namespace UnityExplorer.CSConsole
         }
 
         /// <summary>
+        /// 消费**一次性**启动编译器偏好（<see cref="StartupCompilerPreference"/>）：把它写进配置项
+        /// `C# Console Use Roslyn`（面板即事实），随后置 null。
+        /// 只写一次 ⇒ 与模组设置不会形成"两个真值来源"：启动时模组设置/start_game 说了算，
+        /// 本次运行内 UE 面板那项仍是后门（改完 Reset 生效），重启后回到模组设置的权威。
+        /// 读取/落位异常一律**响亮**降级到配置项原值，绝不静默。
+        /// </summary>
+        static void ApplyStartupCompilerPreference()
+        {
+            Func<bool> pref = StartupCompilerPreference;
+            if (pref == null) return;
+            StartupCompilerPreference = null;   // 先取后清：即使异常也不重放、不每 Reset 复读
+
+            bool want;
+            try { want = pref(); }
+            catch (Exception ex)
+            {
+                ExplorerCore.LogWarning("[CSConsole] 启动编译器偏好读取失败（按配置项走）："
+                    + ex.GetType().Name + "：" + ex.Message);
+                return;
+            }
+
+            ConfigElement<bool> element = ConfigManager.CSharp_Console_Use_Roslyn;
+            if (element == null)
+            {
+                ExplorerCore.LogWarning(
+                    "[CSConsole] 启动编译器偏好不好落位（配置项 `C# Console Use Roslyn` 未就绪），按默认走");
+                return;
+            }
+
+            if (element.Value == want)
+            {
+                ExplorerCore.Log("[CSConsole] 启动编译器偏好与配置项一致（`C# Console Use Roslyn`="
+                    + want + "，优先 " + EvaluatorSelector.Describe(want ? EvaluatorChoice.Roslyn : EvaluatorChoice.Mcs) + "）");
+                return;
+            }
+
+            element.Value = want;   // 走 SetValue ⇒ 同时落盘（UE 关服按内存回写，故必须在启动期写）
+            ExplorerCore.Log("[CSConsole] 启动编译器偏好已注入：`C# Console Use Roslyn`=" + want
+                + "，优先 " + EvaluatorSelector.Describe(want ? EvaluatorChoice.Roslyn : EvaluatorChoice.Mcs)
+                + "（来自模组设置 / start_game 参数；仅本次启动注入一次）");
+        }
+
+        /// <summary>
         /// 构造求值器 + 预置默认 using + **探针**，返回终态（追加 E 的纯决策函数在此被喂入三个输入）。
         /// 顺序（追加 D 明确要求）：先按引用集可用性组装**有效** using → 再构造 → 再探针；
         /// 探针失败且初始是 Roslyn → 以 forceMcs 递归一次（forceMcs=true 时不再进 Roslyn 分支，无深度风险）。
@@ -184,6 +238,10 @@ namespace UnityExplorer.CSConsole
             // mcs 路径（回退）需要 TextWriter 传给 ScriptEvaluator 构造，Roslyn 路径不用。
             // 无条件生成，避免回退分支拿到 null writer。
             GenerateTextWriter();
+
+            // 启动偏好（模组设置 / start_game 参数）只在**首个 Reset** 消费一次：同步进配置项后即失效，
+            // 之后 UE 面板那项就是运行期真值来源（改完 Reset 即生效，供开发与 A/B）。
+            ApplyStartupCompilerPreference();
 
             string blacklist = ConfigManager.CSConsole_Assembly_Blacklist.Value;
             bool wantRoslyn = !forceMcs && ConfigManager.CSharp_Console_Use_Roslyn.Value;

@@ -82,6 +82,22 @@ namespace UELoader
                     // 创建失败则让 UE 回落默认路径
                 }
 
+                // 启动编译器偏好：由 UELoaderMod 构造期算好（前置包判定 + start_game 覆写标记消费 + 三条规则），
+                // 此处用**方法组**一次性交给 UE —— UE 在**首次 Reset** 把它同步进自己的配置项
+                // `C# Console Use Roslyn`，之后真值表/探针/三态回退全按既有逻辑走，本壳类不参与判定。
+                // C.5：方法组注入，不创建闭包。
+                try
+                {
+                    UnityExplorer.CSConsole.ConsoleController.StartupCompilerPreference =
+                        UELoaderMod.ResolveStartupPreference;
+                    Log.Message("[UELoader] C# 控制台启动偏好已注入 UE（优先 "
+                        + (UELoaderMod.ResolveStartupPreference() ? "Roslyn" : "Mono.CSharp") + "）");
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning($"[UELoader] 注入 C# 控制台启动偏好失败（UE 将按自身配置项走）: {ex.GetType().Name}: {ex.Message}");
+                }
+
                 // 官方初始化入口（UE 4.9.0 自带的 IExplorerLoader 实现，零修改二进制）
                 ExplorerStandalone.CreateInstance(OnUELog, modulesPath);
 

@@ -7,6 +7,12 @@
   <UESDdebuger.ButtonRedetectConfig>重新探测并重置 config.json</UESDdebuger.ButtonRedetectConfig>
   <UESDdebuger.ButtonShowAnnouncements>再次弹配置公告窗（不修改配置）</UESDdebuger.ButtonShowAnnouncements>
   <UESDdebuger.ToolSectionHeader>工具开关（toolConfig.json tools）——取消勾选即禁用；agg_call_tool 仍可调用被禁用的工具</UESDdebuger.ToolSectionHeader>
+  <UESDdebuger.ConsoleCompilerLabel>C# 控制台编译器（启动时）：勾选 = Roslyn（C# 13）</UESDdebuger.ConsoleCompilerLabel>
+  <UESDdebuger.ConsoleCompilerDesc>取消勾选 = Mono.CSharp（旧版编译器，没有 C# 13 语法）。本项只在启动时读一次，改动后需重启游戏生效；start_game 的 csharpConsole 参数可覆盖本次启动。</UESDdebuger.ConsoleCompilerDesc>
+  <UESDdebuger.ConsoleCompilerNoFront>C# 控制台：{0} —— 未检测到前置包 UE.Roslyn，故不提供 Roslyn 选项（安装并启用前置包后重启即可选择）。</UESDdebuger.ConsoleCompilerNoFront>
+  <UESDdebuger.ConsoleCompilerActualIs>当前实际生效：{0}</UESDdebuger.ConsoleCompilerActualIs>
+  <UESDdebuger.ConsoleCompilerActualNotInit>当前实际生效：尚未初始化（进入游戏地图后生效）</UESDdebuger.ConsoleCompilerActualNotInit>
+  <UESDdebuger.ConsoleCompilerMismatchHint>当前实际生效：{0}（与上面的偏好不一致：可能是改动尚未重启生效、本次启动被 start_game 的 csharpConsole 覆盖，也可能是自动降级 —— 见 Player.log 里的 [CSConsole] 回退原因）</UESDdebuger.ConsoleCompilerMismatchHint>
   <UESDdebuger.ResetComplete>重置完成：{0}</UESDdebuger.ResetComplete>
   <UESDdebuger.ResetFailed>重置失败：{0}</UESDdebuger.ResetFailed>
 

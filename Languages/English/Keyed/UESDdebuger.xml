@@ -7,6 +7,12 @@
   <UESDdebuger.ButtonRedetectConfig>Redetect and reset config.json</UESDdebuger.ButtonRedetectConfig>
   <UESDdebuger.ButtonShowAnnouncements>Show configuration announcements again (does not modify configuration)</UESDdebuger.ButtonShowAnnouncements>
   <UESDdebuger.ToolSectionHeader>Tool toggles (toolConfig.json tools) — uncheck to disable; agg_call_tool can still invoke disabled tools</UESDdebuger.ToolSectionHeader>
+  <UESDdebuger.ConsoleCompilerLabel>C# Console compiler (startup): checked = Roslyn (C# 13)</UESDdebuger.ConsoleCompilerLabel>
+  <UESDdebuger.ConsoleCompilerDesc>Unchecked = Mono.CSharp (legacy compiler, no C# 13 syntax). Read once at startup, so a change needs a game restart; start_game's csharpConsole argument can override this launch.</UESDdebuger.ConsoleCompilerDesc>
+  <UESDdebuger.ConsoleCompilerNoFront>C# Console: {0} — prerequisite mod UE.Roslyn is not detected, so Roslyn is not offered (install and enable it, then restart to choose).</UESDdebuger.ConsoleCompilerNoFront>
+  <UESDdebuger.ConsoleCompilerActualIs>Currently in effect: {0}</UESDdebuger.ConsoleCompilerActualIs>
+  <UESDdebuger.ConsoleCompilerActualNotInit>Currently in effect: not initialized yet (takes effect after entering a map)</UESDdebuger.ConsoleCompilerActualNotInit>
+  <UESDdebuger.ConsoleCompilerMismatchHint>Currently in effect: {0} (differs from the preference above: the change may need a restart, this launch may be overridden by start_game's csharpConsole, or the console auto-fell back — see the [CSConsole] reasons in Player.log)</UESDdebuger.ConsoleCompilerMismatchHint>
   <UESDdebuger.ResetComplete>Reset complete: {0}</UESDdebuger.ResetComplete>
   <UESDdebuger.ResetFailed>Reset failed: {0}</UESDdebuger.ResetFailed>
 

@@ -41,6 +41,9 @@
     <!-- 任务 15d：同简单名多份的"按编译器策略选版本 + 两路统一披露"纯逻辑（零 Roslyn/UE 依赖、net35 安全
          ⇒ 进全部 9 配置；Roslyn 路与 mcs 路共用同一份实现，只换偏好枚举 Newest/Oldest） -->
     <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\SameStemChoice.cs" Link="SameStemChoice.cs" />
+    <!-- 启动编译器偏好（纯逻辑：前置包判定口径 + start_game 覆写解析 + 三条取舍规则 + 隐藏位语义）。
+         零 Unity/UE/Verse/mcs/Roslyn 依赖 ⇒ 进全部 9 配置，并在此离线断言。 -->
+    <Compile Include="..\UE-4.9.0-official\UnityExplorer-4.9.0\src\RoslynBridge\StartupCompilerPreference.cs" Link="StartupCompilerPreference.cs" />
     <!-- R1（§18）：mcs 侧语义 harness 需要真实的 Mono.CSharp（net35 mcs.dll，本仓库 vendor 副本） -->
     <Reference Include="mcs"><HintPath>..\UE-4.9.0-official\UnityExplorer-4.9.0\lib\net35\mcs.dll</HintPath></Reference>
     <!-- 任务 10：Harmony 链路端到端离线断言（补丁真的挂上去、真的生效）。版本与 UE csproj **同版本**

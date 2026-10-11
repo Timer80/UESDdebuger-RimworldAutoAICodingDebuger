@@ -911,6 +911,53 @@ async function findSteamProcess() {
   return findProcess('steam.exe');
 }
 
+// ── start_game 的 C# 控制台编译器覆盖（一次性标记文件，游戏侧启动时消费）──
+// 为什么走文件而不是环境变量/命令行参数：启动有两条路（mono 桥 launch 走 Steam 进程 / 回退 spawn(gamePath)），
+// 环境变量只有后者能注入；文件通道两边都成立，手动从 Steam 启动也照样生效。
+// 取值口径与游戏侧一致（UE 侧 StartupCompilerPreference.ParseLaunchOverride）：
+//   Roslyn / Mono.CSharp，宽容接受别名 roslyn / mcs / monocsharp；无法识别一律**报错拒绝**，不静默。
+const LAUNCH_COMPILER_ROS = 'Roslyn';
+const LAUNCH_COMPILER_MONO = 'Mono.CSharp';
+const LAUNCH_COMPILER_FILE = path.join(__dirname, '.launch-compiler');
+
+function normalizeLaunchCompiler(value) {
+  if (value === undefined || value === null) return { token: null, error: null };
+  if (typeof value !== 'string') {
+    return { token: null, error: `csharpConsole 必须是字符串（"${LAUNCH_COMPILER_ROS}" 或 "${LAUNCH_COMPILER_MONO}"）` };
+  }
+  const t = value.trim().toLowerCase();
+  if (t === '') return { token: null, error: null };
+  if (t === 'roslyn') return { token: LAUNCH_COMPILER_ROS, error: null };
+  if (t === 'mcs' || t === 'mono.csharp' || t === 'monocsharp') return { token: LAUNCH_COMPILER_MONO, error: null };
+  return {
+    token: null,
+    error: `无法识别的 csharpConsole 值 "${value}"；合法值 = "${LAUNCH_COMPILER_ROS}" / "${LAUNCH_COMPILER_MONO}"（别名 roslyn / mcs）`
+  };
+}
+
+// 写覆盖标记；token 为 null ⇒ 清掉可能残留的标记（防上一次的覆盖串到这一次启动）。
+// 写/清失败都不阻断启动（只记日志 + 在返回值里如实回报），控制台会按模组设置走。
+function writeLaunchCompilerMarker(token) {
+  const info = { requested: token, written: false, cleared: false, path: LAUNCH_COMPILER_FILE, error: null };
+  try {
+    if (!token) {
+      if (fs.existsSync(LAUNCH_COMPILER_FILE)) {
+        fs.unlinkSync(LAUNCH_COMPILER_FILE);
+        info.cleared = true;
+        log('INFO', `start_game 未指定 csharpConsole ⇒ 已清掉残留标记 ${LAUNCH_COMPILER_FILE}`);
+      }
+    } else {
+      fs.writeFileSync(LAUNCH_COMPILER_FILE, token, 'utf8');   // 无 BOM；游戏侧读到即删除（一次性）
+      info.written = true;
+      log('INFO', `start_game 指定 csharpConsole=${token} ⇒ 已写标记 ${LAUNCH_COMPILER_FILE}（游戏侧启动时消费一次）`);
+    }
+  } catch (e) {
+    info.error = e.message;
+    log('WARN', `写/清 csharpConsole 标记失败（本次仍按模组设置走）: ${e.message}`);
+  }
+  return info;
+}
+
 // 关闭指定进程的 Unity "Debug (Player)" 告知窗（Win32 WM_CLOSE，等同点击「确定」）。
 // 匹配条件：窗口属于目标进程 + 标题精确等于 "Debug (Player)" + 可见，避免误伤其它窗口。
 // 窗口在游戏启动后约 1~3s 才出现，此处轮询最多 timeoutMs 并反复关闭可能重复弹出的窗口。
@@ -1841,6 +1888,12 @@ const TOOLS = [
         timeout: {
           type: 'number',
           description: 'Timeout in ms for waiting notification (default from config.startTimeout, fallback 180000)'
+        },
+        csharpConsole: {
+          type: 'string',
+          description: '覆盖**本次**启动的 C# 控制台编译器（一次性，游戏启动时消费标记）："Roslyn"（C# 13，需前置包 UE.Roslyn）或 "Mono.CSharp"。'
+            + '不传 ⇒ 按模组设置（模组设置界面里的「C# 控制台编译器」）走，并清掉可能残留的覆盖标记。'
+            + '别名：roslyn / mcs / monocsharp；参数名兼容 compiler。只对 start_game（新起进程）有效——start_quick_test 时进程已在运行，改不了已选定的编译器。'
         }
       }
     }
@@ -2928,6 +2981,13 @@ const TOOL_PRECONDITION = {
 
 // 易错点与调用示例（运行时实测积累）
 const TOOL_USAGE_NOTES = {
+  start_game: {
+    example: '{ "csharpConsole": "Mono.CSharp" }',
+    notes: 'csharpConsole 覆盖**本次**启动的 C# 控制台编译器（"Roslyn" / "Mono.CSharp"，别名 roslyn / mcs；参数名兼容 compiler）：'
+      + '写一次性标记 MCP/.launch-compiler，游戏侧启动时读取并删除 ⇒ 只影响这一次；不传则清掉残留标记、按模组设置走。'
+      + '非法值直接报错拒绝（不静默回退）。模组设置里那一项改动需要重启游戏才生效；'
+      + 'start_quick_test 时进程已在运行、编译器早已选定，故本参数只对 start_game 有效。'
+  },
   get_colonist_detailed: { example: '{ "id": 123 }', notes: '参数为 id（殖民者ID），不是 pawn_id；兼容 pawn_id/pawnId/colonist_id 别名；id 可传 "Thing_Human737" 字符串，自动提取数字 id' },
   get_colonists_detailed: { example: '{}', notes: '返回全部殖民者详细信息（v2 端点）' },
   search_debug_actions: { example: '{ "query": "Spawn" }', notes: '参数为 query（子串匹配）；也兼容 keyword 别名' },
@@ -4355,6 +4415,12 @@ async function handleToolCall(name, args) {
   switch (name) {
     case 'start_game': {
       const timeout = args?.timeout ?? config.startTimeout ?? 180000;
+      // C# 控制台编译器覆盖（覆盖菜单/模组设置里那一项，仅本次启动）：非法值**报错拒绝**，不静默忽略。
+      const compiler = normalizeLaunchCompiler(args?.csharpConsole ?? args?.compiler);
+      if (compiler.error) {
+        return contentErrorResponse('INVALID_ARGUMENT', compiler.error);
+      }
+      const marker = writeLaunchCompilerMarker(compiler.token);
       const result = await startGame(args?.useSteam ?? true, args?.waitForNotification ?? true, timeout);
       dpaRoundActive = false;   // 新会话：DPA 插桩/profiling 状态随旧进程消失（§5 记账清零）
       if (result && result.success) {
@@ -4362,6 +4428,17 @@ async function handleToolCall(name, args) {
         // 失败无妨——后续工具调用仍会惰性重连）。RimBridgeServer 启动约 65s 延迟，
         // 此刻可能尚未 discover 到，属正常。
         if (gabpBridge) { try { void gabpBridge.ensureConnected(); } catch (e) { log('WARN', `GABP ensureConnected 异常: ${e.message}`); } }
+      }
+      if (result && typeof result === 'object') {
+        // 如实回报本次的编译器口径（含"标记写失败 ⇒ 其实没覆盖上"），便于调用方自证
+        result.csharpConsole = {
+          ...marker,
+          note: marker.error
+            ? `覆盖标记写入失败（${marker.error}）⇒ 本次仍按模组设置走，请检查 MCP 目录写权限`
+            : (marker.written
+              ? `已请求本次启动使用 ${marker.requested}（覆盖模组设置；游戏侧启动时消费一次标记）`
+              : '未指定 ⇒ 按模组设置/UE 配置项走（已清掉可能残留的覆盖标记）')
+        };
       }
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
@@ -5440,6 +5517,9 @@ export {
   // 2026-09-20 计数口径修复：菜单/计数单一事实源，供一致性测试直接断言
   allToolNames,
   menuUniverseNames,
+  // start_game 的 csharpConsole 覆盖（口径归一 + 标记文件读写）：纯逻辑/文件操作，供单测直接断言
+  normalizeLaunchCompiler,
+  writeLaunchCompilerMarker,
 };
 
 // 测试钩子：仅供集成测试使用，生产路径不依赖。

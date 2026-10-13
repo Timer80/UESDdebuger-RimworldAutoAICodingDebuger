@@ -55,3 +55,31 @@ Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/*
 /_poc_roslyn/*.pdb
 /temp/
 /runtime/McpRimDebug/*.pdb
+
+# 长任务采样数据与日志（体量随运行时间增长，不入库）
+docs/dpa/samples/
+docs/dpa/tasks/
+
+# 长任务旁观报告（运行产物）
+docs/dpa/watch-*.json
+
+# ---------------------------------------------------------------- Unity 工程（ShaderProject）
+# 背景：ShaderProject/Library/ 有 7800+ 文件、约 110 MB，此前既未入库也未忽略 ——
+# 一次 `git add -A` 会把整个 Unity 生成物灌进仓库（实测 7887 个待添加条目里 7869 个来自这里）。
+# 这里只忽略 **Unity 生成物与中间产物**，手写资产（Assets/Shader/*、ProjectSettings/、Packages/）
+# 保持可见，是否入库由发布策略决定。
+ShaderProject/Library/
+ShaderProject/Logs/
+ShaderProject/Temp/
+ShaderProject/obj/
+ShaderProject/UserSettings/
+ShaderProject/Build/
+ShaderProject/Builds/
+ShaderProject/.vs/
+ShaderProject/*.csproj
+ShaderProject/*.sln
+ShaderProject/*.user
+ShaderProject/*.log
+ShaderProject/*.unitypackage
+# 打包中间产物（权威产物是模组根的 AssetBundles/uecoordcursor，由打包脚本自动部署过去）
+ShaderProject/Assets/AssetBundles/

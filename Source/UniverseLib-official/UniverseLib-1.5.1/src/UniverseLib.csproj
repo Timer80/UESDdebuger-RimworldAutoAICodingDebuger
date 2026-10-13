@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <Configuration Condition=" '$(Configuration)' == '' ">Release_IL2CPP</Configuration>
         <OutputType>Library</OutputType>
@@ -32,7 +32,7 @@
         <DocumentationFile>..\Release\UniverseLib.Il2Cpp.Interop\UniverseLib.IL2CPP.Interop.xml</DocumentationFile>
     </PropertyGroup>
     <PropertyGroup Condition=" '$(Configuration)' == 'Release_Mono' ">
-        <TargetFramework>net35</TargetFramework>
+        <TargetFramework>net472</TargetFramework>
         <OutputPath>..\Release\UniverseLib.Mono\</OutputPath>
         <DefineConstants>MONO</DefineConstants>
         <AssemblyName>UniverseLib.Mono</AssemblyName>
@@ -40,8 +40,8 @@
     </PropertyGroup>
     <!-- NuGet -->
     <ItemGroup>
-        <!-- UESDdebuger recompile: HarmonyX 2.5.2 -> Lib.Harmony 2.3.3 (brrainz.harmony runtime surface) -->
-        <PackageReference Include="Lib.Harmony" Version="2.3.3" IncludeAssets="compile" />
+        <!-- UESDdebuger recompile: HarmonyX 2.5.2 -> brrainz.harmony 2.4.1. net35 cannot reference a net472 assembly, so Release_Mono is retargeted to net472 to match the game runtime. -->
+        <Reference Include="0Harmony" Condition="'$(Configuration)' == 'Release_Mono'"><HintPath>..\..\lib-0Harmony-brrainz-2.4.1.dll</HintPath><Private>false</Private></Reference>
         <PackageReference Include="UniverseLib.Analyzers" Version="1.0.4" IncludeAssets="compile" />
     </ItemGroup>
     <ItemGroup Condition="'$(Configuration)' == 'Release_IL2CPP_Unhollower'">

@@ -80,8 +80,8 @@
 
     <!-- ~~~~~ NUGET ~~~~~ -->
     <ItemGroup>
-        <!-- UESDdebuger recompile: HarmonyX 2.5.2 -> Lib.Harmony 2.3.3 (brrainz.harmony runtime surface) -->
-        <PackageReference Include="Lib.Harmony" Version="2.3.3" IncludeAssets="compile" />
+        <!-- UESDdebuger recompile: HarmonyX 2.5.2 -> brrainz.harmony 2.4.1 (vendored workshop copy; Mono binds by EXACT version, so the typeref must equal the runtime version exactly. See Source/scripts/assert-harmony-version.ps1) -->
+        <Reference Include="0Harmony"><HintPath>..\lib\0Harmony-brrainz-2.4.1.dll</HintPath><Private>false</Private></Reference>
         <PackageReference Include="Samboy063.Tomlet" Version="3.1.3" />
     </ItemGroup>
     <!-- il2cpp nuget -->
@@ -97,7 +97,7 @@
     <!-- mono nuget -->
     <ItemGroup Condition="'$(Configuration)'=='BIE6_Mono' or '$(Configuration)'=='BIE5_Mono' or '$(Configuration)'=='ML_Mono' or '$(Configuration)'=='STANDALONE_Mono'">
         <!-- UESDdebuger recompile: UniverseLib.Mono 1.5.1 NuGet (compiled against HarmonyX 2.5.2)
-             -> local recompiled UniverseLib.Mono.dll (compiled against Lib.Harmony 2.3.3) -->
+             -> local recompiled UniverseLib.Mono.dll (compiled against brrainz 2.4.1) -->
         <Reference Include="UniverseLib.Mono">
             <HintPath>..\..\..\UniverseLib-official\UniverseLib-1.5.1\Release\UniverseLib.Mono\UniverseLib.Mono.dll</HintPath>
             <Private>True</Private>

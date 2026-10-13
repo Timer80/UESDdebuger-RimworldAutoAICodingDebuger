@@ -59,12 +59,28 @@ namespace UnityExplorer.RoslynBridge
         public static string Describe(ConsoleCompiler compiler)
             => compiler == ConsoleCompiler.Roslyn ? RoslynName : MonoCSharpName;
 
-        /// <summary>`packageId` 是否就是前置包（**大小写不敏感**：RimWorld 侧实存是小写 `ue.roslyn`，
-        /// 而 About.xml/文档里写 `UE.Roslyn`，两处都必须判中）。空/空白 ⇒ false。</summary>
+        /// <summary>
+        /// `packageId` 是否就是前置包（**大小写不敏感**）。
+        ///
+        /// 判中范围 = <see cref="RoslynFrontGate.FrontPackageId"/> + 其别名表
+        /// （<see cref="RoslynFrontGate.FrontPackageIdAliases"/>，当前含工坊版 `ue.roslyn_steam`）。
+        /// 大小写不敏感；额外去首尾空白与 BOM（与 <see cref="ParseLaunchOverride"/> 同口径，
+        /// 防手抄 / 编辑器带入不可见字符）。空/空白 ⇒ false。
+        /// </summary>
         public static bool IsFrontPackageId(string packageId)
         {
             if (string.IsNullOrEmpty(packageId)) return false;
-            return string.Equals(packageId.Trim(), RoslynFrontGate.FrontPackageId, StringComparison.OrdinalIgnoreCase);
+            string id = packageId.Trim().Trim('\uFEFF').Trim();
+            if (string.Equals(id, RoslynFrontGate.FrontPackageId, StringComparison.OrdinalIgnoreCase)) return true;
+            string[] aliases = RoslynFrontGate.FrontPackageIdAliases;
+            if (aliases != null)
+            {
+                for (int i = 0; i < aliases.Length; i++)
+                {
+                    if (string.Equals(id, aliases[i], StringComparison.OrdinalIgnoreCase)) return true;
+                }
+            }
+            return false;
         }
 
         /// <summary>

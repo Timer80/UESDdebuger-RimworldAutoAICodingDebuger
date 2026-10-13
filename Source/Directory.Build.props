@@ -22,6 +22,19 @@
     <Error Condition="!Exists('$(RimWorldManagedDir)\Assembly-CSharp.dll')"
            Text="RimWorld 未找到：$(RimWorldManagedDir)。请设 -p:RimWorldGameDir=&lt;游戏根&gt; 或环境变量 RIMWORLD_GAME_DIR。" />
     <Error Condition="!Exists('$(HarmonyRefDir)\0Harmony.dll')"
-           Text="编译用 0Harmony 副本缺失：$(HarmonyRefDir)\0Harmony.dll（应 vendor brrainz v2.3.3，勿用 UE 自带 v2.5.2）。" />
+           Text="编译用 0Harmony 副本缺失：$(HarmonyRefDir)\0Harmony.dll（应 vendor brrainz Current 槽位 v2.4.1，勿用 UE 自带 v2.5.2）。" />
   </Target>
+
+
+
+  <!-- 版本守卫（2026-10-13 新增，源于启动即崩的 TypeLoadException）：
+       Mono 程序集绑定是精确版本匹配，编译期写进 typeref 的 0Harmony 版本必须
+       恒等于 brrainz 运行面版本，否则 Verse.StaticConstructorOnStartupUtility.
+       ReportProbablyMissingAttributes 的 GetFields() 扫描会把整个类型解析炸掉。
+       在构建期挡下漂移，而不是等玩家启动游戏才发现。 -->
+  <Target Name="GuardHarmonyVersion" AfterTargets="Build" Condition="'$(MSBuildProjectName)'=='UELoader'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\scripts\assert-harmony-version.ps1&quot; -VendorAssembly &quot;$(HarmonyRefDir)\0Harmony.dll&quot; -ExpectedVersion &quot;2.4.1.0&quot;"
+          ContinueOnError="false" />
+  </Target>
+
 </Project>

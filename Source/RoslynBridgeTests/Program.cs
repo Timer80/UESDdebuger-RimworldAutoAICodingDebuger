@@ -1336,6 +1336,19 @@ namespace RoslynBridgeTests
                 && !StartupCompilerPreference.IsFrontPackageId("ludeon.rimworld")
                 && !StartupCompilerPreference.IsFrontPackageId(null));
 
+            // 2026-10-13：工坊版前置包（Workshop 3817685478）packageId 是 ue.roslyn_steam，
+            // 与本地包 UE.Roslyn 功能等价但 id 不同 ⇒ 必须同样判为"前置包在场"，
+            // 否则载荷明明加载成功、控制台却降级 mcs（拿不到 C# 12/13 语法）。
+            Check("启动偏好：工坊版前置包 id（ue.roslyn_steam）也算前置在场（大小写/空白不敏感）",
+                StartupCompilerPreference.IsFrontPackageId("ue.roslyn_steam")
+                && StartupCompilerPreference.IsFrontPackageId(" UE.Roslyn_Steam ")
+                && StartupCompilerPreference.IsFrontPackageId("\uFEFFue.roslyn_steam"));
+            Check("启动偏好：别名不误伤——相似但不相等的 id 仍判 false",
+                !StartupCompilerPreference.IsFrontPackageId("ue.roslyn_steam2")
+                && !StartupCompilerPreference.IsFrontPackageId("ue.roslyn_stea")
+                && !StartupCompilerPreference.IsFrontPackageId("roslyn_steam")
+                && !StartupCompilerPreference.IsFrontPackageId("xue.roslyn_steam"));
+
             // ── ① 没有前置 ⇒ 用 Mono.CSharp；隐藏位清空；**设置项保留原值** ──
             StartupCompilerDecision noFront = StartupCompilerPreference.Resolve(null, false, true, true);
             Check("启动偏好：无前置 ⇒ 本次用 Mono.CSharp（设置项写 Roslyn 也照降），隐藏位被清空",
@@ -2826,7 +2839,7 @@ namespace RoslynBridgeTests
         /// <summary>任务 13 §4.10-2（**上机 13-10 抓到的缺口**）：命名空间通道从"同简单名多份"里取件时
         /// **必须披露采用哪一份**——旧码这一路**零日志**，所以"补上了"根本不告诉你补的是哪一版
         ///（正是 dll 热重载"新版静默不生效"的病根）。用**仓库内两份同简单名、不同版本**的
-        /// `0Harmony.dll`（`Source\UELoader\lib` = 2.3.3.0 ／ `UnityEditorPackage\Runtime` = 2.5.2.0）
+        /// `0Harmony.dll`（`Source\UELoader\lib` = 2.4.1.0 ／ `UnityEditorPackage\Runtime` = 2.5.2.0）
         /// 驱动纯判定函数；同身份副本必须**不报**（零噪声）。</summary>
         static void TestSameStemAdoptionDisclosure()
         {
@@ -2855,14 +2868,14 @@ namespace RoslynBridgeTests
                 msg != null && msg.Contains("采用=") && msg.Contains("未采用") && msg.Contains("原因="),
                 msg ?? "<null>");
             Check("⑪ 披露文本含两份路径与各自版本（采用哪版可观测）",
-                msg != null && msg.Contains("0Harmony.dll") && msg.Contains("2.3.3") && msg.Contains("2.5.2"),
+                msg != null && msg.Contains("0Harmony.dll") && msg.Contains("2.4.1") && msg.Contains("2.5.2"),
                 msg ?? "<null>");
         }
 
         /// <summary>任务 15d：同简单名多份的**按编译器策略选版本 + 两路统一披露**（人类裁定："有 Roslyn 的情况下用
         /// 全版（较新），没有 Roslyn 只有 mcs 用旧版"）。四组断言：①纯逻辑同一候选集在 Newest/Oldest 下选出不同项、
         /// 且披露三要素齐全；②单份／同身份副本 ⇒ 不产出披露（零噪声）；③Roslyn 侧真实两份 `Newtonsoft.Json`
-        /// （4.5.0.0 ／ 13.0.0.0）在 Roslyn 偏好下选 **13.0**（另有仓库内 0Harmony 2.3.3／2.5.2 对做端到端）；
+        /// （4.5.0.0 ／ 13.0.0.0）在 Roslyn 偏好下选 **13.0**（另有仓库内 0Harmony 2.4.1／2.5.2 对做端到端）；
         /// ④mcs 侧同一候选集在 mcs 偏好下选 **4.5**（注册表取件 + 命名空间探针 + 一轮自愈端到端）。
         /// **不做自动换版重试**：策略只决定这一轮采用哪一份，编不过也不换另一份（逃生门 = 关掉 Use Roslyn）。</summary>
         static void TestSameStemCompilerPolicy()

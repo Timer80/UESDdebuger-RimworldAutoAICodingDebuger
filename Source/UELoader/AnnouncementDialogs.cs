@@ -480,7 +480,14 @@ namespace UELoader
                 contentHeight += 30f + h + 20f; // 版本标题行 + 正文 + 段间距
             }
 
-            Rect outRect = new Rect(x, y, w, inRect.yMax - y - 12f);
+            // 基类把关闭按钮画在窗口坐标 `rect.height - 55f` 处（尺寸 CloseButSize = 120x40，
+            // 见 Verse.Window.InnerWindowOnGUI），且画在本方法内容**之后**；而本方法收到的是
+            // `ContractedBy(Margin)` 后的 Zero 矩形 ⇒ 换算到本方法局部坐标，按钮顶边 =
+            // `inRect.yMax + Margin - 55f`。ScrollView 会裁剪并向内吞掉事件，故必须为它留出
+            // 底部空间，否则按钮可见却点不动（点击被 ScrollView 吃掉）。
+            const float BaseCloseButtonTopFromBottom = 55f;  // Verse.Window.InnerWindowOnGUI 硬编码
+            float reservedBottom = BaseCloseButtonTopFromBottom - Margin + 8f;  // +8px 间隙
+            Rect outRect = new Rect(x, y, w, inRect.yMax - y - reservedBottom);
             Rect viewRect = new Rect(0f, 0f, w - 16f, contentHeight);
             Widgets.BeginScrollView(outRect, ref scrollPosition, viewRect);
 

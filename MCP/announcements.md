@@ -4,6 +4,15 @@
 > 显示规则：仅展示 `原版本 < 段版本 <= 当前模组版本` 的段落（从新到旧）。
 > 新增版本段时在文件**最上方**插入，并同步递增 `About/About.xml` 的 `<modVersion>`。
 
+### 0.9.0.2
+- **项目废弃 / 停止维护**：RimWorld 1.7 已更换底层引擎与运行时（自研 Waylith 引擎 + Brutal.Vulkan 渲染器 + WaylithClr 托管运行时，Unity 整体移除）。本模组的技术栈建立在此之上（Unity/Mono/IL 重写），在 1.7 上无法继续工作，故本版本为 1.6 线的**最终版本**，不再更新 1.7 及以后版本。
+- **后续开发与本项目无关**：我仍会继续开发 RimWorld 调试工具，但那是**全新项目**（另有模组 ID，另起包名），**不是**在本项目基础上继续演进。请勿把新版与 UESDdebuger 视为同一条线，也不要再基于本包提交 issue 或反馈——本包已冻结，不会再有回应。
+- C# 控制台编译器升级：由内置 Roslyn 改为**前置包提供**（packageId `UE.Roslyn`，C# 13）。本模组不再分发 Roslyn 载荷。
+- C# 控制台支持 C# 12 / C# 13 新语法特性：`record`、`init`、`required` 成员、原始字符串、集合表达式、`params` 集合、`ref readonly`、模式匹配增强等（此前仅到 C# 8）。
+- 引用自愈（引用缺失自动补齐）：控制台可诊断缺失引用并自动补全，支持 Unity 模块与第三方模组程序集的自愈引用。
+- 符号 / 命名空间探针：按已加载程序集的命名空间树精确定位缺失引用，避免同简单名程序集选错。
+- 启动编译器选择策略：优先 Roslyn，未检测到前置包时降级为 Mono.CSharp（界面不提供选择），支持 `start_game` 按次覆盖。
+- 修复启动报错：修正编译期引用的 Harmony 版本与前置包 `brrainz.harmony` 运行版本不一致导致的 `TypeLoadException`（字段签名解析失败）；同时将 `UniverseLib.Mono` 目标框架由 net35 升至 net472 以匹配游戏运行时。新增构建期版本守卫，版本漂移会在编译阶段直接报错，不再等玩家启动游戏才发现。
 ### 0.9.0.1
 - 新增 `post_map_marker`（地图坐标光标）：让AI 从报坐标数字变成展示地图上一眼可见的准星
 - 修复dpa工具：`task_status` / `task_cancel` / `task_configure`——配合 `rimworld.play_for{nonBlocking:true}` 做 10 分钟以上的后台性能采样，秒级返回 `taskId`，可中途改采样节奏（采样压到 1 s 时快照自动联动压到 10 s）、可随时取消，采样点全部输出到 `docs/dpa/samples/<runId>.jsonl`、生命周期写入 `docs/dpa/tasks/<runId>.journal.jsonl`。

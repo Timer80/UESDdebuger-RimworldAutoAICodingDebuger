@@ -35,9 +35,34 @@ UE_Data/sinai-dev-UnityExplorer/logs/
 # Release builds
 Source/UE-4.9.0-official/UnityExplorer-4.9.0/Release/
 
-# Third-party source bundled DLLs
+# 构建期 vendor 的 0Harmony 副本（brrainz.harmony Current 槽位 v2.4.1）。
+# 必须入库：三个 csproj 都靠它编译，且 Mono 精确版本绑定要求它与运行面**完全一致**。
+# 上面的 lib/ 忽略规则会把本文件一并吞掉，故显式放行。
+!Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/
+# 构建期 vendor 的 0Harmony 副本（brrainz.harmony Current 槽位 v2.4.1）。
+# 必须入库：三个 csproj 都靠它编译，且 Mono 精确版本绑定要求它与运行面完全一致。
+!Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/
+Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/*
+!Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/0Harmony-brrainz-*.dll
+Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/
+# 构建期 vendor 的 0Harmony 副本（brrainz.harmony Current 槽位 v2.4.1）。
+# 必须入库：三个 csproj 都靠它编译，且 Mono 精确版本绑定要求它与运行面完全一致。
+!Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/
+Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/*
+!Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/0Harmony-brrainz-*.dll*
+!Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/
+# 构建期 vendor 的 0Harmony 副本（brrainz.harmony Current 槽位 v2.4.1）。
+# 必须入库：三个 csproj 都靠它编译，且 Mono 精确版本绑定要求它与运行面完全一致。
+!Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/
+Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/*
+!Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/0Harmony-brrainz-*.dll0Harmony-brrainz-*.dll# Third-party source bundled DLLs
 Source/UniverseLib-official/UniverseLib-1.5.1/lib/
 Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/
+# 构建期 vendor 的 0Harmony 副本（brrainz.harmony Current 槽位 v2.4.1）。
+# 必须入库：三个 csproj 都靠它编译，且 Mono 精确版本绑定要求它与运行面完全一致。
+!Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/
+Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/*
+!Source/UE-4.9.0-official/UnityExplorer-4.9.0/lib/0Harmony-brrainz-*.dll
 Source/UE-4.9.0-official/UnityExplorer-4.9.0/UnityEditorPackage/Runtime/
 
 # Misc

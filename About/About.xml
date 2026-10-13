@@ -3,7 +3,7 @@
   <name>UESDdebuger - UnityExplorer + SDB Debug</name>
   <author>UESDdebuger</author>
   <packageId>UESDdebuger.debug.unityexplorer</packageId>
-  <modVersion>0.9.0.1</modVersion>
+  <modVersion>0.9.0.2</modVersion>
   <description>RimWorld debug toolkit: in-game UnityExplorer (F7) for inspecting objects, running C# and hooking methods, a local MCP server exposing 191 tools (process control, log reading, quick test map, C#/Hook, colony and map data queries, DebugAction, zone/selection, camera and video stream, map coordinate markers, long-running profiling tasks) that lets AI clients drive the game, and a Mono SDB code-level debugger with 20 tools (breakpoints, call stack, locals, stepping, eval, object inspection).
 调试工具链模组：游戏内 UnityExplorer（F7 检视对象、执行 C#、Hook 方法）+ 本地 MCP 服务器（191 个工具：进程控制、读日志、快速进测试地图、C#/Hook、殖民地与地图数据查询、DebugAction、区域/选中、相机与视频流、地图坐标光标、长任务性能采样），让 AI 客户端直接驱动游戏 + Mono SDB 代码级调试器（20 个工具：断点、调用栈、局部变量、单步、求值、对象检查）。
 前置依赖：C# 控制台的 Roslyn（C# 13）编译器由前置包 Roslyn（packageId UE.Roslyn）提供——本模组不再内置 Roslyn 载荷。不装该前置包时控制台仍完全可用，但会自动降级为旧版 mcs 编译器（无 C# 13 语法）。
@@ -21,8 +21,14 @@ Portions of the materials used to create this content/mod are trademarks and/or 
     <li>UE.Roslyn</li>
   </loadAfter>
   <modDependencies>
-    <!-- Roslyn 前置依赖包（本地包 Mods\Roslyn，packageId 见其 About.xml）。
-         不装它本模组仍可运行：C# 控制台自动降级为 mcs（无 C# 13 语法）。 -->
+    <!-- Roslyn 前置依赖包。不装它本模组仍可运行：C# 控制台自动降级为 mcs（无 C# 13 语法）。
+         2026-10-13：同一前置包有两条分发渠道，packageId 不同，本模组**都认**：
+           · 本地包 Mods\Roslyn          -> UE.Roslyn       （此处声明，RimWorld 按此启用）
+           · Steam Workshop 3817685478  -> ue.roslyn_steam （代码侧别名兼容，见
+                                              Source/.../RoslynFrontGate.FrontPackageIdAliases）
+         两者提供的门面类型都是 Roslyn.RoslynLoader、载荷同为 8 件，功能等价。
+         注意：RimWorld 的 modDependencies 只认一个 packageId，故工坊版需玩家自行在
+         模组列表里启用；代码侧的前置包判据已兼容两者，不会因 id 不同而误降级。 -->
     <li>
       <packageId>UE.Roslyn</packageId>
       <displayName>Roslyn</displayName>

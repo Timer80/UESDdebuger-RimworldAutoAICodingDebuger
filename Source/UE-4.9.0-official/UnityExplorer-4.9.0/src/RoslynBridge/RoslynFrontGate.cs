@@ -35,6 +35,26 @@ namespace UnityExplorer.RoslynBridge
         /// <summary>前置包 packageId（与 `Mods\Roslyn\About\About.xml` 的 &lt;packageId&gt; 一致；勿改字面）。</summary>
         public const string FrontPackageId = "UE.Roslyn";
 
+        /// <summary>
+        /// 前置包 packageId 别名表（**除 <see cref="FrontPackageId"/> 外的等价 id**，同样大小写不敏感）。
+        ///
+        /// 背景（2026-10-13）：同一个前置包存在两份分发渠道，packageId 不同：
+        ///   · 本地包 `Mods\Roslyn`            -> `UE.Roslyn`
+        ///   · Steam Workshop 3817685478     -> `ue.roslyn_steam`
+        /// 两者提供的门面类型都是 `Roslyn.RoslynLoader`，载荷同为 8 件，功能等价。
+        ///
+        /// 但 UELoader 侧的编译器决策走 `ModsConfig.ActiveModsInLoadOrder` 的 packageId 判据，
+        /// 遇到 `ue.roslyn_steam` 会判成"无前置"并降级 mcs；而 UE 侧载荷门走已载程序集扫描，
+        /// 反而认得。两套判据不一致 ⇒ 载荷明明加载成功，控制台却跑旧编译器，拿不到 C# 12/13 语法。
+        ///
+        /// 故在此登记别名，使两套判据对"前置包在场"给出一致结论。
+        /// 新增分发渠道时在此追加，不要改判据实现。
+        /// </summary>
+        public static readonly string[] FrontPackageIdAliases =
+        {
+            "ue.roslyn_steam",
+        };
+
         /// <summary>入口类型全名。**只以字符串存在**（零 typeref）；前置包以常量形式公布同一串。</summary>
         public const string EntryTypeName = "Roslyn.RoslynLoader";
 
